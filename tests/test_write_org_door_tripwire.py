@@ -17,8 +17,9 @@ Two checks, because each covers what the other cannot:
     `write_org`. Plus the two door-off-only branches: the legacy seat_id
     mint and the op-epoch preflight.
 
-PENDING lists the verbs that still reach it with the door on, each with the
-stream that is converting it. Remove an entry when its conversion lands.
+Every agent verb is now on the door (ws3b S3 moved cheap_compact and
+switch_model, ws3a PG-3a moved staff's rehire mode), so NO verb may reach it:
+the expected set is empty, and a new entry needs a ruling on the item first.
 """
 import ast
 import os
@@ -45,11 +46,8 @@ U = ledger.USER
 T = {'bash': False, 'web': False, 'edit': False, 'subagents': False, 'mcp': []}
 
 #: verb (or verb:mode) -> the stream converting it off the legacy cycle
-PENDING = {
-    'orgtree_cheap_compact': 'ws3b S3 (9a7d443, in review)',
-    'orgtree_switch_model': 'ws3b S3 (next slice)',
-    'orgtree_staff:rehire': 'ws3a PG-3a (staffdoor _staff_on_door: hire only)',
-}
+#: verbs allowed to reach write_org with the door on: none, since S3 and PG-3a
+PENDING: dict[str, str] = {}
 
 #: never driven: process-level side effects (restart/relaunch the backend).
 #: Each must be ROUTED on the door, which the test asserts instead.
