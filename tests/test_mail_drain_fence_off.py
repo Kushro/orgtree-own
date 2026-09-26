@@ -125,18 +125,19 @@ class LockedGate(Base):
         reclaim transaction locks it. It must not be admitted, its demand
         must be untouched, and it must stay tracked for the retry."""
         self.post()
-        snap = orgtx.org_read(self.slug)
+        # recover's lock-free read is the shared snapshot (scale slice A)
+        snap = copy.deepcopy(store.cached_org(self.slug))
         with orgtx.org_tx(self.slug, nodes=['worker']) as tx:
             tx.org.node('worker')['frozen'] = True
         before = self.demand()
         maildrain._track(self.slug, 'worker')
-        real = orgtx.org_read
+        real = store.cached_org
         calls = []
 
         def read(slug):
             calls.append(slug)
-            return copy.deepcopy(snap) if len(calls) == 1 else real(slug)
-        with patch.object(orgtx, 'org_read', side_effect=read):
+            return snap if len(calls) == 1 else real(slug)
+        with patch.object(store, 'cached_org', side_effect=read):
             self.assertFalse(maildrain.recover(self.slug, 'worker'))
         self.assertEqual(calls[:1], [self.slug], 'the snapshot was never served')
         self.assertEqual(self.started, [], 'a frozen seat was admitted')

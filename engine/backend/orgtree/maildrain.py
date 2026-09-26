@@ -206,9 +206,13 @@ def recover(slug: str, nid: str) -> bool:
     the failed-admission deferral); each is now its own row transaction, and
     the fold and the settle stay ONE. The durable gate is decided on a
     lock-free read first and re-decided inside the reclaim transaction."""
-    from . import halt, orgtx, supervisor as sup
+    from . import halt, supervisor as sup
     global _discovery_needed
-    org = orgtx.org_read(slug)
+    # Scale slice A: the shared seq-gated snapshot (a dict lookup while the
+    # org is unchanged), never a fresh full load per seat per tick. It is
+    # READ-ONLY: every decision below is re-made under the lock (the reclaim
+    # transaction, `_write_demand`), and nothing here writes to `org`.
+    org = store.cached_org(slug)
     n = org.nodes.get(nid)
     if n is None:
         # A renamed seat carries its marker under the new name.
