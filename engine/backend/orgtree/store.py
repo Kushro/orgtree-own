@@ -2761,6 +2761,44 @@ def _load_section(slug: str, sect: str, snap_logs: dict[str, Any]) -> Any:
         return al
 
 
+#: S-A (pg-per-call-cost): `_load_lazy`'s existence probes in ONE statement.
+#: One `SELECT <i> WHERE EXISTS (...)` term per log section, joined by UNION
+#: ALL: each term stops at its first row (the old `LIMIT 1` probe, same index),
+#: and the integer literal names the section by its position in
+#: `_PROBE_SECTS` (a literal, not a parameter: PostgreSQL cannot type a bare
+#: `SELECT $1`). Portable across SQLite and PostgreSQL.
+_PROBE_SECTS: tuple[str, ...] = DICT_LOGS + LIST_LOGS
+_PRESENCE_SQL: str = " UNION ALL ".join(
+    [f"SELECT {i} WHERE EXISTS (SELECT 1 FROM log_d WHERE sect=?)"
+     for i in range(len(DICT_LOGS))]
+    + [f"SELECT {len(DICT_LOGS) + j} WHERE EXISTS (SELECT 1 FROM log_l WHERE sect=?)"
+       for j in range(len(LIST_LOGS))])
+#: ...and the meta rows a load reads, in one `IN (...)` read
+_LOAD_META_KEYS: tuple[str, ...] = ((_META_KEY_ORDER, "schema_version")
+                                    + tuple(_META_OWNERS + s for s in DICT_LOGS))
+_LOAD_META_SQL: str = ("SELECT key, val FROM meta WHERE key IN ("
+                       + ",".join("?" * len(_LOAD_META_KEYS)) + ")")
+
+
+def _load_probes(conn: sqlite3.Connection) -> tuple[str | None, str | None, set[str]]:
+    """(key order, schema_version, present log sections) in TWO statements.
+
+    Exactly what the per-section probes answered (on PostgreSQL each was a
+    round trip, about 35 per load): a dict log is present when it has a row
+    or an owners meta row with a non-NULL value (`_meta_get(...) is not
+    None`), a list log when it has a row. Run inside the caller's
+    transaction, so the answer is the same snapshot as before."""
+    metas: dict[str, Any] = {cast(str, k): v for k, v in
+                             conn.execute(_LOAD_META_SQL, _LOAD_META_KEYS).fetchall()}
+    hits = {_PROBE_SECTS[int(r[0])] for r in
+            conn.execute(_PRESENCE_SQL, _PROBE_SECTS).fetchall()}
+    present = {s for s in DICT_LOGS
+               if s in hits or metas.get(_META_OWNERS + s) is not None}
+    present.update(s for s in LIST_LOGS if s in hits)
+    return (cast("str | None", metas.get(_META_KEY_ORDER)),
+            cast("str | None", metas.get("schema_version")), present)
+
+
 def _load_lazy(conn: sqlite3.Connection, slug: str,
                preload: Iterable[str] = (), *, txn_open: bool = False) -> LazyDoc:
     """Load eager rows plus an optional coherent set of lazy sections.
@@ -2784,9 +2822,8 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
     if not txn_open:
         conn.execute("BEGIN")
     try:
-        raw_order = _meta_get(conn, _META_KEY_ORDER)
+        raw_order, schema_version, present = _load_probes(conn)
         key_order: list[str] = cast("list[str]", json.loads(raw_order)) if raw_order else []
-        schema_version = _meta_get(conn, "schema_version")
         # ⚠ fetchall() FIRST, comprehension SECOND — one C call per result
         # set. Iterating a live cursor from Python yields the GIL at every
         # row, and under concurrent Python-busy threads each yield costs a
@@ -2801,14 +2838,6 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
         doc_rows: dict[str, str] = {k: rows[k] for k, rows in grouped.items()}
         d._eager_bytes = (sum(len(v) for v in raw_doc.values())
                           + sum(len(v) for _, v in node_rows))
-        present: set[str] = set()
-        for sect in DICT_LOGS:
-            if conn.execute("SELECT 1 FROM log_d WHERE sect=? LIMIT 1", (sect,)).fetchone() \
-                    or _meta_get(conn, _META_OWNERS + sect) is not None:
-                present.add(sect)
-        for sect in LIST_LOGS:
-            if conn.execute("SELECT 1 FROM log_l WHERE sect=? LIMIT 1", (sect,)).fetchone():
-                present.add(sect)
         # A recorded key is present even when it has zero rows. Resolve this
         # before preloading so an empty selected section is frozen as empty,
         # rather than left for __missing__ to discover after another commit.
