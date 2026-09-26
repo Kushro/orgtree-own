@@ -134,7 +134,38 @@ def connect(conninfo: str | None = None) -> Any:
     explicit, as store.py's are). Never, from an agent, the live cluster."""
     target = conninfo or url()
     refuse_live_cluster(target)
-    return _psycopg().connect(target, autocommit=True)
+    raw = _psycopg().connect(target, autocommit=True)
+    raw._ot_path = None           # see "Session state" below
+    return raw
+
+
+# ----------------------------------------------------------------- session state
+#
+# S-B (pg-per-call-cost; p03-lead ruling (b)): a pooled checkout used to pay
+# two round trips, `SET search_path` on the way out and `RESET ALL` on the way
+# back. RESET ALL still runs on EVERY release, so review B3's guarantee
+# (nothing a checkout SETs reaches the next one) holds by construction; it is
+# sent together with a SET of the org the connection last named, in ONE round
+# trip, and the connection remembers that org (`_ot_path`). The next checkout
+# of the same org then skips its SET. The org is remembered only when the SET
+# ran outside a transaction (a ROLLBACK undoes one made inside), and is
+# forgotten when a statement fails.
+
+
+def _session(raw: Any, sql: str) -> None:
+    """Run a session statement of this module's own (tests spy on it)."""
+    raw.execute(sql)
+
+
+def _point_at(raw: Any, org_id: int) -> None:
+    """Make `raw`'s search_path name org_id's schema, skipping the round trip
+    when it already does."""
+    if getattr(raw, "_ot_path", None) == org_id:
+        return
+    raw._ot_path = None
+    _session(raw, f"SET search_path TO org_{int(org_id)}, public")
+    idle = raw.info.transaction_status == _psycopg().pq.TransactionStatus.IDLE
+    raw._ot_path = org_id if idle else None
 
 
 # ----------------------------------------------------------------- migrations
@@ -332,7 +363,7 @@ class PgConn:
         """Point the shared connection's search_path at this org's schema."""
         h = self.path_holder
         if h is not None and h[0] != self.org_id:
-            self.raw.execute(f"SET search_path TO org_{int(self.org_id)}, public")
+            _point_at(self.raw, self.org_id)
             h[0] = self.org_id
 
     @property
@@ -364,6 +395,7 @@ class PgConn:
             cur = self.raw.execute(st.sql, tuple(params) if params else None)
             rows: list[tuple[Any, ...]] = cur.fetchall() if cur.description else []
         except Exception as e:
+            self.raw._ot_path = None                 # session state unknown now
             if isinstance(e, _psycopg().Error):
                 raise _as_sqlite_error(e) from e
             raise
@@ -374,8 +406,27 @@ class PgConn:
         return _Cursor(rows if not st.returning else [], n, last)
 
     def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> _Cursor:
-        for params in seq:
-            self.execute(sql, params)
+        """One batched psycopg executemany (S-B), not a round trip per row."""
+        rows = [tuple(p) for p in seq]
+        st = translate(sql)
+        if st.kind != "sql":
+            for params in rows:
+                self.execute(sql, params)
+            return _EMPTY
+        if not rows:
+            return _EMPTY
+        try:
+            self.use()
+            with self.raw.cursor() as cur:
+                cur.executemany(st.sql, rows)
+                n = cur.rowcount if cur.rowcount is not None else -1
+        except Exception as e:
+            self.raw._ot_path = None
+            if isinstance(e, _psycopg().Error):
+                raise _as_sqlite_error(e) from e
+            raise
+        if n > 0 and not st.sql.lstrip().upper().startswith("SELECT"):
+            self.total_changes += n
         return _EMPTY
 
     def executescript(self, script: str) -> None:
@@ -399,8 +450,9 @@ class PgConn:
 
 # ----------------------------------------------------------------- orgs
 
-#: idle server connections shared by every org (search_path is set on each
-#: checkout). Bounded: beyond it a released connection is closed.
+#: idle server connections shared by every org (each checkout points the
+#: search_path at its org, skipping the SET when it already does — see
+#: "Session state"). Bounded: beyond it a released connection is closed.
 _IDLE_CAP = int(os.environ.get("ORGTREE_PG_POOL_IDLE", "8") or 8)
 _idle: list[tuple[str, Any]] = []
 _idle_lock = threading.Lock()
@@ -422,10 +474,18 @@ def _release(raw: Any) -> None:
     clean = (not raw.closed
              and raw.info.transaction_status == pq.TransactionStatus.IDLE)
     if clean:
+        path = getattr(raw, "_ot_path", None)
+        raw._ot_path = None
         try:
             # every session setting, not just search_path: nothing a checkout
-            # SET may reach the next one (review B3)
-            raw.execute("RESET ALL")
+            # SET may reach the next one (review B3). Then re-name the org the
+            # connection named, in the same round trip, so a checkout of that
+            # org again needs no SET of its own (see "Session state").
+            if path is None:
+                _session(raw, "RESET ALL")
+            else:
+                _session(raw, f"RESET ALL; SET search_path TO org_{int(path)}, public")
+                raw._ot_path = path
         except Exception:                                   # noqa: BLE001
             clean = False
     if clean:
@@ -646,7 +706,7 @@ def open_conn(slug: str, marker: str, *, create: bool = False) -> PgConn:
                     if again:
                         raw.execute("ROLLBACK")
                 if not again:
-                    raw.execute(f"SET search_path TO org_{int(org_id)}, public")
+                    _point_at(raw, org_id)
                     conn = PgConn(raw, slug, org_id)
             except BaseException:
                 lk.release()
@@ -664,7 +724,7 @@ def open_conn(slug: str, marker: str, *, create: bool = False) -> PgConn:
             conn.create_lock = lk
             return conn
         refuse_duplicate(slug, org_id)
-        raw.execute(f"SET search_path TO org_{int(org_id)}, public")
+        _point_at(raw, org_id)
         return PgConn(raw, slug, org_id)
     except BaseException:
         _release(raw)
