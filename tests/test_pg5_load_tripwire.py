@@ -5,11 +5,13 @@ legacy DOC_LOCK acquisition, no save outside an org_tx and no StaleWrite
 under load. pg5_load's child has no lifespan, so nothing armed the tripwire
 before this change and a zero would have meant nothing. These tests prove
 the child arms it and reports it: a legacy acquire PLANTED in the child's
-load phase is counted at the child's own site, an unplanted run carries no
-such site, and the gate refuses every way the report can say "not zero".
+load phase is counted exactly once at the plant's own line (nothing else in
+the child is at a pg5_load.py site), and the gate refuses every way the
+report can say "not zero".
 
-The two end-to-end runs use the sqlite arm only (no database needed), 8
-calls each, through the tool's own parent/child isolation.
+The one end-to-end run uses the sqlite arm only (no database needed), 8
+calls, through the tool's own parent/child isolation; its cost is the
+child's startup (about two minutes here), not the 8 calls.
 """
 from __future__ import annotations
 
@@ -27,14 +29,12 @@ sys.path[:0] = [str(REPO / "tools")]
 import pg5_load  # noqa: E402
 
 
-def _run(plant: bool) -> dict:
+def _run() -> dict:
     with tempfile.TemporaryDirectory(prefix="v3-pg5-tripwire-") as tmp:
         out = Path(tmp) / "load.json"
         cmd = [sys.executable, str(REPO / "tools" / "pg5_load.py"), "--arms", "sqlite",
                "--modes", "fixed-work", "--operations", "8", "--min-free-commit-gb", "0",
-               "--python", sys.executable, "--output", str(out)]
-        if plant:
-            cmd.append("--plant-legacy-doc-lock")
+               "--python", sys.executable, "--output", str(out), "--plant-legacy-doc-lock"]
         r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=600)
         if r.returncode:
@@ -49,11 +49,10 @@ def _own_sites(trip: dict) -> dict[str, int]:
 class TripwireEndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.planted = _run(plant=True)
-        cls.plain = _run(plant=False)
+        cls.planted = _run()
 
     def test_report_is_present_and_armed_in_count_mode(self) -> None:
-        for report in (self.planted, self.plain):
+        for report in (self.planted,):
             (arm,) = report["arms"]
             self.assertEqual(arm["store_backend"], "sqlite")
             for phase in ("setup", "load"):
@@ -70,20 +69,25 @@ class TripwireEndToEnd(unittest.TestCase):
     def test_a_planted_legacy_acquire_is_counted_at_its_site(self) -> None:
         trip = self.planted["arms"][0]["load"]["doc_lock_tripwire"]
         own = _own_sites(trip)
-        self.assertEqual(sum(own.values()), 1, f"planted acquire not counted once: {trip['sites']}")
+        self.assertEqual(list(own.values()), [1], f"planted acquire not counted once: {trip['sites']}")
+        (site,) = own
+        line = int(site.split(" <- ")[0].split(":")[2])
+        src = (REPO / "tools" / "pg5_load.py").read_text(encoding="utf-8").splitlines()
+        self.assertIn("with store.DOC_LOCK:", src[line - 1], site)
         self.assertGreaterEqual(trip["legacy_total"], 1)
 
-    def test_an_unplanted_run_has_no_such_site(self) -> None:
-        self.assertEqual(_own_sites(self.plain["arms"][0]["load"]["doc_lock_tripwire"]), {})
+    def test_the_setup_report_has_no_planted_site(self) -> None:
+        # the plant runs after the workloads: the setup phase must not show it
+        self.assertEqual(_own_sites(self.planted["arms"][0]["setup"]["doc_lock_tripwire"]), {})
 
     def test_the_load_report_does_not_carry_the_setup_events(self) -> None:
         # re-armed after the fixture: the load report counts load only
-        arm = self.plain["arms"][0]
+        arm = self.planted["arms"][0]
         self.assertGreater(arm["load"]["doc_lock_tripwire"]["armed_at"],
                            arm["setup"]["doc_lock_tripwire"]["armed_at"])
 
     def test_no_gate_is_claimed_without_a_postgres_arm(self) -> None:
-        self.assertIsNone(self.plain["fence_off_gate"])
+        self.assertIsNone(self.planted["fence_off_gate"])
 
 
 def _arm(**trip) -> dict:
