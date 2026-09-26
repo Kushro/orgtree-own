@@ -11,10 +11,16 @@ its drain demand. Then a halt lands while the worker unwinds — the inner
 `_fold_steer`) and its `wake()`, whose recovery pass the test runs where the
 sweeper would.
 
-  ORDER A — the unwind runs INSIDE the halt's first transaction: racekit holds
-  the halt at `after_lock` on the node row, the body returns, and the
-  recovery pass the unwind triggers is proven (lock manager) to wait on that
-  row. C1's turn finished before `halting` committed, so C1 is spent.
+  ORDER A — the unwind runs INSIDE the halt's first transaction, held at
+  `before_commit`: `_capture` has already read every S11 pending slot into
+  the transaction, then the worker retires C1's slot before the commit
+  (the interleaving pg-supervisor-a asked to pin). C1 must still be durable.
+  The recovery pass the unwind triggers is proven (lock manager) to wait on
+  the halt's node row.
+
+  ORDER A0 — the same, held at `after_lock`, before the capture runs: the
+  turn ends and drops C1's slot first, which is 'the turn ended, then the
+  halt', so C1 is spent and only C2 is retained.
 
   ORDER B — the unwind runs during the halt's SETTLE poll: `halting` has
   committed (C1 and C2 captured), then the body returns and the unwinding
@@ -162,27 +168,47 @@ class HaltDuringUnwind(unittest.TestCase):
                    for m in b.get('mail') or []]
         self.assertNotIn(self.mail['id'], journal, "C2's mail was journaled while halted")
 
-    # -- the two orders ------------------------------------------------------
-    def test_a_unwind_inside_the_halts_first_transaction(self):
+    # -- the orders ----------------------------------------------------------
+    def _unwind_inside_the_halt(self, point):
+        """Hold the halt's first transaction (begin) at `point` on the node
+        row, uncommitted; let the turn end so the whole unwind runs; run the
+        recovery its wake() asks for and prove it waits on that row."""
         th, c1, c2 = self.running_worker_with_a_queued_send()
         with racekit.Race(pair='converted') as race:
             h = race.actor('H', halt.halt, self.slug, NID)
             r = race.actor('R', maildrain.recover, self.slug, NID)
-            gh = race.hold(h, 'after_lock')
+            gh = race.hold(h, point)
             race.start(h)
             race.reached(gh)             # the halt holds the node row, uncommitted
             self.leave.set()             # the turn ends: the whole unwind runs now
             th.join(10)
             self.assertFalse(th.is_alive(), 'the unwind waited on the halt')
+            with sup._state_lock:
+                self.assertEqual(halt.pending_carriers(self.st), [],
+                                 'the unwinding worker kept its slot')
             race.start(r)                # the recovery the unwind's wake() asks for
             race.blocked(r)              # ... provably waits on the halt's row
             race.release(gh)
             race.join(h, r)
-            race.expect_order('H.after_lock', 'R.blocked', 'H.after_commit', 'R.after_lock')
+            race.expect_order(f'H.{point}', 'R.blocked', 'H.after_commit', 'R.after_lock')
         self.assertFalse(r.result, 'the recovery admitted a halted seat')
         maildrain.sweep()
-        # C1's turn ended before `halting` committed: spent, not retained
-        ids = self.check_halted(h.result, [c2])
+        return h.result, c1, c2
+
+    def test_a_slot_retired_between_the_capture_and_its_commit(self):
+        """ORDER A (pg-supervisor-a's S11 case): begin's `_capture` has read
+        every pending slot into the transaction; the worker retires C1's slot
+        before that transaction commits. C1 must still be durable, once."""
+        result, c1, c2 = self._unwind_inside_the_halt('before_commit')
+        ids = self.check_halted(result, [c1, c2])
+        self.check_unhalted(ids)
+
+    def test_a0_unwind_before_the_capture_runs(self):
+        """ORDER A0: the halt holds its row but has not captured yet; the
+        turn ends and drops C1's slot first. Linearized as 'the turn ended,
+        then the halt', so C1 is spent, not retained; C2 is captured once."""
+        result, c1, c2 = self._unwind_inside_the_halt('after_lock')
+        ids = self.check_halted(result, [c2])
         self.check_unhalted(ids)
 
     def test_b_unwind_during_the_settle_poll(self):
