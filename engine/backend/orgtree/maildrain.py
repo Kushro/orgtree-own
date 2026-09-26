@@ -173,6 +173,31 @@ def _waiting_carrier(st) -> bool:
                 and any(sup._carrier_is_ping(c) for c in st.get('queue') or []))
 
 
+def _nothing_to_do_while_busy(org, slug: str, nid: str, st) -> bool:
+    """Scale slice A: skip the reclaim transaction for a BUSY seat when the
+    lock-free snapshot shows it would change nothing that matters now.
+
+    Every sweep used to open `reclaim_orphans`' row transaction (a full org
+    load on SQLite and on PostgreSQL alike) and commit the `_settle` write for
+    every seat with outstanding mail, although a busy seat is never admitted
+    below. Only the fold is worth doing while a turn runs, and only when some
+    batch is eligible. So skip when the seat is busy, no reclaim intent or
+    publication wait needs the transaction's retry, and the snapshot has no
+    eligible token. Skipping decides nothing durable: the seat stays tracked
+    and the next sweep asks again, so a stale snapshot only delays a fold by
+    one tick; the demand is settled once the seat is free."""
+    from . import halt, mailruntime, supervisor as sup
+    with sup._state_lock:
+        if not (st.get('busy') or st.get('proc_control') or st.get('responding')
+                or halt._workers.get((slug, nid))):
+            return False
+        if st.get('mail_reclaim_intents') or st.get('mail_publication_wait'):
+            return False
+        facts = mailruntime.runtime_facts(st)
+    return not mailruntime.eligible_tokens(org, nid, facts, now=time.time(),
+                                           pump_toks=())
+
+
 def recover(slug: str, nid: str) -> bool:
     """One seat, one admission at most. Never take work from a live owner.
 
@@ -298,6 +323,8 @@ def recover(slug: str, nid: str) -> bool:
     # delivered by nobody. This function services that carrier below.
     # `now` comes from THIS module's clock so the drain hysteresis can
     # be exercised by the suite the same way the rest of the gate is.
+    if _nothing_to_do_while_busy(org, slug, nid, st):
+        return False                # stays tracked: the next sweep looks again
     # fence-off S2: the row branch (no `org=`) — ONE org_tx on the
     # seat's reclaim rows (its node row FOR UPDATE) plus GATE_SECTIONS FOR
     # SHARE, so the gate `_reclaim_blocked` re-decides on the locked Org
