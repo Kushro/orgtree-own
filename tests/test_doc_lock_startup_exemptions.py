@@ -85,6 +85,53 @@ class StartupExemptions(unittest.TestCase):
         rep = store.doc_lock_tripwire_report()
         self.assertEqual((rep['mode'], rep['total']), ('raise', 0))
 
+    def test_lifespan_reports_ready_only_after_migrations_and_arming(self) -> None:
+        # S9 (plan decision 44 (3)): "before serving". uvicorn accepts no
+        # connection until the app's lifespan answers startup.complete, and
+        # the admin server serves `api.app` itself (the public and bridge
+        # gateways swallow lifespan precisely so it runs once, here). So drive
+        # api.app's real ASGI lifespan and pin where startup.complete lands.
+        seen: list[str] = []
+
+        def migration(name: str):
+            return lambda: seen.append(name)
+
+        real_arm = store.arm_doc_lock_tripwire_from_env
+
+        def arm() -> str:
+            seen.append('tripwire_armed')
+            return real_arm()
+
+        async def lifespan() -> None:
+            inbox: asyncio.Queue = asyncio.Queue()
+            await inbox.put({'type': 'lifespan.startup'})
+
+            async def send(msg) -> None:
+                seen.append(msg['type'])
+                if msg['type'] == 'lifespan.startup.complete':
+                    await inbox.put({'type': 'lifespan.shutdown'})
+
+            await api.app({'type': 'lifespan', 'asgi': {'version': '3.0'}, 'state': {}},
+                          inbox.get, send)
+
+        saved = (store.on_save, supervisor.notify, supervisor.stream, supervisor.mail_spark)
+        try:
+            with patch.object(api, '_deployment_preflight', lambda: None), \
+                    patch.object(registry_migration, 'run_startup_migration',
+                                 migration('startup_migration')), \
+                    patch.object(registry_migration, 'run_apikey_cutover',
+                                 migration('apikey_cutover')), \
+                    patch.object(store, 'arm_doc_lock_tripwire_from_env', arm), \
+                    patch.object(startup.recovery, 'start', lambda _r: None):
+                asyncio.run(lifespan())
+        finally:
+            store.on_save, supervisor.notify, supervisor.stream, supervisor.mail_spark = saved
+        self.assertEqual(seen[:4], ['startup_migration', 'apikey_cutover',
+                                    'tripwire_armed', 'lifespan.startup.complete'], seen)
+        # and the admin listener serves the app whose lifespan that is (source pin)
+        import inspect
+        self.assertIn('uvicorn.Config(app, host=host, port=PORT)', inspect.getsource(api.main))
+
     def test_migrate_pending_runs_before_any_server_exists(self) -> None:
         import uvicorn
         events: list[str] = []

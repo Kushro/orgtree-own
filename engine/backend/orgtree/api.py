@@ -13139,6 +13139,19 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
                                      "archive_warnings": _archive_warnings,
                                      "renamed_to": _renamed_to,
                                      "rename_warnings": _rename_warnings})
+    if pgdoor.enabled():
+        # S9 (plan decision 44 (2)): with the door on every agent verb is
+        # routed (tests/test_write_org_door_tripwire.py), so a call that
+        # arrives here is one of the cycle's refusals. State it without
+        # DOC_LOCK, in the cycle's words. A declared verb left unrouted would
+        # still fall through to the cycle, and that tripwire fails on it.
+        if body.tool == "orgtree_staff":
+            try:
+                _staff_mode(a)
+            except LedgerError as e:
+                raise HTTPException(422, str(e)) from None
+        if body.tool not in pgdoor.LOCKS:
+            raise HTTPException(422, f"unknown orgtree tool {body.tool!r}")
     with _op_inflight(body), _entry_ledger_422(store.write_org(body.org)) as org:
         try:
             org.node(body.node)
@@ -15726,6 +15739,16 @@ def org_op(slug: str, body: Op, request: Request) -> dict[str, Any]:
                           harness=_hire_harness)
         if _archive_warnings and isinstance(result, dict):
             result.setdefault("warnings", []).extend(_archive_warnings)
+    elif pgdoor.enabled() and body.op not in pgdoor.LOCKS:
+        # S9 (plan decision 44 (2)): every operator op is declared on the door
+        # (tests/test_fence_s5_ops.py), so an undeclared one is the locked
+        # branch's refusal. State it without DOC_LOCK, in its words and order:
+        # a missing org is a 404 first.
+        try:
+            orgtx.org_read(slug)
+        except LedgerError as e:
+            raise HTTPException(404, str(e)) from None
+        raise HTTPException(422, f"unknown op {body.op!r}")
     else:
         with store.DOC_LOCK:
             result = _org_op_locked(slug, body, allow_raise=not pub,
