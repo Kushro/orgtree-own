@@ -491,7 +491,7 @@ class CodexInputEvidenceTests(unittest.TestCase):
     def test_a_manual_confirmation_does_not_spend_the_initial_ack_carrier(self):
         with patch.object(halt, 'consumed') as consumed:
             sup._confirm_delivered(self.slug, W, [])
-        consumed.assert_called_once_with(self.slug, W)
+        consumed.assert_called_once_with(self.slug, W, [])
         ids = self.deposit(body='small')
         self.begin()
         out, _c, _t = self.fetch(ids)
