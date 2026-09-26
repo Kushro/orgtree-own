@@ -139,6 +139,7 @@ class DrainTxTests(unittest.TestCase):
         by reconcile as if the turn had been interrupted)."""
         org = store.load_org(self.slug)
         org.d['mail']['worker'] = []          # the box emptied during the slot wait
+        org.node('worker')['last_status'] = {'state': 'done', 'text': 'fixture'}
         store.save_org(org)
         dropped = []
         with patch.object(sup, '_drop_ping',
@@ -148,8 +149,12 @@ class DrainTxTests(unittest.TestCase):
                 sup._mark_ping('(orgtree) new mail', mail_ids=[self.mail_id]))
         self.assertEqual(dropped, ['worker'], 'the phantom ping was not dropped')
         self.assertEqual(self.reached, 0)
-        self.assertIsNone(store.load_org(self.slug).node('worker').get('inflight'),
+        node = store.load_org(self.slug).node('worker')
+        self.assertIsNone(node.get('inflight'),
                           'a dropped phantom turn left an in-flight marker')
+        # the in-flight record also retires the status chip; a turn that
+        # never ran must leave it alone
+        self.assertEqual(node.get('last_status'), {'state': 'done', 'text': 'fixture'})
 
 
 class CompactionRowsTests(unittest.TestCase):
