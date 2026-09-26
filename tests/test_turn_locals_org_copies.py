@@ -191,5 +191,74 @@ class TurnLocals(unittest.TestCase):
             time.sleep(0.05)
 
 
+class TurnLoads(TurnLocals):
+    """S-E (pg-per-call-cost): fewer full org loads on the turn thread.
+
+    * the admission step reads the seq-gated shared snapshot, never a fresh
+      `orgtx.org_read`;
+    * the turn-end fold (`_fold_back_undelivered`) opens no transaction when
+      the snapshot journals nothing for the seat and no intent or publication
+      wait needs a retry — and still does when a batch is journaled or an
+      intent is pending."""
+
+    def test_the_turn_makes_no_fresh_org_read_at_admission(self):
+        from orgtree import orgtx
+        real = orgtx.org_read
+        callers = []
+
+        def spy(*a, **k):
+            f = sys._getframe(1)
+            while f is not None and f.f_code.co_filename.endswith("mock.py"):
+                f = f.f_back            # past unittest.mock's own call frames
+            callers.append(f.f_code.co_name if f is not None else "?")
+            return real(*a, **k)
+        self.stack.enter_context(patch.object(orgtx, "org_read", side_effect=spy))
+        thread = threading.Thread(
+            target=lambda: sup._run_turn(self.slug, self.nid, "hello"),
+            daemon=True)
+        thread.start()
+        self.wait_for(".blocked", thread)
+        Path(self.flag + ".release").touch()
+        thread.join(60)
+        self.assertFalse(thread.is_alive(), "the turn runner must settle")
+        self.assertNotIn("_run_one_turn_recorded", callers,
+                         f"the turn body made a fresh org_read: {callers}")
+
+    def fold_calls(self):
+        calls = []
+        self.stack.enter_context(patch.object(
+            sup, "reclaim_orphans", side_effect=lambda *a, **k: calls.append(1) or {}))
+        return calls
+
+    def test_the_turn_end_fold_skips_its_transaction_when_nothing_is_journaled(self):
+        calls = self.fold_calls()
+        sup._fold_back_undelivered(self.slug, self.nid, keep_toks=())
+        self.assertEqual(calls, [], "a fold with nothing journaled opened a transaction")
+
+    def test_the_fold_still_runs_for_a_journaled_batch(self):
+        org = store.load_org(self.slug)
+        org.d.setdefault("delivering", {})[self.nid] = [
+            {"tok": "tok-1", "at": "2026-09-26T00:00:00Z", "mail": []}]
+        store.save_org(org)
+        calls = self.fold_calls()
+        sup._fold_back_undelivered(self.slug, self.nid, keep_toks=())
+        self.assertEqual(len(calls), 1, "a journaled batch was never offered to the fold")
+
+    def test_the_fold_still_runs_for_a_pending_intent(self):
+        calls = self.fold_calls()
+        with sup._state_lock:
+            self.st["mail_reclaim_intents"] = {"op": {"operation": "op", "before": []}}
+        try:
+            sup._fold_back_undelivered(self.slug, self.nid, keep_toks=())
+        finally:
+            with sup._state_lock:
+                self.st.pop("mail_reclaim_intents", None)
+        self.assertEqual(len(calls), 1, "a pending intent was never retried")
+
+    # the frame-walk tests belong to TurnLocals; do not run them twice
+    test_a_blocked_turn_pins_at_most_one_org = None
+    test_a_turn_fed_a_follow_up_at_the_boundary_pins_at_most_one_org = None
+
+
 if __name__ == "__main__":
     unittest.main()

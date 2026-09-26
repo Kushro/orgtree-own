@@ -10297,7 +10297,24 @@ def _fold_back_undelivered(slug: str, nid: str,
     Explicit retained tokens are additional carrier evidence, not a license
     to fold every other batch. Live, uncertain, malformed or young custody
     remains protected; the ordinary recovery worker retries after release.
+
+    S-E (pg-per-call-cost): no transaction when there is nothing it could
+    do — the seq-gated snapshot journals no batch for `nid` and no reclaim
+    intent or publication wait needs the transaction's retry. Every commit
+    before this call (the turn's own drains included) is visible to that
+    snapshot; a batch journaled after it is the recovery worker's, exactly
+    as a batch this best-effort fold refuses already is.
     """
+    st = state(slug, nid)
+    with _state_lock:
+        retry = bool(st.get("mail_reclaim_intents") or st.get("mail_publication_wait"))
+    if not retry:
+        try:
+            journaled = (store.cached_org(slug).d.get("delivering") or {}).get(nid)
+        except Exception:                                    # noqa: BLE001
+            journaled = True        # unreadable: let the transaction decide
+        if not journaled:
+            return
     try:
         reclaim_orphans(slug, nid, pump_toks=tuple(keep_toks), only_toks=only_toks)
     except Exception:                                        # noqa: BLE001
@@ -20427,7 +20444,11 @@ def _run_one_turn_recorded(slug: str, nid: str,
     # registration records an unproven identity, which the classifier treats
     # as protection and never as permission.
     try:
-        admission_org = orgtx.org_read(slug)
+        # S-E: the seq-gated shared snapshot, read-only here (resolve and
+        # register only read it). A stale read was already tolerated: a
+        # reclaim it cannot prove stays pending, an unproven identity is
+        # protection (the comment above).
+        admission_org = store.cached_org(slug)
     except Exception:                                    # noqa: BLE001
         admission_org = None
     with _state_lock:
