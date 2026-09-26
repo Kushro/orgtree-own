@@ -56,7 +56,9 @@ class DrainTxTests(unittest.TestCase):
         self.patches = [
             patch.object(sup, 'spawn_env', return_value={}),
             patch.object(sup, '_deployment_org_gate'),
-            patch.object(sup, '_mail_block', side_effect=self._sentinel),
+            # turn-tx merge S2: the envelope is composed INSIDE the admission
+            # transaction now; the first call past its commit is the state block
+            patch.object(sup, '_envelope_state_block', side_effect=self._sentinel),
         ]
         for p in self.patches:
             p.start()
