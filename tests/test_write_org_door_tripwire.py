@@ -165,10 +165,14 @@ class Dynamic(unittest.TestCase):
                 self.assertTrue(pgdoor.routed(v, {}), v)
 
     def test_legacy_seat_mint_stays_off_write_org(self):
-        org = store.load_org(self.slug)
-        org.node('worker').pop('seat_id', None)
-        store.save_org(org)
-        self.assertFalse(self.entered('orgtree_send_file', {'path': 'nope'}))
+        # the loader backfills seat_id, so a legacy seat is simulated: the
+        # identity read gets a private load whose caller has none
+        def seatless(slug):
+            org = store.load_org(slug)
+            org.node('worker').pop('seat_id', None)
+            return org
+        with patch.object(store, 'cached_org', seatless):
+            self.assertFalse(self.entered('orgtree_send_file', {'path': 'nope'}))
 
     def test_op_epoch_preflight_stays_off_write_org(self):
         self.assertFalse(self.entered(api.OP_EPOCH))
