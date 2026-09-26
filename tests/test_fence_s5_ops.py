@@ -153,6 +153,37 @@ class OperatorReallocate(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(_grants(slug)['kid'], self.kid0 + 2)
 
+    def test_a_stale_snapshot_widens_to_the_new_parent(self):
+        # review B1: the spec is planned on a snapshot. If kid moved under a
+        # new parent `b` before the lock, the credit check reads b — so the
+        # body's require() on the LOCKED document must widen to b's row
+        # (else two reallocations under b could both pass its free check)
+        slug = _org()
+        org = store.load_org(slug)
+        org.hire('root', 'root', 'luna', 5, 'b', add_dirs=[], tools=T,
+                 org_visibility='full', charter='c')
+        store.save_org(org)
+        stale = store.load_org(slug)                 # kid still under mid
+        org = store.load_org(slug)
+        org.move(U, 'kid', 'b')
+        store.save_org(org)
+        self.assertEqual(store.load_org(slug).node('kid')['parent'], 'b')
+        before = _grants(slug)['kid']
+        b0 = store.load_org(slug).node('b').get('grant')
+        held, real = [], rcdoor.op_reallocate_body
+
+        def body(tx):
+            held.append(set(tx.spec.nodes))
+            return real(tx)
+        with patch.object(pgdoor, '_snapshot', lambda s: stale), \
+                patch.dict(pgdoor.BODIES, {'reallocate': body}):
+            _op(slug, node='kid', delta=2)
+        self.assertEqual(len(held), 2, held)         # it widened, then re-ran
+        self.assertNotIn('b', held[0])               # planned on the stale tree
+        self.assertIn('b', held[-1])                 # committed holding b
+        self.assertEqual(_grants(slug)['kid'], before + 2)
+        self.assertEqual(store.load_org(slug).node('b').get('grant'), b0)
+
     def test_same_answer_and_grants_as_the_legacy_branch(self):
         door, legacy = _org(), _org()
         for actor, node, delta in ((U, 'kid', 2), ('mid', 'kid', -1), (U, 'mid', 1)):
