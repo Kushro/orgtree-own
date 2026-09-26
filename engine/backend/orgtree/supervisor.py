@@ -20591,7 +20591,12 @@ def _run_one_turn_recorded(slug: str, nid: str,
         # for milliseconds, never for the limit window (the measured
         # three-agent wedge this gate exists to avoid).
         try:
-            _g_org = store.load_org(slug)
+            # turn-tx merge S3: the seq-gated shared snapshot (read-only —
+            # nothing below writes `_g_node`), not a fresh full load. It sees
+            # every commit before this call, as the lock-free load did; each
+            # write the gate makes re-decides in its own `_g_tx` on the locked
+            # row (`not frozen`), and `_admit_once_valid` is a pure read.
+            _g_org = store.cached_org(slug)
             _g_node = (_g_org.node(nid)
                        if nid in _g_org.nodes else None)
         except Exception:                                    # noqa: BLE001
