@@ -68,6 +68,16 @@ def preloaded(cache: dict[tuple[str, int, int], tuple[Any, Any]]) -> Iterator[No
     finally:
         _PRELOAD.reset(token)
 
+
+def push(cache: dict[tuple[str, int, int], tuple[Any, Any]]) -> Any:
+    """`preloaded` for a span a `with` cannot wrap: returns the token `pop`
+    takes. The caller pops on every exit path."""
+    return _PRELOAD.set(cache)
+
+
+def pop(token: Any) -> None:
+    _PRELOAD.reset(token)
+
 # ── the three caps ────────────────────────────────────────────────────────
 # Three constants and not one, deliberately (ruling, coordinator 2026-08-27):
 # they guard three DIFFERENT things, and one number carrying all three would

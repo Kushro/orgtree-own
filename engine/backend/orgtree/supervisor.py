@@ -20576,6 +20576,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
         _trec.set(cmd=is_cmd, ping=is_ping, toks=len(toks),
                   text_len=len(text), resumed=bool(retry_payload),
                   restart_replay=is_restart_replay)
+    _img_tok: Any = None     # turn-tx merge S2: the admission image cache
     try:
         # blocked on a turn slot is NOT running (№12) — the UI shows it hollow
         if is_cmd:
@@ -20891,8 +20892,14 @@ def _run_one_turn_recorded(slug: str, nid: str,
                     if _box:
                         with imgblock.preloaded(_img_cache):
                             _mail_block(_box, slug, nid, inline=True)
-                except Exception:                            # noqa: BLE001
-                    _img_cache = {}   # advisory: the locked composition loads
+                except Exception as exc:                     # noqa: BLE001
+                    # advisory: whatever it cached stays valid (keyed by the
+                    # file's identity); the locked composition loads the rest
+                    print(f"[orgtree] {slug}/{nid}: image pre-load incomplete "
+                          f"({type(exc).__name__}: {exc})")
+            # every image load inside the admission transaction (the journal
+            # row's composition, the envelope, the human view) reads the cache
+            _img_tok = imgblock.push(_img_cache)
             with halt.txn(slug, **_admission_rows(slug, nid)) as _adm_tx:
                 org = _adm_tx.org
                 _admission_gates(slug, org, nid)
@@ -20958,8 +20965,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 if mail:
                     # inline=True: this text becomes a CLI user event a few lines
                     # below, which is the one carrier that can hold an image
-                    with imgblock.preloaded(_img_cache):   # no file I/O under the lock
-                        mtext, turn_images = _mail_block(mail, slug, nid, inline=True)
+                    mtext, turn_images = _mail_block(mail, slug, nid, inline=True)
                     prelude.append(mtext)
                     human_mail = [m for m in mail if not m.get("model_only")]
                     if human_mail:
@@ -21035,6 +21041,8 @@ def _run_one_turn_recorded(slug: str, nid: str,
             # turn-locals: `org` (the admission transaction's copy) is the
             # one version the turn keeps; the transactions themselves are done
             _cmp_tx = _adm_tx = None
+            imgblock.pop(_img_tok)
+            _img_tok = None
             if cache_forecast_event is not None:
                 stream(slug, nid, {"kind": "cache_forecast",
                                    "forecast": cache_forecast_event})
@@ -24343,6 +24351,9 @@ def _run_one_turn_recorded(slug: str, nid: str,
             except Exception:                               # noqa: BLE001
                 pass
     finally:
+        if _img_tok is not None:       # an exit from inside the admission tx
+            imgblock.pop(_img_tok)
+            _img_tok = None
         # the turn is over one way or another — it is no longer in-flight
         pardon_pending = False
         # state-audit F1: nodes whose stale provider freeze the queued
