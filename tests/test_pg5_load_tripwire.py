@@ -124,6 +124,24 @@ class Gate(unittest.TestCase):
                 self.assertTrue(g["errors"], name)
 
 
+class EvidenceSpread(unittest.TestCase):
+    """The ledger caps a work item at 50 evidence rows; the gating run at
+    e9007a8 lost 29-30 fixed-demand calls to that cap because both modes
+    shared one item. Every item must receive at most EVIDENCE_PER_ITEM."""
+
+    def test_no_item_gets_more_than_its_share(self) -> None:
+        self.assertLessEqual(pg5_load.EVIDENCE_PER_ITEM, 50)
+        for operations in (8, 160, 164, 400, 2000):
+            with self.subTest(operations=operations):
+                per: dict[int, int] = {}
+                for i, kind, _ in pg5_load._plan(operations):
+                    if kind == "evidence":
+                        k = pg5_load._evidence_item(i)
+                        per[k] = per.get(k, 0) + 1
+                self.assertEqual(sorted(per), list(range(pg5_load._items_needed(operations))))
+                self.assertLessEqual(max(per.values()), pg5_load.EVIDENCE_PER_ITEM)
+
+
 class StaleCounter(unittest.TestCase):
     def test_every_constructed_stale_write_is_counted(self) -> None:
         class StaleWrite(Exception):

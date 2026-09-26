@@ -65,6 +65,9 @@ from v3_qualification.evidence import distribution  # noqa: E402
 SCHEMA = "orgtree.pg5-load/v1"
 KINDS = ("mail", "status", "evidence", "read")
 AGENTS = 8
+#: evidence calls per work item: the ledger caps an item at 50 evidence rows
+#: (WORK_EVIDENCE_MAX), so each mode spreads its evidence over fresh items
+EVIDENCE_PER_ITEM = 40
 
 #: Relayed, not measured by PG-5: the coordinator's standing charter records the
 #: real fleet peaking at 0.936 Hz aggregate with a MEDIAN OF ZERO concurrent turns.
@@ -113,7 +116,10 @@ def child(root: Path, nonce: str, config: dict) -> None:
         elif config.get("fence") == "off":
             fence = "absent (requested off; this build has no fence)"
         adapter.fixture(AGENTS)
-        slug, _ = adapter.item("pg5 load", AGENTS)
+        # every work item the workloads write evidence to, made during setup
+        items = {mode: [adapter.item(f"pg5 load {mode} {k}", AGENTS)[0]
+                        for k in range(_items_needed(config["operations"]))]
+                 for mode in config["modes"]}
         # the fixture is setup, not load: its report is kept apart, and the
         # tripwire is re-armed (counts reset) before the first workload
         setup = {"doc_lock_tripwire": store.doc_lock_tripwire_report(), "stale_writes": stale[0]}
@@ -122,7 +128,7 @@ def child(root: Path, nonce: str, config: dict) -> None:
         rows = []
         for mode in config["modes"]:
             before = stale[0]
-            rows.append(measure(adapter, slug, mode, config))
+            rows.append(measure(adapter, items[mode], mode, config))
             rows[-1]["stale_writes"] = stale[0] - before
         if config.get("plant_legacy_doc_lock"):     # test-only: a legacy writer
             with store.DOC_LOCK:
@@ -171,7 +177,17 @@ def _fence_off_gate(arm: dict) -> dict:
     return {"passed": not errors, "errors": errors}
 
 
-def measure(adapter, slug: str, mode: str, config: dict) -> dict:
+def _items_needed(operations: int) -> int:
+    calls = sum(1 for _, k, _ in _plan(operations) if k == "evidence")
+    return -(-calls // EVIDENCE_PER_ITEM)
+
+
+def _evidence_item(i: int) -> int:
+    """Which of a mode's items the i-th operation (an evidence call) writes to."""
+    return (i // len(KINDS)) // EVIDENCE_PER_ITEM
+
+
+def measure(adapter, slugs: list[str], mode: str, config: dict) -> dict:
     operations, rate = config["operations"], config["rate"]
     tag = f"{mode}-{uuid.uuid4().hex[:8]}"
     plan = _plan(operations)
@@ -189,6 +205,7 @@ def measure(adapter, slug: str, mode: str, config: dict) -> dict:
             return adapter.request("orgtree_status", {"status": "working" if i % 2 else "idle",
                                    "summary": f"{tag} status {i}"}, actor=actor), None
         if kind == "evidence":
+            slug = slugs[_evidence_item(i)]
             return adapter.request("orgtree_work", {"action": "evidence", "slug": slug, "kind": "note",
                                    "ref": f"{tag}-{i}", "note": "pg5 load"}, actor=actor), None
         return adapter.request("orgtree_chart", {}, actor=actor), None
@@ -225,9 +242,11 @@ def measure(adapter, slug: str, mode: str, config: dict) -> dict:
     probe = adapter.probe.snapshot(reset=True)
 
     # correctness, read back through the same public door
-    item = adapter.work("get", slug=slug)["item"]
+    got = set()
+    for slug in slugs:
+        got |= {e.get("ref") for e in adapter.work("get", slug=slug)["item"].get("evidence", [])}
     want_refs = {f"{tag}-{i}" for i, k, _ in plan if k == "evidence"}
-    got_refs = {e.get("ref") for e in item.get("evidence", [])} & want_refs
+    got_refs = got & want_refs
     sent_to: dict[str, int] = {}
     for s in samples:
         if s["kind"] == "mail" and s["error"] is None:
@@ -235,7 +254,10 @@ def measure(adapter, slug: str, mode: str, config: dict) -> dict:
     landed = _mail_landed(adapter, tag)
     errors = []
     if len(got_refs) != len(want_refs):
-        errors.append(f"evidence: {len(want_refs) - len(got_refs)} of {len(want_refs)} refs missing")
+        lost = sorted(want_refs - got_refs, key=lambda r: int(r.rsplit("-", 1)[1]))
+        ok = {f"{tag}-{s['id']}" for s in samples if s["kind"] == "evidence" and s["error"] is None}
+        errors.append(f"evidence: {len(lost)} of {len(want_refs)} refs missing "
+                      f"({sum(r in ok for r in lost)} of them answered 200): {lost[:10]}")
     for w, n in sent_to.items():
         if landed[w]["found"] < n:
             errors.append(f"mail: {w} has {landed[w]['found']} of {n} (boxed or archived)")
