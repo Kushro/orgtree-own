@@ -134,6 +134,93 @@ class QueuedSwitch(unittest.TestCase):
         self.assertEqual(len(self.copies), len(set(self.copies)))
         self.assertEqual({c[1] for c in self.copies}, {"old-session"})
 
+    def rebind_worker(self, tier, src, dst, frozen=None):
+        # a STANDALONE queued rebind (no switch queued) — R2's boundary path
+        org = store.create_org(self.slug)
+        org.hire(U, None, tier, 10, "worker")
+        n = org.node("worker")
+        n["account"] = src["id"]
+        n["session_id"] = "old-session"
+        n.pop("session_unrun", None)
+        if frozen:
+            n["frozen"] = frozen
+        n["pending_account"] = {"account": dst["id"], "from": src["id"],
+                                "by": U, "at": T1}
+        store.save_org(org)
+
+    def auth_frozen_rebind(self):
+        src = self.account("claude", "src")
+        dst = self.account("claude", "dst")
+        self.rebind_worker("opus", src, dst,
+                           frozen={"at": T1, "cause": "auth",
+                                   "account": src["id"]})
+        return dst
+
+    def test_a_standalone_rebind_reports_its_auth_thaw_wake(self):
+        # R2 through the S6 wrapper: the thaw lands in the transaction and
+        # the caller is told to wake the node after the commit
+        dst = self.auth_frozen_rebind()
+        wake, account_wake = self.apply()
+        n = store.load_org(self.slug).node("worker")
+        self.assertEqual(n["account"], dst["id"])
+        self.assertNotIn("frozen", n)
+        self.assertNotIn("pending_account", n)
+        self.assertEqual(account_wake, [("auth_thaw", "worker")])
+        self.assertEqual(wake, [])
+
+    def test_a_widened_rerun_reports_the_thaw_wake_once(self):
+        dst = self.auth_frozen_rebind()
+        runs = []
+        real = supervisor._apply_pending_switch_locked
+
+        def counted(*a, **k):
+            runs.append(1)
+            return real(*a, **k)
+        narrow = pgdoor.TxSpec(nodes=("worker",))
+        with patch.object(supervisor, "switch_rows",
+                          lambda *a, **k: narrow), \
+                patch.object(supervisor, "_apply_pending_switch_locked",
+                             counted):
+            wake, account_wake = self.apply()
+        self.assertGreater(len(runs), 1, "the narrow plan never widened")
+        self.assertEqual(store.load_org(self.slug).node("worker")["account"],
+                         dst["id"])
+        self.assertEqual(account_wake, [("auth_thaw", "worker")])
+        self.assertEqual(wake, [])
+
+    def test_a_standalone_rebind_copies_its_transcript_after_the_commit(self):
+        # an OpenAI seat moving accounts archives its session in place; the
+        # copy is the wrapper's, after the commit, exactly once
+        src = self.account("openai", "src")
+        dst = self.account("openai", "dst")
+        self.rebind_worker("astra", src, dst)
+        self.apply()
+        n = store.load_org(self.slug).node("worker")
+        self.assertEqual(n["account"], dst["id"])
+        self.assertNotIn("pending_account", n)
+        self.assertEqual([c[:3] for c in self.copies],
+                         [("worker", "old-session", "switch_model")])
+        self.assertIsNone(self.copies[0][3], "copied inside the transaction")
+
+    def test_the_pardon_follows_the_seat_the_switch_left(self):
+        src = self.account("claude", "src")
+        dst = self.account("openai", "dst")
+        self.worker({"tier": "astra", "from": "opus", "by": U,
+                     "crossing": True, "at": T1, "account": dst["id"]},
+                    account=src["id"])
+        pardon = supervisor._apply_queued_switch(self.slug, "worker", [], [])
+        n = store.load_org(self.slug).node("worker")
+        self.assertIn("session_unrun", n, "the crossing minted a fresh seat")
+        self.assertTrue(pardon)
+        # a same-provider switch keeps the running session: no pardon
+        store._POOL.close_all(self.slug)
+        _N[0] += 1
+        self.slug = f"s6qs{_N[0]}"
+        self.worker({"tier": "sonnet", "from": "opus", "by": U,
+                     "crossing": False, "at": T1})
+        self.assertFalse(
+            supervisor._apply_queued_switch(self.slug, "worker", [], []))
+
     def test_switch_rows_names_the_seat_bearer_and_per_owner_notices(self):
         self.worker({"tier": "sonnet", "from": "opus", "by": U, "at": T1})
         org = store.load_org(self.slug)
