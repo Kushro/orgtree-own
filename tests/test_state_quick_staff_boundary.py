@@ -22,6 +22,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import state_operation_contracts as contracts
+import inventory_scan_cache  # noqa: E402,F401 -- one shared source scan per suite run
 
 # left for the OS to reclaim: seats create agent scratch folders under the data root
 _temp = tempfile.mkdtemp(prefix='p01-quick-staff-boundary-')

@@ -45,6 +45,7 @@ from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import state_operation_contracts as contracts  # noqa: E402
+import inventory_scan_cache  # noqa: E402,F401 -- one shared source scan per suite run
 
 # left for the OS to reclaim: hires create agent scratch folders under the data root
 _temp = tempfile.mkdtemp(prefix='p01-org-admin-boundary-')

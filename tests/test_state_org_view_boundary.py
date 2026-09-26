@@ -19,6 +19,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import state_operation_contracts as contracts
+import inventory_scan_cache  # noqa: E402,F401 -- one shared source scan per suite run
 
 _temp = tempfile.TemporaryDirectory(prefix='p01-org-view-boundary-')
 _data = Path(_temp.name) / 'data'
