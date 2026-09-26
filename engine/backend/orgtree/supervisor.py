@@ -20873,6 +20873,26 @@ def _run_one_turn_recorded(slug: str, nid: str,
                         # with its own evidence, so it still cannot resurrect
                         # stale evidence.
             _phantom_turn = False
+            # turn-tx merge S2 (review f1): the envelope is composed INSIDE the
+            # admission transaction, which locks org-wide `mail_transitions`.
+            # Load the user's inline images for the mail the snapshot boxes
+            # NOW, outside any lock; `_mail_block` under the lock then finds
+            # them in `_img_cache` (keyed by path + size + mtime). An image
+            # that arrived or changed after this read misses and loads as it
+            # always did — the composed text is identical either way.
+            _img_cache: dict[tuple[str, int, int], tuple[Any, Any]] = {}
+            if not is_cmd and not toks:
+                try:
+                    _want = (None if carrier_mail_ids is None
+                             else {str(i) for i in carrier_mail_ids})
+                    _box = [m for m in ((store.cached_org(slug).d.get("mail") or {})
+                                        .get(nid) or [])
+                            if _want is None or str(m.get("id")) in _want]
+                    if _box:
+                        with imgblock.preloaded(_img_cache):
+                            _mail_block(_box, slug, nid, inline=True)
+                except Exception:                            # noqa: BLE001
+                    _img_cache = {}   # advisory: the locked composition loads
             with halt.txn(slug, **_admission_rows(slug, nid)) as _adm_tx:
                 org = _adm_tx.org
                 _admission_gates(slug, org, nid)
@@ -20938,7 +20958,8 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 if mail:
                     # inline=True: this text becomes a CLI user event a few lines
                     # below, which is the one carrier that can hold an image
-                    mtext, turn_images = _mail_block(mail, slug, nid, inline=True)
+                    with imgblock.preloaded(_img_cache):   # no file I/O under the lock
+                        mtext, turn_images = _mail_block(mail, slug, nid, inline=True)
                     prelude.append(mtext)
                     human_mail = [m for m in mail if not m.get("model_only")]
                     if human_mail:

@@ -156,6 +156,36 @@ class DrainTxTests(unittest.TestCase):
         # never ran must leave it alone
         self.assertEqual(node.get('last_status'), {'state': 'done', 'text': 'fixture'})
 
+    def test_user_images_load_outside_the_admission_transaction(self):
+        """turn-tx merge S2 (review f1): the envelope is composed inside the
+        admission transaction, which locks org-wide `mail_transitions`; the
+        user's inline images must be read and encoded BEFORE it opens, never
+        under its locks."""
+        import os
+        from PIL import Image
+        from orgtree import imgblock
+        up = os.path.join(sup.scratch_dir(self.slug, 'worker'), 'uploads')
+        os.makedirs(up, exist_ok=True)
+        Image.new('RGB', (8, 8), (200, 10, 10)).save(os.path.join(up, 'pic.png'))
+        size = os.path.getsize(os.path.join(up, 'pic.png'))
+        org = store.load_org(self.slug)
+        org.post_mail(ledger.USER, 'worker', 'look at this',
+                      attachments=[{'path': 'uploads/pic.png', 'bytes': size,
+                                    'name': 'pic.png'}])
+        store.save_org(org)
+        loads = []
+        real = imgblock._load_image_io
+
+        def spy(path):
+            loads.append(orgtx.current_tx(self.slug))
+            return real(path)
+        with patch.object(imgblock, '_load_image_io', side_effect=spy):
+            self.admit()
+        self.assertEqual(self.reached, 1, 'the turn never got past the drain')
+        self.assertTrue(loads, 'the image was never loaded: the control did not run')
+        self.assertTrue(all(tx is None for tx in loads),
+                        f'an image was read inside a transaction: {loads}')
+
 
 class CompactionRowsTests(unittest.TestCase):
     """Review N1: the compaction transaction (tx1) runs on every ordinary
