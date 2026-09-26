@@ -255,9 +255,11 @@ def measure(adapter, slugs: list[str], mode: str, config: dict) -> dict:
     errors = []
     if len(got_refs) != len(want_refs):
         lost = sorted(want_refs - got_refs, key=lambda r: int(r.rsplit("-", 1)[1]))
-        ok = {f"{tag}-{s['id']}" for s in samples if s["kind"] == "evidence" and s["error"] is None}
+        by_ref = {f"{tag}-{s['id']}": s for s in samples if s["kind"] == "evidence"}
+        named = [{"ref": r, "actor": by_ref[r]["actor"], "status": by_ref[r]["status"],
+                  "item": slugs[_evidence_item(int(r.rsplit("-", 1)[1]))]} for r in lost[:10]]
         errors.append(f"evidence: {len(lost)} of {len(want_refs)} refs missing "
-                      f"({sum(r in ok for r in lost)} of them answered 200): {lost[:10]}")
+                      f"({sum(by_ref[r]['error'] is None for r in lost)} of them answered 200): {named}")
     for w, n in sent_to.items():
         if landed[w]["found"] < n:
             errors.append(f"mail: {w} has {landed[w]['found']} of {n} (boxed or archived)")
