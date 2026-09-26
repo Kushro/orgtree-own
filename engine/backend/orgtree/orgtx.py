@@ -141,10 +141,24 @@ DEFAULT_RETRIES = 5
 #: any row lock and holds it until its commit or rollback, so an unconverted
 #: load→change→save cycle can never interleave with a converted write of the
 #: same row. DOC_LOCK is re-entrant, so code that already holds it may call
-#: org_tx. Read at call time; turn it off (tests, or once the last DOC_LOCK
-#: writer is converted) with `orgtx.TRANSITION_FENCE = False` or
-#: ORGTREE_ORGTX_FENCE=0. store.StaleWrite stays as the backstop.
-TRANSITION_FENCE: bool = os.environ.get("ORGTREE_ORGTX_FENCE", "1").strip() != "0"
+#: org_tx. Read at call time; tests set `orgtx.TRANSITION_FENCE` directly.
+#: store.StaleWrite stays as the backstop.
+#:
+#: DEFAULT (S9 step 5, plan decision 42): OFF on PostgreSQL, where every
+#: writer is converted (the fence-off gate), and ON for SQLite/JSON, where the
+#: legacy door-off DOC_LOCK fallbacks still run. ORGTREE_ORGTX_FENCE=0 or =1
+#: overrides the default both ways; see `default_transition_fence`.
+def default_transition_fence(env: dict[str, str] | None = None,
+                             backend: str | None = None) -> bool:
+    """The fence's startup value: ORGTREE_ORGTX_FENCE "0" = off, any other
+    non-blank value = on; unset or blank = off on postgres, on otherwise."""
+    raw = (os.environ if env is None else env).get("ORGTREE_ORGTX_FENCE", "").strip()
+    if raw:
+        return raw != "0"
+    return (store.STORE_BACKEND if backend is None else backend) != "postgres"
+
+
+TRANSITION_FENCE: bool = default_transition_fence()
 #: PostgreSQL ends a transaction whose body sits idle (between statements)
 #: longer than this while holding its row locks (review N5)
 IDLE_IN_TX_TIMEOUT_S = float(os.environ.get("ORGTREE_ORGTX_IDLE_TIMEOUT_S", "120") or 120)
