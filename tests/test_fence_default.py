@@ -43,8 +43,12 @@ CASES = [
     ('json', None, True),
 ]
 
+# The packaged interpreter's ._pth ignores PYTHONPATH and cwd, so the child
+# puts this checkout first itself; the test then checks orgtree.__file__.
 _CHILD = r"""
-import json, orgtree
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import orgtree
 from orgtree import halt, orgtx, store
 print(json.dumps({'file': orgtree.__file__, 'backend': store.STORE_BACKEND,
                   'fence': orgtx.TRANSITION_FENCE, 'halt': halt._fence() is store.FENCE}))
@@ -69,11 +73,11 @@ class FenceDefault(unittest.TestCase):
         root = Path(orgtree.__file__).resolve().parents[1]      # engine/backend
         for backend, raw, want in [c for c in CASES if c[0] != 'json']:
             env = {k: v for k, v in os.environ.items() if k != 'ORGTREE_ORGTX_FENCE'}
-            env.update(ORGTREE_STORE=backend, PYTHONPATH=os.pathsep.join(sys.path))
+            env.update(ORGTREE_STORE=backend)
             if raw is not None:
                 env['ORGTREE_ORGTX_FENCE'] = raw
             with self.subTest(backend=backend, env=raw):
-                out = subprocess.run([sys.executable, '-c', _CHILD], env=env, cwd=str(root),
+                out = subprocess.run([sys.executable, '-c', _CHILD, str(root)], env=env, cwd=str(root),
                                      capture_output=True, text=True, timeout=120)
                 self.assertEqual(out.returncode, 0, out.stderr[-2000:])
                 got = json.loads(out.stdout.strip().splitlines()[-1])
