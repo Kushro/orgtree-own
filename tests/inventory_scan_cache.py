@@ -13,7 +13,9 @@ process and, under tools/run-python-verification.py, pickled into the run
 root (the parent of each module's ORGTREE_DATA) for the modules that follow.
 The runner deletes the run root when the run ends, so every suite run still
 scans the tree it is testing exactly once, and nothing outlives the run.
-Every caller gets its own deep copy, so no test can see another's edits. A
+Every caller gets its own deep copy, so no test can see another's edits. The interpreter
+is not part of the key: one runner call uses one interpreter for every module, and
+the run root does not outlive the call. A
 module run on its own, or outside the runner, scans for itself.
 
 Not used by test_state_operation_inventory or test_state_operation_contracts:
