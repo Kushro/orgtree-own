@@ -36,18 +36,7 @@ orgtx.TRANSITION_FENCE = False
 #: (lead decisions 40/41 and the 13:22Z ruling on the scale parent). Remove
 #: an entry in the same change that declares the op.
 LEGACY_OPS = {
-    "retire": "WS3b (p03-ws3b-topology), decision 40",
-    "rescind": "WS3b, decision 40",
-    "rehire": "WS3b, decision 40",
-    "dissolve": "WS3b, decision 40",
-    "delete": "WS3b, decision 40",
-    "move": "WS3b, decision 40",
     "switch_model": "WS3b, decision 40",
-    "reseed": "WS3b, decision 40",
-    "cheap_compact": "WS3b, decision 41",
-    "promote": "WS3b, lead ruling 2026-09-26 13:22Z",
-    "demote": "WS3b, lead ruling 2026-09-26 13:22Z",
-    "revoke_dir": "WS3b, lead ruling 2026-09-26 13:22Z",
 }
 
 U = ledger.USER
@@ -86,7 +75,9 @@ class OpsInventory(unittest.TestCase):
     def test_the_door_ops_are_the_expected_ones(self):
         ops = _cycle_ops()
         self.assertEqual(sorted(o for o in ops if pgdoor.declared(o)),
-                         ['hire', 'reallocate'])
+                         ['cheap_compact', 'delete', 'demote', 'dissolve',
+                          'hire', 'move', 'promote', 'reallocate', 'rehire',
+                          'rescind', 'reseed', 'retire', 'revoke_dir'])
 
 
 def _org() -> str:
