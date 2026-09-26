@@ -156,6 +156,15 @@ class LostEvidence(unittest.TestCase):
         self.assertIn("{'ref': 't-166', 'actor': 'worker-6', 'status': 500, 'item': 'item-1'}", msg)
         self.assertLess(msg.index("t-2'"), msg.index("t-166'"))
 
+    def test_a_lost_ref_with_no_sample_is_still_named(self) -> None:
+        plan = pg5_load._plan(160)
+        samples = [{"id": i, "kind": k, "actor": f"worker-{a}", "status": 200, "error": None}
+                   for i, k, a in plan if i != 10]          # op 10 never recorded a sample
+        msg = pg5_load._lost_evidence("t", {"t-10"}, 40, samples, ["item-0"])
+        self.assertIn("1 of 40 refs missing (0 of them answered 200)", msg)
+        self.assertIn("{'ref': 't-10', 'actor': 'worker-2', 'status': None, 'item': 'item-0', "
+                      "'sample': 'no sample'}", msg)
+
 
 class StaleCounter(unittest.TestCase):
     def test_every_constructed_stale_write_is_counted(self) -> None:

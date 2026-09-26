@@ -193,9 +193,14 @@ def _lost_evidence(tag: str, lost_refs: set[str], wanted: int, samples: list[dic
     10 of) them with the actor that wrote each, its HTTP status and item."""
     lost = sorted(lost_refs, key=lambda r: int(r.rsplit("-", 1)[1]))
     by_ref = {f"{tag}-{s['id']}": s for s in samples if s["kind"] == "evidence"}
-    named = [{"ref": r, "actor": by_ref[r]["actor"], "status": by_ref[r]["status"],
-              "item": slugs[_evidence_item(int(r.rsplit("-", 1)[1]))]} for r in lost[:10]]
-    answered = sum(by_ref[r]["error"] is None for r in lost)
+    named = []
+    for r in lost[:10]:
+        i = int(r.rsplit("-", 1)[1])
+        s = by_ref.get(r)          # an op that died before recording has no sample
+        named.append({"ref": r, "actor": s["actor"] if s else f"worker-{i % AGENTS}",
+                      "status": s["status"] if s else None,
+                      "item": slugs[_evidence_item(i)], **({} if s else {"sample": "no sample"})})
+    answered = sum(1 for r in lost if by_ref.get(r) and by_ref[r]["error"] is None)
     return (f"evidence: {len(lost)} of {wanted} refs missing "
             f"({answered} of them answered 200): {named}")
 
