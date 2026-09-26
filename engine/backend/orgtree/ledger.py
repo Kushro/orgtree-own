@@ -779,7 +779,7 @@ NODE_KEYED_SECTIONS: Final[dict[str, tuple[str, str, str]]] = {
     **{k: ("org", "none", "kept") for k in (
         "_actors_typed", "_migrations", "account_fallback_default", "account_token_uuid",
         "api_cost_usd", "default_account", "desktop_import", "reply_incarnation",
-        "whole_grants_v1", "work_deleted_names",
+        "whole_grants_v1", "work_deleted_names", "work_scope_log",
         "api_fallback", "api_fallback_since", "api_fallback_until", "api_key",
         "auto_cheap_compact", "auto_resume", "auto_resume_compact", "auto_resume_last",
         "bridge_credential_generation", "bridge_credential_rotated_at", "cascade_alloc",
@@ -11937,6 +11937,13 @@ class Org:
     # the complete record reads as archive-then-live in one unbroken sequence.
     # Raising the number instead would only have moved the day this happens.
     WORK_SCOPE_MAX: Final = 100
+    # ⚠ STORAGE, NOT THE WINDOW (docket-history-lazy 2026-09-26). An item keeps
+    # only its newest WORK_SCOPE_INLINE scope rows inside `work_items`; older
+    # rows spill into the org's lazy `work_scope_log[slug]`. `work_items` is
+    # one eager value that every whole-org copy decodes, and scope was 72% of
+    # its 11.8 MB on the live org. The live window a reader sees is still
+    # WORK_SCOPE_MAX rows: the split is rebuilt on read (`_work_scope_live`).
+    WORK_SCOPE_INLINE: Final = 5
     # Stamped onto an item by every scope append this build performs. Its
     # ABSENCE on an item already at the cap is the only evidence that the item
     # passed through the frozen window of the refusing build — see
@@ -13029,6 +13036,11 @@ class Org:
         a reopen or update that committed first is honoured (decision 13 a)."""
         now_ts = _time.time() if now_ts is None else now_ts
         active = self._work_active()
+        # the one-time heal of docket-history-lazy, under the same lock: an
+        # item still carrying its whole scope inline (or a legacy inline
+        # `scope_archive`) spills it to `work_scope_log`. A no-op once healed.
+        for it in active:
+            self._work_scope_spill(it)
         moved: list[str] = []
         # ⚠ THE OUTCOME IS RECORDED PER ITEM, not asserted once for the batch.
         # This line used to say "done for over an hour" for everything it
@@ -13353,7 +13365,7 @@ class Org:
         — so a long objective rode along twice on every read. Only that one
         row is folded: every other before/after in the record is text no other
         field holds, and stays verbatim."""
-        rows = list(it.get("scope") or [])
+        rows = self._work_scope_live(it)
         cur = it.get("objective")
         for n in range(len(rows) - 1, -1, -1):
             row = rows[n]
@@ -13468,7 +13480,7 @@ class Org:
             # "nothing is erased" is worth nothing if nothing can read it. A
             # docket LIST serves every readable item at once and refreshes on a
             # timer, so it carries the summary and points at `get`.
-            **({"scope_archive": list(it.get("scope_archive") or [])}
+            **({"scope_archive": self._work_scope_arch(it)}
                if scope_archive else {}),
             "scope_archive_summary": self._work_scope_archive_summary(it),
             # W08 artifacts: immutable, and `named` ones are filtered BY THE
@@ -14390,12 +14402,13 @@ class Org:
         end can be reproduced rather than only described. Nothing in the
         product passes it.
         """
-        rows = cast("list[WorkScopeRecord]", it.setdefault("scope", []))
+        it.setdefault("scope", [])
+        live_n = self._work_scope_live_n(it)
         room = max(0, self.WORK_SCOPE_MAX - max(1, int(adding)))
-        if len(rows) <= room:
+        if live_n <= room:
             return
         if not relief:
-            have = len(rows)
+            have = live_n
             raise LedgerError(
                 f"this item already holds {have} scope record(s) (cap "
                 f"{self.WORK_SCOPE_MAX}) and nothing here is ever truncated or "
@@ -14420,13 +14433,13 @@ class Org:
         this rollover drops the row count below the cap, so it is written down
         once, here, and read back by `_work_objective_notice`.
         """
-        rows = cast("list[WorkScopeRecord]", it.get("scope") or [])
-        move = len(rows) - max(0, int(keep))
+        live_n = self._work_scope_live_n(it)
+        move = live_n - max(0, int(keep))
         if move <= 0:
             return
         if not it.get("scope_guard") and not it.get("scope_frozen"):
             it["scope_frozen"] = {
-                "at": now(), "rows": len(rows), "cap": self.WORK_SCOPE_MAX,
+                "at": now(), "rows": live_n, "cap": self.WORK_SCOPE_MAX,
                 "note": ("this item stood at the scope cap under a build that "
                          "REFUSED every description change and every ruling. "
                          "Anything decided during that window was not recorded "
@@ -14434,13 +14447,75 @@ class Org:
                          "description below is therefore not guaranteed to be "
                          "the complete scope. Look for it in `evidence`, in "
                          "the item's mail, or ask whoever ruled it")}
-        arch = cast("list[WorkScopeRecord]",
-                    it.setdefault("scope_archive", []))
-        arch.extend(rows[:move])
-        it["scope"] = rows[move:]
+        # a COUNT, not a move: which list a row is SERVED in is rebuilt on read
+        # from this, independent of where the row is STORED (inline or log)
+        it["scope_rolled"] = int(it.get("scope_rolled") or 0) + move
 
-    @staticmethod
-    def _work_scope_all(it: WorkItem) -> list[WorkScopeRecord]:
+    def _work_scope_log_rows(self, it: WorkItem,
+                             create: bool = False) -> list[WorkScopeRecord]:
+        """This item's spilled rows in the lazy `work_scope_log`, loaded for
+        THIS item only (a SectionMap owner) and only when a caller needs the
+        rows themselves. Counts come from `scope_logged` without loading."""
+        slug = str(it.get("slug") or "")
+        if create:
+            logs = self.d.setdefault("work_scope_log", {})
+            return cast("list[WorkScopeRecord]", logs.setdefault(slug, []))
+        if not int(it.get("scope_logged") or 0):
+            return []
+        logs = self.d.get("work_scope_log") or {}
+        return cast("list[WorkScopeRecord]", logs.get(slug) or [])
+
+    def _work_scope_rolled(self, it: WorkItem) -> int:
+        """Rows of the complete record that have rolled out of the live
+        window: the counted ones plus a not-yet-healed inline archive."""
+        return (int(it.get("scope_rolled") or 0)
+                + len(cast("list[Any]", it.get("scope_archive") or [])))
+
+    def _work_scope_live_n(self, it: WorkItem) -> int:
+        """Length of the live window WITHOUT loading the log."""
+        total = (len(cast("list[Any]", it.get("scope_archive") or []))
+                 + int(it.get("scope_logged") or 0)
+                 + len(cast("list[Any]", it.get("scope") or [])))
+        return max(0, total - self._work_scope_rolled(it))
+
+    def _work_scope_live(self, it: WorkItem) -> list[WorkScopeRecord]:
+        """The live window as served (what `it["scope"]` held before the
+        storage split). The row objects are the stored ones."""
+        return self._work_scope_all(it)[self._work_scope_rolled(it):]
+
+    def _work_scope_arch(self, it: WorkItem) -> list[WorkScopeRecord]:
+        """The rolled-over rows as served (the old `scope_archive`)."""
+        rolled = self._work_scope_rolled(it)
+        return self._work_scope_all(it)[:rolled] if rolled else []
+
+    def _work_scope_spill(self, it: WorkItem) -> None:
+        """Move all but the newest WORK_SCOPE_INLINE inline rows into the lazy
+        log, and heal a legacy inline `scope_archive` into it. STORAGE ONLY:
+        the complete record, its order, every row's content and what a reader
+        is served are unchanged; `_work_scope_all` reads across all three."""
+        legacy = cast("list[WorkScopeRecord]", it.get("scope_archive") or [])
+        inline = cast("list[WorkScopeRecord]", it.get("scope") or [])
+        spill = max(0, len(inline) - self.WORK_SCOPE_INLINE)
+        if not legacy and not spill:
+            return
+        log = self._work_scope_log_rows(it, create=True)
+        if legacy:
+            # legacy rows are the OLDEST: they go before anything logged
+            if log:
+                slug = str(it.get("slug") or "")
+                logs = self.d.setdefault("work_scope_log", {})
+                logs[slug] = [*legacy, *list(log)]
+                log = cast("list[WorkScopeRecord]", logs[slug])
+            else:
+                log.extend(legacy)
+            it["scope_rolled"] = int(it.get("scope_rolled") or 0) + len(legacy)
+            it.pop("scope_archive", None)
+        if spill:
+            log.extend(inline[:spill])
+            it["scope"] = inline[spill:]
+        it["scope_logged"] = len(log)
+
+    def _work_scope_all(self, it: WorkItem) -> list[WorkScopeRecord]:
         """THE COMPLETE RECORD, oldest first: archive then live window.
 
         ⚠ EVERY READER OF THE SCOPE RECORD GOES THROUGH HERE, not through
@@ -14450,6 +14525,7 @@ class Org:
         guarantee failing at the reader rather than at the writer.
         """
         return (cast("list[WorkScopeRecord]", it.get("scope_archive") or [])
+                + self._work_scope_log_rows(it)
                 + cast("list[WorkScopeRecord]", it.get("scope") or []))
 
     def _work_scope_seq(self, it: WorkItem, seq: int) -> WorkScopeRecord | None:
@@ -14506,6 +14582,7 @@ class Org:
                 # record shows both what was ruled and that it was replaced.
                 prior["superseded_by"] = seq
         rows.append(row)
+        self._work_scope_spill(it)
         return row
 
     def _work_scope_archive_summary(self, it: WorkItem) -> dict[str, Any]:
@@ -14515,7 +14592,7 @@ class Org:
         whole. This exists so a docket LIST — which serves every readable item
         at once — can say that more of the record exists without shipping all
         of it on every five-second poll."""
-        arch = cast("list[WorkScopeRecord]", it.get("scope_archive") or [])
+        arch = self._work_scope_arch(it)
         if not arch:
             return {"count": 0, "first_seq": None, "last_seq": None,
                     "first_at": None, "last_at": None}
@@ -14561,8 +14638,8 @@ class Org:
         the reader.
         """
         frozen = it.get("scope_frozen")
-        live = len(cast("list[Any]", it.get("scope") or []))
-        arch = len(cast("list[Any]", it.get("scope_archive") or []))
+        live = self._work_scope_live_n(it)
+        arch = self._work_scope_rolled(it)
         if not frozen and not it.get("scope_guard") and live >= self.WORK_SCOPE_MAX:
             # AN ITEM STILL SITTING IN THE FROZEN WINDOW. No append has been
             # made to it by this build, so nothing has yet had the chance to
@@ -17307,7 +17384,7 @@ class Org:
                             if supersedes is not None else {})})
         return {"decision": int(row["seq"]), "rev": it["rev"],
                 "supersedes": (int(supersedes) if supersedes is not None else None),
-                "scope": len(it.get("scope") or [])}
+                "scope": self._work_scope_live_n(it)}
 
     def work_attach(self, actor: str, wid: str, name: str, nbytes: int,
                     stored: str) -> dict[str, Any]:
@@ -18983,6 +19060,10 @@ class Org:
                 cleared.append({"item": str(other["slug"]),
                                 "field": "superseded_by"})
         (self._work_archive() if phys else self._work_active()).remove(it)
+        if int(it.get("scope_logged") or 0):
+            # the spilled part of its scope record goes with it: delete erases
+            # the ticket record for good, and a name is never reused
+            (self.d.get("work_scope_log") or {}).pop(me, None)
         reserved = self.d.setdefault("work_deleted_names", [])   # type: ignore[typeddict-item]
         if me not in reserved:
             reserved.append(me)

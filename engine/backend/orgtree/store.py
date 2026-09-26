@@ -1063,7 +1063,15 @@ DICT_LOGS: tuple[str, ...] = ("mail_log", "steered_log", "turn_error_log",
                               # of it rode the eager document; stripping the
                               # consumed projections cut 94% of the bytes and
                               # this takes the rest off the hot path.
-                              "steer_attempts")
+                              "steer_attempts",
+                              # a docket item's scope record past its newest
+                              # few rows, keyed by the item's slug (docket-
+                              # history-lazy 2026-09-26): scope was 72% of the
+                              # 11.8 MB eager `work_items` value on the live
+                              # org, and every whole-org copy decoded all of
+                              # it. The item keeps only its newest rows inline;
+                              # `Ledger._work_scope_all` reads across the two.
+                              "work_scope_log")
 #: dict logs whose per-owner value is KEYED — {id: entry} — rather than an
 #: ordered list. Stored as the SAME log_d rows with val = [id, entry] pairs
 #: (one row per entry, identity preserved by the ordinary row differ), and

@@ -1061,10 +1061,21 @@ class WorkItem(TypedDict):
     # unwritable because every description change and every ruling appends
     # here. Read the record through `Org._work_scope_all`, never through this
     # field alone.
+    # ⚠ STORAGE IS NOT THE VIEW (docket-history-lazy 2026-09-26). This field
+    # now STORES only the item's newest Org.WORK_SCOPE_INLINE rows; older rows
+    # live in the org's lazy `work_scope_log[slug]`. The complete record is
+    # `scope_archive` (legacy, healed away) + `work_scope_log[slug]` + this,
+    # and the wire's live window / `scope_archive` split is rebuilt from it by
+    # `scope_rolled`, so what a reader sees is unchanged.
     scope: NotRequired[list[WorkScopeRecord]]
-    #: rows that rolled out of the live window, oldest first. UNCAPPED: this is
-    #: what makes the cap above a window rather than a dead end.
+    #: LEGACY: rows that rolled out of the live window, stored inline by the
+    #: build before docket-history-lazy. Read, never written; the heal moves
+    #: them into `work_scope_log` and counts them into `scope_rolled`.
     scope_archive: NotRequired[list[WorkScopeRecord]]
+    #: how many of the oldest rows of the complete record have ROLLED OVER out
+    #: of the live window (the W09 rollover past WORK_SCOPE_MAX). The wire
+    #: serves those as `scope_archive` and the rest as `scope`.
+    scope_rolled: NotRequired[int]
     scope_seq: NotRequired[int]     # monotonic; mints the next row's `seq`
     #: stamped by every scope append this build makes (Org.WORK_SCOPE_GUARD).
     #: Its ABSENCE on an item at the cap is the only evidence that the item
@@ -1198,6 +1209,9 @@ class OrgDoc(TypedDict):
     # per-NODE steering attempt journal (store.KEYED_DICT_LOGS); declared here
     # so the P04a-1 census (ledger.NODE_KEYED_SECTIONS) reads it from the schema
     steer_attempts: NotRequired[dict[str, dict[str, dict[str, Any]]]]
+    # per-ITEM scope rows older than the item's inline tail (store.DICT_LOGS,
+    # keyed by work item slug); see WorkItem.scope
+    work_scope_log: NotRequired[dict[str, list[WorkScopeRecord]]]
     watchdog_history: NotRequired[list[dict[str, Any]]]  # retained watchdog events {.., watchdog, node}
     # (`account_token_uuid` — the per-org account selection — lived here
     # until 2026-08-25. Account routing is machine-local and per model tier

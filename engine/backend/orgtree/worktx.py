@@ -191,6 +191,15 @@ def rows_for(action: str, a: dict[str, Any]) -> Rows:
         r.notify()
         r.sections.add("work_deleted_names")
         r.logs.add("user_outbox")
+        if a.get("slug"):
+            r.logs.add(("work_scope_log", str(a["slug"])))
+    if action == "update" and a.get("slug") and any(
+            a.get(k) is not None for k in ("objective", "objective_append",
+                                           "acceptance", "acceptance_add")):
+        # a scope row appended; the item's older rows may spill into its log
+        r.logs.add(("work_scope_log", str(a["slug"])))
+    elif action == "decision" and a.get("slug"):
+        r.logs.add(("work_scope_log", str(a["slug"])))
     if a.get("attention") is not None or a.get("attention_amend"):
         r.sections.add("user_inbox")
     return r
@@ -269,7 +278,10 @@ def sweep(slug: str, now_ts: float | None = None, *,
     except Exception:                                   # noqa: BLE001
         pass            # an unreadable snapshot: sweep unconditionally, as before
     return tx(slug, lambda org: org._work_archive_eligible(now_ts),  # pyright: ignore[reportPrivateUsage]
-              rows=Rows(logs={"events", "work_items_archive"}),
+              # work_scope_log WHOLE: the one-time docket-history heal may
+              # spill every item's scope at once, which a per-owner widen
+              # would take one retry per item to discover (MAX_WIDEN)
+              rows=Rows(logs={"events", "work_items_archive", "work_scope_log"}),
               lock_timeout=lock_timeout)
 
 
