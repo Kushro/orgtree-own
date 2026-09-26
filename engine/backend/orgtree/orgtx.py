@@ -848,6 +848,52 @@ def _pg_error(e: BaseException) -> BaseException:
     return e
 
 
+#: the row a lock-plan entry names, per kind (S-F: run inside _lock_block)
+_LOCK_ROW_SQL = {"node": "SELECT 1 FROM nodes WHERE id = {}",
+                 "section": "SELECT 1 FROM doc WHERE key = {}",
+                 "log": "SELECT 1 FROM log_d WHERE sect = {} AND owner = {}"}
+
+
+def _lock_block(raw: Any, org_id: int,
+                entries: list[tuple[str, str, bool]]) -> "str | None":
+    """S-F (pg-per-call-cost): one org's row locks as ONE statement.
+
+    Each entry of the lock plan was two round trips: its advisory lock, then
+    `SELECT ... FOR UPDATE / FOR SHARE` on the row. They now run as a single
+    `DO` block, in `entries`' order. THE ORDER IS THE DEADLOCK-FREEDOM
+    ARGUMENT (every transaction takes the same plan order), and PL/pgSQL
+    executes a block's statements strictly in sequence, which is documented;
+    a single SELECT's target-list order is not, so that is not used.
+
+    A DO block takes no bind parameters, so the values are inlined as
+    `psycopg.sql.Literal`s (quoted by the driver), and the dollar-quote tag
+    is random per call and verified absent from the body, so no name can end
+    the body early. `SET LOCAL lock_timeout` applies inside the block, and a
+    failure keeps its SQLSTATE (55P03, 40P01), so `_pg_error` maps it exactly
+    as before. None when there is nothing to lock."""
+    if not entries:
+        return None
+    import secrets
+    from psycopg import sql
+    lines: list[str] = []
+    for kind, name, exclusive in entries:
+        fn = "pg_advisory_xact_lock" if exclusive else "pg_advisory_xact_lock_shared"
+        lines.append(sql.SQL("PERFORM {}({}, hashtext({}));").format(
+            sql.SQL(fn), sql.Literal(int(org_id)),
+            sql.Literal(f"{kind}:{name}")).as_string(raw))
+        if name == _ALL_NODES_KEY:
+            continue                                   # a pseudo-row: no table row
+        args = tuple(json.loads(name)) if kind == "log" else (name,)
+        row = sql.SQL(_LOCK_ROW_SQL[kind]).format(*(sql.Literal(a) for a in args))
+        lines.append("PERFORM " + row.as_string(raw)[len("SELECT "):]
+                     + (" FOR UPDATE;" if exclusive else " FOR SHARE;"))
+    body = "BEGIN\n" + "\n".join(lines) + "\nEND"
+    while True:
+        tag = "$orgtx_" + secrets.token_hex(6) + "$"
+        if tag not in body:
+            return f"DO {tag}{body}{tag}"
+
+
 class PgBackend:
     """org_tx on PostgreSQL: ONE server connection and ONE transaction for
     every org the call names, pinned so the seam's loads and saves run inside
@@ -887,9 +933,6 @@ class PgBackend:
         try:
             for tx in order:
                 _pause("before_lock", tx)
-            sel = {"node": "SELECT 1 FROM nodes WHERE id = %s",
-                   "section": "SELECT 1 FROM doc WHERE key = %s",
-                   "log": "SELECT 1 FROM log_d WHERE sect = %s AND owner = %s"}
             try:
                 raw.execute("BEGIN")
                 # LOCAL: dies with this transaction, so a pooled connection
@@ -929,18 +972,12 @@ class PgBackend:
                                     "SELECT key FROM doc ORDER BY key FOR UPDATE").fetchall()],
                                 [(str(r[0]), str(r[1])) for r in raw.execute(
                                     "SELECT DISTINCT sect, owner FROM log_d").fetchall()])
-                    for kind, name, exclusive in _lock_plan(tx, ids):
-                        if kind == "org" or (tx.all_nodes and kind == "node"):
-                            continue                   # taken above, in bulk
-                        fn = ("pg_advisory_xact_lock" if exclusive
-                              else "pg_advisory_xact_lock_shared")
-                        raw.execute(f"SELECT {fn}(%s, hashtext(%s))",
-                                    (conn.org_id, f"{kind}:{name}"))
-                        if name == _ALL_NODES_KEY:
-                            continue                   # a pseudo-row: no table row
-                        args = tuple(json.loads(name)) if kind == "log" else (name,)
-                        raw.execute(sel[kind] + (" FOR UPDATE" if exclusive else " FOR SHARE"),
-                                    args)
+                    # S-F: the rest of the plan in ONE statement (see _lock_block)
+                    block = _lock_block(raw, conn.org_id, [
+                        e for e in _lock_plan(tx, ids)
+                        if not (e[0] == "org" or (tx.all_nodes and e[0] == "node"))])
+                    if block is not None:
+                        raw.execute(block)
             except Exception as e:
                 raise _pg_error(e) from e
             for tx in order:

@@ -1239,5 +1239,108 @@ class HealExclusiveOnPostgres(unittest.TestCase):
         self.assertIn('_migrations', store.load_org(self.slug).d)
 
 
+@unittest.skipUnless(ADMIN, 'ORGTREE_TEST_PG_ADMIN_URL not set: NOT RUN')
+class LockBlockOnPostgres(unittest.TestCase):
+    """S-F: an org's row locks are ONE DO block, in the lock plan's order."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        store.claim_data_root()
+        orgtx.use_backend(orgtx.PgBackend())
+
+    def setUp(self) -> None:
+        orgtx.TRANSITION_FENCE = False
+        self.slug = _fresh_org(f'pglb-{self._testMethodName}'[:60])
+
+    def _recording(self):
+        """Every statement the transaction's raw connection runs."""
+        from unittest.mock import patch
+        seen: list[str] = []
+        real_checkout, real_release = pgstore._checkout, pgstore._release
+
+        class Rec:
+            def __init__(self, raw):
+                object.__setattr__(self, '_raw', raw)
+
+            def execute(self, q, *a, **k):
+                seen.append(q if isinstance(q, str) else str(q))
+                return self._raw.execute(q, *a, **k)
+
+            def __getattr__(self, n):
+                return getattr(self._raw, n)
+
+        def release(raw):
+            return real_release(getattr(raw, '_raw', raw))
+        return seen, patch.multiple(pgstore, _checkout=lambda: Rec(real_checkout()),
+                                    _release=release)
+
+    def test_two_lock_statements_per_org(self) -> None:
+        seen, p = self._recording()
+        with p:
+            with orgtx.org_tx(self.slug, nodes=['a', 'b'], sections=['settings_x'],
+                              share_nodes=['c']) as tx:
+                tx.d['nodes']['a']['name'] = 'A'
+        locks = [q for q in seen if 'pg_advisory' in q]
+        self.assertEqual(len(locks), 2, locks)          # org pseudo-row + ONE block
+        self.assertTrue(locks[1].startswith('DO $orgtx_'), locks[1][:40])
+        rows = [q for q in seen if (' FOR UPDATE' in q or ' FOR SHARE' in q)
+                and not q.startswith('DO ')]
+        self.assertEqual(rows, [], 'a row lock ran outside the block')
+        self.assertEqual(_node(self.slug, 'a')['name'], 'A')
+
+    def test_the_block_locks_in_plan_order(self) -> None:
+        # _lock_plan's documented order: the node pseudo-row (shared unless
+        # all_nodes), nodes by ascending id, then sections by ascending key
+        import re
+        seen, p = self._recording()
+        with p:
+            with orgtx.org_tx(self.slug, nodes=['c', 'a'], sections=['settings_x', 'killswitch'],
+                              share_nodes=['b']) as tx:
+                tx.d['nodes']['a']['name'] = 'A'
+        block = next(q for q in seen if q.startswith('DO '))
+        got = [(m.group(2), 'S' if m.group(1) else 'X') for m in
+               re.finditer(r"pg_advisory_xact_lock(_shared)?\(\d+, hashtext\('([^']*)'\)\)", block)]
+        self.assertEqual(got, [(f'node:{orgtx._ALL_NODES_KEY}', 'S'), ('node:a', 'X'),
+                               ('node:b', 'S'), ('node:c', 'X'),
+                               ('section:killswitch', 'X'), ('section:settings_x', 'X')])
+
+    def test_opposite_request_orders_never_deadlock(self) -> None:
+        errors: list[BaseException] = []
+        deadlocks: list[int] = []
+        real = orgtx._pg_error
+
+        def spy(e):
+            out = real(e)
+            if isinstance(out, orgtx.DeadlockDetected):
+                deadlocks.append(1)
+            return out
+
+        def worker(order: list[str]) -> None:
+            try:
+                for i in range(15):
+                    with orgtx.org_tx(self.slug, nodes=order, lock_timeout=10) as tx:
+                        for n in order:
+                            tx.d['nodes'][n]['name'] = f'{n}{i}'
+                        time.sleep(0.002)
+            except BaseException as e:            # noqa: BLE001  reported below
+                errors.append(e)
+        from unittest.mock import patch
+        with patch.object(orgtx, '_pg_error', spy):
+            ts = [threading.Thread(target=worker, args=(o,), daemon=True)
+                  for o in (['a', 'b', 'c'], ['c', 'b', 'a'], ['b', 'c', 'a'])]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(60)
+        self.assertEqual(errors, [])
+        self.assertEqual(deadlocks, [])
+
+    def test_a_name_that_looks_like_quoting_is_locked_and_written(self) -> None:
+        odd = "q'x$orgtx_ab$y"
+        with orgtx.org_tx(self.slug, nodes=[odd]) as tx:
+            tx.d['nodes'][odd] = {'id': odd, 'name': 'odd', 'parent': None, 'children': []}
+        self.assertEqual(_node(self.slug, odd)['name'], 'odd')
+
+
 if __name__ == '__main__':
     unittest.main()
