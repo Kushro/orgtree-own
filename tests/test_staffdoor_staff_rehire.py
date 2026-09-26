@@ -212,6 +212,22 @@ class StaffRehireParity(_Base):
         self.assertEqual(d.exception.detail.count(STANDS), 1, d.exception.detail)
         self.assertEqual(d.exception.detail, c.exception.detail)
 
+    def test_a_malformed_mode_is_a_422_with_the_door_on(self):
+        # review f3: routed() runs outside any 422 wrapper, so _staff_on_door
+        # must answer "not routed" and let the cycle state the refusal
+        self.assertTrue(pgdoor.enabled())
+        for extra, words in (({'staff_mode': 'bogus'},
+                              'staff_mode must be hire or rehire'),
+                             ({'staff_mode': 'hire'}, 'does not take `node`')):
+            with self.subTest(**extra):
+                r0 = self.rev()
+                with self.assertRaises(HTTPException) as cm:
+                    self.staff(title='T', objective='Problem. Fix.', **extra)
+                self.assertEqual(cm.exception.status_code, 422)
+                self.assertIn(words, str(cm.exception.detail))
+                self.assertEqual(self.rev(), r0)
+        self.assertEqual(store.load_org(self.slug).nodes['x']['state'], 'archived')
+
     def test_rename_then_rehire_on_the_door(self):
         r = self.staff(name='xx', title='T', objective='Problem. Fix.')
         self.assertEqual(r['node'], 'xx')
