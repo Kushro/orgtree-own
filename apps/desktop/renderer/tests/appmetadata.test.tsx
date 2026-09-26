@@ -22,7 +22,8 @@ test('App fetch initializes live desk metadata and App disposal clears it', asyn
     work_items_summary: { attention: 0, active: 0 },
   }
   const globals = globalThis as unknown as Record<string, unknown>
-  const saved = { fetch: globals.fetch, socket: globals.WebSocket, history: globals.history }
+  const saved = { fetch: globals.fetch, socket: globals.WebSocket, history: globals.history,
+    customEvent: globals.CustomEvent }
   let treeReads = 0
   const sockets: Socket[] = []
   class Socket {
@@ -48,6 +49,7 @@ test('App fetch initializes live desk metadata and App disposal clears it', asyn
   }
   globals.WebSocket = Socket
   globals.history = window.history
+  globals.CustomEvent = window.CustomEvent
   localStorage.clear(); resetConvos()
   window.history.replaceState(null, '', `/o/${org}`)
   // A separate desk subscriber remains mounted while App is disposed. Its
@@ -75,5 +77,6 @@ test('App fetch initializes live desk metadata and App disposal clears it', asyn
     await view.unmount(); resetConvos(); localStorage.clear()
     window.history.replaceState(null, '', '/')
     globals.fetch = saved.fetch; globals.WebSocket = saved.socket; globals.history = saved.history
+    globals.CustomEvent = saved.customEvent
   }
 })
