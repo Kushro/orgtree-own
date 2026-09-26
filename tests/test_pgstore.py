@@ -1140,5 +1140,104 @@ class DeleteOrgExclusiveOnPostgres(unittest.TestCase):
         self.assertEqual(_node(self.slug, 'a')['name'], 'a')
 
 
+@unittest.skipUnless(ADMIN, 'ORGTREE_TEST_PG_ADMIN_URL not set: NOT RUN')
+class HealExclusiveOnPostgres(unittest.TestCase):
+    """S9 (lead decision 44 (1), p01's landing condition): the org_tx
+    load-heal commits inside orgtx.org_exclusive on PostgreSQL, where the
+    exclusive is an advisory xact lock held on one pooled connection while
+    the heal's load and save use another. Fence OFF. The SQLite twin is
+    tests/test_orgtx_heal_exclusive.py."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        store.claim_data_root()
+        orgtx.use_backend(orgtx.PgBackend())
+
+    def setUp(self) -> None:
+        orgtx.TRANSITION_FENCE = False
+        self.slug = _fresh_org(f'pgheal-{self._testMethodName}'[:60])
+
+    def _unheal(self) -> None:
+        org = store.load_org(self.slug)
+        self.assertIsNotNone(dict.pop(org.d, '_migrations', None))
+        store.save_org(org)
+
+    def test_a_heal_completes_under_the_advisory_exclusive(self) -> None:
+        self._unheal()
+        heals: list[str] = []
+        real = orgtx._heal
+        from unittest.mock import patch
+        with patch.object(orgtx, '_heal', lambda s: (heals.append(s), real(s))[1]):
+            with orgtx.org_tx(self.slug, nodes=['a'], lock_timeout=10) as tx:
+                tx.d['nodes']['a']['name'] = 'after-heal'
+        self.assertEqual(heals, [self.slug], 'the heal path really ran')
+        self.assertIn('_migrations', store.load_org(self.slug).d)
+        self.assertEqual(_node(self.slug, 'a')['name'], 'after-heal')
+
+    def test_two_writers_healing_together_make_one_heal_save(self) -> None:
+        import sys
+        from unittest.mock import patch
+        self._unheal()
+        both_loaded = threading.Barrier(2, timeout=10)
+        heal_race = threading.Barrier(2, timeout=1.5)
+        first = threading.local()
+        heal_saves: list[str] = []
+        real_check, real_load, real_save = orgtx._check_heal, store._load_sqlite_org, store._save_org
+
+        def check(tx):
+            if not getattr(first, 'done', False):
+                first.done = True
+                both_loaded.wait()
+            return real_check(tx)
+
+        def load(slug, *a, **k):
+            org = real_load(slug, *a, **k)
+            if sys._getframe(1).f_code.co_name == '_heal':
+                try:
+                    heal_race.wait()
+                except threading.BrokenBarrierError:
+                    pass
+            return org
+
+        def save(org):
+            if sys._getframe(1).f_code.co_name == '_heal':
+                heal_saves.append(org.d.get('slug'))
+            return real_save(org)
+
+        errors: list[BaseException] = []
+
+        def writer(nid: str) -> None:
+            try:
+                with orgtx.org_tx(self.slug, nodes=[nid], lock_timeout=10) as tx:
+                    tx.d['nodes'][nid]['name'] = f'written-{nid}'
+            except BaseException as e:            # noqa: BLE001  reported below
+                errors.append(e)
+
+        with patch.object(orgtx, '_check_heal', check), \
+                patch.object(store, '_load_sqlite_org', load), \
+                patch.object(store, '_save_org', save):
+            ts = [threading.Thread(target=writer, args=(n,), daemon=True) for n in 'ab']
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(30)
+        self.assertEqual(errors, [])
+        self.assertEqual(heal_saves, [self.slug], 'exactly one heal save; the waiter re-checks')
+        self.assertIn('_migrations', store.load_org(self.slug).d)
+        self.assertEqual(_node(self.slug, 'a')['name'], 'written-a')
+        self.assertEqual(_node(self.slug, 'b')['name'], 'written-b')
+
+    def test_tripwire_records_no_save_for_a_heal(self) -> None:
+        self._unheal()
+        try:
+            with store.doc_lock_tripwire(raising=True) as counts:
+                with orgtx.org_tx(self.slug, nodes=['a'], lock_timeout=10) as tx:
+                    tx.d['nodes']['a']['name'] = 'after-heal'
+                self.assertEqual((counts['save'], counts['legacy']), ({}, {}))
+        finally:
+            store.arm_doc_lock_tripwire('off')
+        self.assertIn('_migrations', store.load_org(self.slug).d)
+
+
 if __name__ == '__main__':
     unittest.main()
