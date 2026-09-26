@@ -101,6 +101,12 @@ def _guard(event, args):
 
 sys.addaudithook(_guard)
 
+# before the environment is rewritten below: the scan cache records the runner's run root at import
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+import state_operation_contracts as contracts  # noqa: E402
+import inventory_scan_cache  # noqa: E402,F401 -- one shared source scan per suite run
+
 # ---- the isolated git environment ----------------------------------------------------------------------------------
 _data, _home = _temp / "data", _temp / "home"
 _data.mkdir()
@@ -127,10 +133,6 @@ import re  # noqa: E402
 import subprocess  # noqa: E402
 import unittest  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools"))
-import state_operation_contracts as contracts  # noqa: E402
-import inventory_scan_cache  # noqa: E402,F401 -- one shared source scan per suite run
 import import_provenance  # noqa: E402,F401  (also drops the running engine's inherited hub address)
 from engine.launch import load_app  # noqa: E402
 app, *_ = load_app()

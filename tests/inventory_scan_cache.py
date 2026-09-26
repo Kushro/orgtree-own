@@ -34,10 +34,15 @@ _real_scan = _contracts.inventory.scan
 _memo: dict[str, dict] = {}
 
 
+# Read ONCE, at import: every test module then points ORGTREE_DATA at its own temp
+# folder (some clear ORGTREE_* entirely), so the runner's value is only visible now.
+# Each module imports this before it rewrites its environment.
+_RUN_ROOT = (Path(os.environ["ORGTREE_DATA"]).parent
+             if os.environ.get("ORGTREE_VERIFY_MODULE") and os.environ.get("ORGTREE_DATA") else None)
+
+
 def _shared(key: str) -> Path | None:
-    if not (os.environ.get("ORGTREE_VERIFY_MODULE") and os.environ.get("ORGTREE_DATA")):
-        return None
-    return Path(os.environ["ORGTREE_DATA"]).parent / f"inventory-scan-{key}.pickle"
+    return None if _RUN_ROOT is None else _RUN_ROOT / f"inventory-scan-{key}.pickle"
 
 
 def _fingerprint(repo: Path) -> str:
