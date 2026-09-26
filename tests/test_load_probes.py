@@ -10,8 +10,8 @@ reads (about 35 statements; each a round trip on PostgreSQL). Now: one meta
     presence, doc, nodes), however many log sections are present;
   * `_load_probes` answers exactly what the per-section probes answered
     (the old algorithm is re-implemented here) across fixtures: no logs,
-    list and dict rows, an owners meta row without rows, an owners meta row
-    with a NULL value, and a whole loaded document is unchanged.
+    list and dict rows, an owners meta row without rows; and a loaded
+    document still has its sections.
 
 Run:  python tools/run-python-verification.py tests/test_load_probes.py
 """
@@ -105,12 +105,11 @@ class LoadProbes(unittest.TestCase):
         self.assertEqual(new, old)
         self.assertTrue({'events', 'notice_log', 'mail_log'} <= new[2], new[2])
 
-    def test_owners_meta_row_counts_as_present_and_null_does_not(self) -> None:
+    def test_an_owners_meta_row_alone_makes_a_dict_log_present(self) -> None:
+        # (meta.val is NOT NULL, so a NULL owners value cannot exist)
         with store._POOL.acquire(self.slug) as conn:
             conn.execute('BEGIN')
             store._meta_set(conn, store._META_OWNERS + 'steered_log', '[]')
-            conn.execute('INSERT INTO meta(key, val) VALUES(?, NULL)',
-                         (store._META_OWNERS + 'turn_error_log',))
             conn.execute('COMMIT')
         new, old = self._both()
         self.assertEqual(new, old)
