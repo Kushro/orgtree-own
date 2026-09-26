@@ -127,6 +127,7 @@ for _k in ("ORGTREE_V1_ROOT", "ORGTREE_V1_DATA_ROOT", "ORGTREE_V2_PORT", "GIT_DI
     os.environ.pop(_k, None)
 
 from collections import Counter  # noqa: E402
+import shutil  # noqa: E402
 import copy  # noqa: E402
 import json  # noqa: E402
 import re  # noqa: E402
@@ -194,6 +195,50 @@ def sh(cwd, *args):
     return r.stdout.strip()
 
 
+# The three files git writes an absolute path into for this layout: the repo's origin url, the worktree's
+# .git pointer, and the repo's record of where that worktree lives.
+PATH_FILES = ("repo/.git/config", "wt/.git", "repo/.git/worktrees/wt/gitdir")
+
+
+def _template():
+    """The fixture's git set, built with real git ONCE per module run (7 launches), then copied per case."""
+    tpl = _temp / "template"
+    if not tpl.exists():
+        tpl.mkdir()
+        remote, repo, wt = tpl / "remote.git", tpl / "repo", tpl / "wt"
+        sh(tpl, "init", "--bare", "-b", "main", str(remote))
+        sh(tpl, "init", "-b", "main", str(repo))
+        (repo / "a.txt").write_text("one\n", encoding="utf-8")
+        sh(repo, "add", "a.txt")
+        sh(repo, "commit", "-m", "first")
+        sh(repo, "remote", "add", "origin", str(remote))
+        sh(repo, "push", "-u", "origin", "main")
+        sh(repo, "worktree", "add", "-b", "feature", str(wt))
+    return tpl
+
+
+def _copy_template(base):
+    """A private copy of the template at `base`: every path git recorded is rewritten to the copy, and the copy
+    must name the template nowhere, so no case can reach another case's (or the template's) repositories."""
+    tpl = _template()
+    shutil.copytree(tpl, base)
+    # git writes the origin url into its config with every backslash doubled, and the worktree links with /
+    forms = [(str(tpl).replace("\\", "\\\\"), str(base).replace("\\", "\\\\")), (str(tpl), str(base)),
+             (tpl.as_posix(), base.as_posix())]
+    for rel in PATH_FILES:
+        f = base / rel
+        text = f.read_text(encoding="utf-8")
+        for old, new in forms:
+            text = text.replace(old, new)
+        with open(f, "r+", encoding="utf-8", newline="") as h:     # "w" is refused: git hides wt/.git on Windows
+            h.write(text)
+            h.truncate()
+    for f in base.rglob("*"):
+        if f.is_file():
+            data = f.read_bytes().lower()
+            assert not any(old.lower().encode("utf-8") in data for old, _ in forms), f"{f} still names the template"
+
+
 def fresh():
     SEQ[0] += 1
     n = SEQ[0]
@@ -201,16 +246,8 @@ def fresh():
     slug = str(org.d["slug"])
     org.hire(ledger.USER, None, "haiku", 20, "top", add_dirs=[], tools={}, charter="fixture")
     base = _temp / f"r{n}"
-    base.mkdir()
     remote, repo, wt, other = base / "remote.git", base / "repo", base / "wt", base / "other"
-    sh(base, "init", "--bare", "-b", "main", str(remote))
-    sh(base, "init", "-b", "main", str(repo))
-    (repo / "a.txt").write_text("one\n", encoding="utf-8")
-    sh(repo, "add", "a.txt")
-    sh(repo, "commit", "-m", "first")
-    sh(repo, "remote", "add", "origin", str(remote))
-    sh(repo, "push", "-u", "origin", "main")
-    sh(repo, "worktree", "add", "-b", "feature", str(wt))
+    _copy_template(base)
     org.d["dirs"] = list(org.d["dirs"]) + [{"path": str(base), "mode": "rw"}]
     org.d["work_items"] = [{"slug": "f8-item", "title": "F8 fixture item", "status": "open",
                             "owner": {"node": "top", "generation": 0}}]
