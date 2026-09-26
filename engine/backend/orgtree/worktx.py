@@ -258,9 +258,18 @@ def due(org: Org, now_ts: float | None = None) -> bool:
     only: an active item that is eligible (done or superseded for over an
     hour, dropped at once) and holds no attention."""
     now_ts = _time.time() if now_ts is None else now_ts
+    active = org._work_active()  # pyright: ignore[reportPrivateUsage]
+    # ...or does an item still need the docket-history heal (its scope past
+    # WORK_SCOPE_INLINE inline, or a legacy inline scope_archive)? The heal
+    # runs inside the same transaction, so without this clause it would wait
+    # for something to become archivable (pg-workitems review N1).
+    if any(it.get("scope_archive")
+           or len(it.get("scope") or []) > org.WORK_SCOPE_INLINE
+           for it in active):
+        return True
     return any(org._work_eligible(it, now_ts)  # pyright: ignore[reportPrivateUsage]
                and not org._work_attention(it)  # pyright: ignore[reportPrivateUsage]
-               for it in org._work_active())  # pyright: ignore[reportPrivateUsage]
+               for it in active)
 
 
 def sweep(slug: str, now_ts: float | None = None, *,

@@ -88,6 +88,37 @@ class SweepWhenDue(unittest.TestCase):
         self.assertEqual(self.txs, 0)
         self.assertFalse(archived(self.slug, self.item))
 
+    def test_a_legacy_scope_heals_on_a_sweep_with_nothing_archivable(self):
+        """docket-history-lazy (pg-workitems review N1): the heal lives in the
+        sweep's transaction, so `due` must open it for an item still carrying
+        its whole scope inline even when nothing is archivable."""
+        org = store.load_org(self.slug)
+        it = next(i for i in org.d['work_items'] if i['slug'] == self.item)
+        legacy = [{'seq': n, 'at': 't', 'by': 'own', 'kind': 'decision',
+                   'text': f'r{n}', 'supersedes': None, 'superseded_by': None}
+                  for n in range(1, 13)]
+        it['scope_archive'] = legacy[:3]
+        it['scope'] = legacy[3:]
+        it['scope_seq'] = 12
+        it.pop('scope_logged', None)
+        it.pop('scope_rolled', None)
+        store.save_org(org)
+        self.txs = 0
+        self.assertTrue(worktx.due(store.cached_org(self.slug)))
+        self.assertEqual(worktx.sweep(self.slug), [])      # nothing archived
+        self.assertEqual(self.txs, 1)
+        self.assertFalse(archived(self.slug, self.item))
+        org = store.load_org(self.slug)
+        it = next(i for i in org.d['work_items'] if i['slug'] == self.item)
+        self.assertNotIn('scope_archive', it)
+        self.assertEqual(len(it['scope']), org.WORK_SCOPE_INLINE)
+        self.assertEqual([r['seq'] for r in org._work_scope_all(it)],
+                         list(range(1, 13)))
+        # healed: the next sweep is not due and opens nothing
+        self.assertFalse(worktx.due(store.cached_org(self.slug)))
+        self.assertEqual(worktx.sweep(self.slug), [])
+        self.assertEqual(self.txs, 1)
+
     def test_dropped_is_swept_at_once(self):
         self._set(status='dropped', dropped_reason='Cancelled by the test; nothing to resume.')
         self.assertTrue(worktx.due(store.cached_org(self.slug)))
