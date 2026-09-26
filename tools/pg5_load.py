@@ -28,6 +28,14 @@ ref present, every mail landed in its recipient's inbox, the reads all
 answered). An arm whose counters did not advance, or whose correctness
 check failed, is reported as failed and its latencies are not the headline.
 
+THE FENCE-OFF GATE (plan decision 42 step 3). Each child arms the DOC_LOCK
+tripwire in `count` (the adapter has no lifespan to do it), counts every
+StaleWrite, and reports both twice: `setup` (the fixture) and `load` (re-armed
+after the fixture, so it holds the workloads only). With `--after-fence off`
+the postgres arm must show legacy_total == 0, save_total == 0 (exempt sites
+allowed) and no StaleWrite, or `fence_off_gate` fails and so does the run.
+It covers the tools in the mix only: mail send, status, work evidence, read.
+
 Usage (HEAVY: only through the run lock, exclusive):
   python tools/pg5_load.py --arms sqlite postgres --pg-admin-url <disposable>
       --pydeps <folder with psycopg> --output artifacts/pg5/load.json
@@ -89,6 +97,11 @@ def child(root: Path, nonce: str, config: dict) -> None:
         store = adapter.store
         if store.STORE_BACKEND != config["arm"]:
             raise RuntimeError(f"store backend {store.STORE_BACKEND!r} is not the arm {config['arm']!r}")
+        # the fence-off gate's measurement (plan decision 42 step 3): the
+        # engine arms the DOC_LOCK tripwire at the end of its lifespan, and
+        # this adapter has none, so the child arms it itself, in `count`
+        store.arm_doc_lock_tripwire("count")
+        stale = _count_stale_writes(store)
         if config["arm"] == "postgres":
             store.claim_data_root()           # migrates the disposable database
         from orgtree import orgtx
@@ -101,13 +114,61 @@ def child(root: Path, nonce: str, config: dict) -> None:
             fence = "absent (requested off; this build has no fence)"
         adapter.fixture(AGENTS)
         slug, _ = adapter.item("pg5 load", AGENTS)
-        rows = [measure(adapter, slug, mode, config) for mode in config["modes"]]
+        # the fixture is setup, not load: its report is kept apart, and the
+        # tripwire is re-armed (counts reset) before the first workload
+        setup = {"doc_lock_tripwire": store.doc_lock_tripwire_report(), "stale_writes": stale[0]}
+        store.arm_doc_lock_tripwire("count")
+        stale[0] = 0
+        rows = []
+        for mode in config["modes"]:
+            before = stale[0]
+            rows.append(measure(adapter, slug, mode, config))
+            rows[-1]["stale_writes"] = stale[0] - before
+        if config.get("plant_legacy_doc_lock"):     # test-only: a legacy writer
+            with store.DOC_LOCK:
+                pass
+        load = {"doc_lock_tripwire": store.doc_lock_tripwire_report(), "stale_writes": stale[0]}
         result = {"arm": config["arm"], "store_backend": store.STORE_BACKEND,
-                  "transition_fence": fence,
+                  "transition_fence": fence, "setup": setup, "load": load,
                   "provenance": list(adapter.provenance), "workloads": rows}
         (root / "arm.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     finally:
         adapter.close()
+
+
+def _count_stale_writes(store) -> list[int]:
+    """Count every `store.StaleWrite` constructed in this process (a save
+    that lost its compare-and-set), whether or not a caller then retried or
+    swallowed it. Returns the live one-element counter."""
+    seen = [0]
+    mu = threading.Lock()
+    orig = store.StaleWrite.__init__
+
+    def counted(self, *a, **k):
+        with mu:
+            seen[0] += 1
+        orig(self, *a, **k)
+
+    store.StaleWrite.__init__ = counted
+    return seen
+
+
+def _fence_off_gate(arm: dict) -> dict:
+    """Plan decision 42 step 3, for the postgres arm at fence off: no legacy
+    DOC_LOCK acquisition and no save outside an org_tx during the load (the
+    tripwire's exempt sites are allowed), and no StaleWrite."""
+    trip = arm["load"]["doc_lock_tripwire"]
+    errors = []
+    if trip.get("mode") != "count" or trip.get("armed_at") is None:
+        errors.append(f"tripwire not armed in count mode: {trip.get('mode')!r}")
+    for key in ("legacy_total", "save_total"):
+        if trip.get(key) != 0:
+            errors.append(f"{key} = {trip.get(key)}: {trip['sites'][key.split('_')[0]]}")
+    if arm["load"]["stale_writes"] != 0:
+        errors.append(f"stale_writes = {arm['load']['stale_writes']}")
+    if arm.get("transition_fence") != "off":
+        errors.append(f"transition fence is {arm.get('transition_fence')!r}, not off")
+    return {"passed": not errors, "errors": errors}
 
 
 def measure(adapter, slug: str, mode: str, config: dict) -> dict:
@@ -312,6 +373,7 @@ def main(argv=None) -> int:
     p.add_argument("--after-fence", choices=["off", "as-built"], default="off",
                    help="orgtx.TRANSITION_FENCE in the postgres arm (plan decision 19: off)")
     p.add_argument("--output")
+    p.add_argument("--plant-legacy-doc-lock", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--root", help=argparse.SUPPRESS)
     p.add_argument("--nonce", help=argparse.SUPPRESS)
@@ -326,6 +388,8 @@ def main(argv=None) -> int:
         p.error("the postgres arm needs --pg-admin-url (a DISPOSABLE loopback server)")
     interpreter = runner.verification_module(REPO).select_interpreter(REPO, args.python).path
     config = {"operations": args.operations, "rate": args.rate, "modes": args.modes}
+    if args.plant_legacy_doc_lock:
+        config["plant_legacy_doc_lock"] = True
     report = {"schema": SCHEMA, "candidate": runner.identity(REPO), "config": config,
               "agents": AGENTS, "label": "STRESS LEVEL: 8 synthetic agents issuing calls back to back",
               "observed_fleet": OBSERVED_FLEET, "arms": [], "errors": []}
@@ -335,9 +399,13 @@ def main(argv=None) -> int:
         except Exception as exc:                                 # noqa: BLE001
             report["errors"].append(f"{arm}: {type(exc).__name__}: {exc}")
     report["candidate_unchanged"] = runner.identity(REPO) == report["candidate"]
+    gates = {a["arm"]: _fence_off_gate(a) for a in report["arms"]
+             if a["arm"] == "postgres" and args.after_fence == "off"}
+    report["fence_off_gate"] = gates or None
     report["passed"] = (not report["errors"] and report["candidate_unchanged"]
                         and len(report["arms"]) == len(args.arms)
-                        and all(w["classification"] == "passed" for a in report["arms"] for w in a["workloads"]))
+                        and all(w["classification"] == "passed" for a in report["arms"] for w in a["workloads"])
+                        and all(g["passed"] for g in gates.values()))
     encoded = json.dumps(report, indent=2) + "\n"
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)

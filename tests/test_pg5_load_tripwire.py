@@ -1,0 +1,139 @@
+"""PG-5 load driver (tools/pg5_load.py): the DOC_LOCK tripwire measurement.
+
+Plan decision 42 step 3 gates the fence-off on the postgres arm showing no
+legacy DOC_LOCK acquisition, no save outside an org_tx and no StaleWrite
+under load. pg5_load's child has no lifespan, so nothing armed the tripwire
+before this change and a zero would have meant nothing. These tests prove
+the child arms it and reports it: a legacy acquire PLANTED in the child's
+load phase is counted at the child's own site, an unplanted run carries no
+such site, and the gate refuses every way the report can say "not zero".
+
+The two end-to-end runs use the sqlite arm only (no database needed), 8
+calls each, through the tool's own parent/child isolation.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(REPO / "tools")]
+
+import pg5_load  # noqa: E402
+
+
+def _run(plant: bool) -> dict:
+    with tempfile.TemporaryDirectory(prefix="v3-pg5-tripwire-") as tmp:
+        out = Path(tmp) / "load.json"
+        cmd = [sys.executable, str(REPO / "tools" / "pg5_load.py"), "--arms", "sqlite",
+               "--modes", "fixed-work", "--operations", "8", "--min-free-commit-gb", "0",
+               "--python", sys.executable, "--output", str(out)]
+        if plant:
+            cmd.append("--plant-legacy-doc-lock")
+        r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=600)
+        if r.returncode:
+            raise AssertionError(f"pg5_load exit {r.returncode}: {r.stdout[-2000:]} {r.stderr[-2000:]}")
+        return json.loads(out.read_text(encoding="utf-8"))
+
+
+def _own_sites(trip: dict) -> dict[str, int]:
+    return {s: n for s, n in trip["sites"]["legacy"].items() if s.startswith("pg5_load.py:child:")}
+
+
+class TripwireEndToEnd(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.planted = _run(plant=True)
+        cls.plain = _run(plant=False)
+
+    def test_report_is_present_and_armed_in_count_mode(self) -> None:
+        for report in (self.planted, self.plain):
+            (arm,) = report["arms"]
+            self.assertEqual(arm["store_backend"], "sqlite")
+            for phase in ("setup", "load"):
+                trip = arm[phase]["doc_lock_tripwire"]
+                self.assertEqual(trip["mode"], "count", phase)
+                self.assertIsNotNone(trip["armed_at"], phase)
+                for key in ("legacy_total", "fence_total", "save_total", "exempt_total"):
+                    self.assertIsInstance(trip[key], int, (phase, key))
+                self.assertIsInstance(arm[phase]["stale_writes"], int, phase)
+            self.assertIsInstance(arm["workloads"][0]["stale_writes"], int)
+            self.assertEqual(arm["workloads"][0]["classification"], "passed",
+                             arm["workloads"][0]["errors"])
+
+    def test_a_planted_legacy_acquire_is_counted_at_its_site(self) -> None:
+        trip = self.planted["arms"][0]["load"]["doc_lock_tripwire"]
+        own = _own_sites(trip)
+        self.assertEqual(sum(own.values()), 1, f"planted acquire not counted once: {trip['sites']}")
+        self.assertGreaterEqual(trip["legacy_total"], 1)
+
+    def test_an_unplanted_run_has_no_such_site(self) -> None:
+        self.assertEqual(_own_sites(self.plain["arms"][0]["load"]["doc_lock_tripwire"]), {})
+
+    def test_the_load_report_does_not_carry_the_setup_events(self) -> None:
+        # re-armed after the fixture: the load report counts load only
+        arm = self.plain["arms"][0]
+        self.assertGreater(arm["load"]["doc_lock_tripwire"]["armed_at"],
+                           arm["setup"]["doc_lock_tripwire"]["armed_at"])
+
+    def test_no_gate_is_claimed_without_a_postgres_arm(self) -> None:
+        self.assertIsNone(self.plain["fence_off_gate"])
+
+
+def _arm(**trip) -> dict:
+    base = {"mode": "count", "armed_at": 1.0, "legacy_total": 0, "fence_total": 0,
+            "save_total": 0, "exempt_total": 2,
+            "sites": {"legacy": {}, "fence": {}, "save": {}, "exempt": {"store.py:create_org:1": 2}}}
+    base.update(trip)
+    return {"arm": "postgres", "transition_fence": "off",
+            "load": {"doc_lock_tripwire": base, "stale_writes": 0}}
+
+
+class Gate(unittest.TestCase):
+    def test_zero_passes_with_exempt_sites(self) -> None:
+        self.assertEqual(pg5_load._fence_off_gate(_arm()), {"passed": True, "errors": []})
+
+    def test_every_nonzero_fails(self) -> None:
+        cases = {
+            "legacy": _arm(legacy_total=1, sites={"legacy": {"api.py:x:1": 1}, "fence": {},
+                                                  "save": {}, "exempt": {}}),
+            "save": _arm(save_total=1, sites={"legacy": {}, "fence": {},
+                                              "save": {"api.py:y:2": 1}, "exempt": {}}),
+            "unarmed": _arm(mode="off", armed_at=None),
+        }
+        stale = _arm()
+        stale["load"]["stale_writes"] = 1
+        cases["stale"] = stale
+        fenced = _arm()
+        fenced["transition_fence"] = "on"
+        cases["fence on"] = fenced
+        for name, arm in cases.items():
+            with self.subTest(name):
+                g = pg5_load._fence_off_gate(arm)
+                self.assertFalse(g["passed"], name)
+                self.assertTrue(g["errors"], name)
+
+
+class StaleCounter(unittest.TestCase):
+    def test_every_constructed_stale_write_is_counted(self) -> None:
+        class StaleWrite(Exception):
+            pass
+
+        fake = types.SimpleNamespace(StaleWrite=StaleWrite)
+        seen = pg5_load._count_stale_writes(fake)
+        try:
+            raise fake.StaleWrite("lost the compare-and-set")
+        except StaleWrite as e:
+            self.assertEqual(str(e), "lost the compare-and-set")
+        fake.StaleWrite("constructed, swallowed")
+        self.assertEqual(seen, [2])
+
+
+if __name__ == "__main__":
+    unittest.main()
