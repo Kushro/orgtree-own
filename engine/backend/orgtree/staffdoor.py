@@ -247,13 +247,19 @@ pgdoor.declare("reallocate", rcdoor.op_reallocate_spec,
                body=rcdoor.op_reallocate_body)
 
 
-# ------------------------------------------- orgtree_staff (hire mode only)
+# ------------------------------- orgtree_staff (hire and rehire modes)
 
 def _staff_on_door(a: dict[str, Any]) -> bool:
-    """Only the HIRE mode is PG-3b's: the rehire mode (and its pre-lock
-    rename) belongs to PG-3a and keeps the DOC_LOCK cycle until they route it."""
+    """Both modes run on the door. The hire mode's rows are PG-3b's
+    (`hire_rows`); the rehire mode's are PG-3a's (`lifecycle_door.rehire_rows`,
+    agreed 2026-09-26), and its pre-lock rename has already run in agent_call,
+    its outcome arriving in `pre`. A malformed staff_mode is not routed: the
+    cycle states its refusal."""
     from . import api
-    return api._staff_mode(a) == "hire"
+    try:
+        return api._staff_mode(a) in ("hire", "rehire")
+    except LedgerError:
+        return False
 
 
 def _item_owner(org: Any, slug: str) -> str | None:
@@ -270,14 +276,23 @@ def staff_rows(org: Any, actor: str, a: dict[str, Any]) -> pgdoor.TxSpec:
     today — PG-3w's layout), and on an update the item's CURRENT owner, who
     is sent the handover notice (measured: that node's `mail_seq` changes).
     Participants who are noticed are rarer and ride the door's widening."""
-    h = hire_rows(org, actor, a)
+    from . import api
+    if api._staff_mode(a) == "rehire":
+        from . import lifecycle_door   # lazy: lifecycle_door never imports us
+        h = lifecycle_door.rehire_rows(org, actor, a)
+    else:
+        h = hire_rows(org, actor, a)
     nodes = h.nodes
     slug = str(a.get("slug") or "").strip()
     if slug:
         prev = _item_owner(org, slug)
-        if prev and prev in org.nodes:
+        if prev and prev in org.nodes and prev not in nodes:
             nodes = nodes + (prev,)
-    return pgdoor.TxSpec(nodes=nodes, sections=h.sections + ("work_items",),
+    sections = h.sections + (() if "work_items" in h.sections
+                             else ("work_items",))
+    return pgdoor.TxSpec(nodes=nodes, sections=sections,
+                         share_nodes=tuple(n for n in h.share_nodes
+                                           if n not in nodes),
                          share_sections=h.share_sections, logs=h.logs)
 
 
@@ -286,21 +301,26 @@ def staff_spec(snapshot: Any, body: Any, a: dict[str, Any]) -> pgdoor.TxSpec:
 
 
 def staff_body(tx: pgdoor.AgentTx) -> Any:
-    """`orgtree_staff` in hire mode on the door: exactly `api._staff_call`
-    (the seat via `_hire_seat`, then the docket create/update with that seat
-    as owner, the assignment notice) on the locked rows. Known impurity:
-    `_staff_call` fires `mail_notify` (a UI animation signal, no state) inside
-    the transaction, so a re-run may fire it twice — harmless."""
+    """`orgtree_staff` on the door, both modes: exactly `api._staff_call`
+    (the seat via `_hire_seat` / `_rehire_seat`, then the docket create/update
+    with that seat as owner, the assignment notice) on the locked rows. A
+    rehire's pre-lock rename arrives in `pre`; a refusal after it is NOT
+    wrapped here — api._agent_door applies `rename_stands` once, to any
+    refusal. An account rebind rides `_account_selection` to the door's
+    generic account step (its transcript copy runs after the commit). Known
+    impurity: `_staff_call` fires `mail_notify` (a UI animation signal, no
+    state) inside the transaction, so a re-run may fire it twice — harmless."""
     from . import api
     a = tx.args
-    need = staff_rows(tx.org, tx.node, a)
-    missing = [n for n in need.nodes if n not in tx.spec.nodes]
-    if missing:
-        raise pgdoor.Widen(nodes=missing)
+    need = tx.spec.covers(staff_rows(tx.org, tx.node, a))
+    if need.nodes or need.share_nodes:
+        raise pgdoor.Widen(nodes=need.nodes, share_nodes=need.share_nodes)
     drive: list[str] = []
     with _archive_deferred(tx.org):
-        result = api._staff_call(tx.org, tx.call.org, tx.node, a, drive, None,
-                                 [], tx.pre.get("harness"))
+        result = api._staff_call(tx.org, tx.call.org, tx.node, a, drive,
+                                 tx.pre.get("renamed_to"),
+                                 list(tx.pre.get("rename_warnings") or []),
+                                 tx.pre.get("harness"))
     check_created(tx.spec, str(result.get("node") or ""))
     tx.after.drive.extend(drive)
     return result
