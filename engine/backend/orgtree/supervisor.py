@@ -1184,8 +1184,20 @@ _turn_slots = turnslots.FairSlots(MAX_CONCURRENT)
 
 def set_turn_limit(limit: int) -> None:
     """Apply a new concurrent-turn limit live: raising admits queued turns at
-    once; lowering preempts nothing (running turns finish first)."""
+    once; lowering preempts nothing (running turns finish first).
+
+    Every turn STILL queued afterwards has its `queued_for_slot.limit`
+    refreshed (review f2: the banner names the CURRENT limit, not the one in
+    force when it queued), which also moves the tree fingerprint so the desk
+    re-renders. The scheduler's lock is released before `_state_lock` is
+    taken — the two are never held together."""
     _turn_slots.set_limit(limit)
+    live = _turn_slots.limit
+    with _state_lock:
+        for st in _state.values():
+            q = st.get("queued_for_slot")
+            if isinstance(q, dict) and q.get("limit") != live:
+                st["queued_for_slot"] = {**q, "limit": live}
 
 
 class _AdmissionCancelled(RuntimeError):
@@ -1216,7 +1228,11 @@ class _InterruptibleTurnSlot:
     def _queued(self, info: dict[str, Any]) -> None:
         with _state_lock:
             if self._state.get("admission_wait_token") is self._token:
-                self._state["queued_for_slot"] = dict(info)
+                # the LIVE limit, read under _state_lock: a set_turn_limit
+                # racing this either ran its refresh after us (and rewrites
+                # it) or changed the limit before this read
+                self._state["queued_for_slot"] = {**info,
+                                                  "limit": _turn_slots.limit}
 
     def __enter__(self) -> None:
         with _state_lock:

@@ -250,6 +250,39 @@ class FairSlotsBehaviour(unittest.TestCase):
         self.assertEqual(slots.snapshot()["held"], 0)
         self.assertEqual(slots.snapshot()["waiting"], 0)
 
+    def test_default_wait_never_times_out(self):
+        """Review f1: a production waiter blocks with NO timeout — a periodic
+        re-check of the cancel flag would be polling, however slow."""
+        slots = turnslots.FairSlots(0)
+        timeouts = []
+        real_wait = slots._cond.wait
+
+        def recording_wait(timeout=None):
+            timeouts.append(timeout)
+            return real_wait(timeout)
+
+        slots._cond.wait = recording_wait
+        flag = threading.Event()
+        out = []
+
+        def waiter():
+            try:
+                slots.acquire("a", cancelled=flag.is_set)
+            except turnslots.Cancelled:
+                out.append("cancelled")
+
+        th = threading.Thread(target=waiter, daemon=True)
+        th.start()
+        deadline = time.monotonic() + WAIT_S
+        while not timeouts and time.monotonic() < deadline:
+            time.sleep(0.002)
+        self.assertEqual(timeouts, [None], "positive control: it waited, untimed")
+        flag.set()
+        slots.wake()
+        th.join(WAIT_S)
+        self.assertEqual(out, ["cancelled"])
+        self.assertTrue(all(t is None for t in timeouts), timeouts)
+
     def test_release_without_acquire_is_refused(self):
         with self.assertRaises(RuntimeError):
             turnslots.FairSlots(1).release()
@@ -325,6 +358,43 @@ class SupervisorWiring(unittest.TestCase):
         self.assertEqual(out, ["cancelled"])
         self.assertNotIn("queued_for_slot", self.st)
         self.assertEqual(self.sup._turn_slots.snapshot()["waiting"], 0)
+
+    def test_halt_cut_wakes_a_queued_turn_at_once(self):
+        """Every cancel path must wake the queue now that nothing polls."""
+        from orgtree import halt
+        self.sup._turn_slots = turnslots.FairSlots(0)
+        out = []
+        th = self._queue_one(out)
+        self.assertTrue(self.st.get("queued_for_slot"), "positive control")
+        t0 = time.monotonic()
+        halt._cut_state("slots-wiring", "worker", self.st, halting=False)
+        th.join(WAIT_S)
+        self.assertLess(time.monotonic() - t0, 2.0)
+        self.assertEqual(out, ["cancelled"])
+        self.assertEqual(self.sup._turn_slots.snapshot()["waiting"], 0)
+
+    def test_queued_limit_follows_the_live_setting(self):
+        """Review f2: a node that stays queued across a lower AND a raise
+        names the CURRENT limit each time, and its tree fingerprint moves."""
+        slots = turnslots.FairSlots(2)
+        self.sup._turn_slots = slots
+        slots.acquire("other")
+        slots.acquire("other")
+        out = []
+        th = self._queue_one(out)
+        self.assertEqual(self.st["queued_for_slot"]["limit"], 2, "positive control")
+        fp0 = self.sup.tree_state_fingerprint("slots-wiring")
+        self.sup.set_turn_limit(1)                    # lower: still queued
+        self.assertEqual(self.st["queued_for_slot"]["limit"], 1)
+        self.assertNotEqual(self.sup.tree_state_fingerprint("slots-wiring"), fp0)
+        self.sup.set_turn_limit(2)                    # raise, but 2 still held
+        self.assertEqual(self.st["queued_for_slot"]["limit"], 2)
+        self.assertEqual(out, [], "still queued: both slots are held")
+        slots.release()
+        th.join(WAIT_S)
+        self.assertEqual(out, ["entered", None])
+        slots.release()                               # the second "other"
+        self.assertEqual(slots.snapshot()["held"], 0)
 
     def test_setting_bounds_and_round_trip(self):
         a = self.appsettings

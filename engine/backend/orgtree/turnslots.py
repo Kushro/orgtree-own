@@ -14,10 +14,13 @@ The rules, the user's:
     waiters and an org with one alternate instead of the one waiting behind
     the fifty.
 
-Waiters block on one condition variable; nothing polls. A waiter whose turn is
+Waiters block on one condition variable with NO timeout; nothing polls (review
+f1: a periodic re-check is polling, however slow). A waiter whose turn is
 abandoned while queued (interrupt, halt, retire) is woken through `wake()` and
-leaves the queue without taking a slot. `max_wait` is only a safety net for a
-cancel flag set by a path that forgot to call `wake()`.
+leaves the queue without taking a slot — so EVERY path that sets a cancel flag
+a waiter reads must call `wake()` afterwards (today: supervisor.interrupt_turn,
+halt._cut_state, halt.request, halt.recover). `max_wait` exists only for
+tests; production passes none.
 
 Lowering the limit never preempts: running turns finish, and nothing is
 admitted until the count falls below the new limit. Raising it admits waiters
@@ -77,10 +80,11 @@ class FairSlots:
     # ── the queue ──────────────────────────────────────────────────────
     def acquire(self, org: str, cancelled: Callable[[], bool] = lambda: False,
                 on_queued: Callable[[dict[str, Any]], None] | None = None,
-                max_wait: float = 5.0) -> None:
+                max_wait: float | None = None) -> None:
         """Block until this caller holds a slot; raise `Cancelled` if
-        `cancelled()` turns true first. `on_queued` is called once, outside
-        the lock, when the caller actually has to wait."""
+        `cancelled()` turns true first — re-checked only when the condition
+        is notified (release, set_limit, wake). `on_queued` is called once,
+        outside the lock, when the caller actually has to wait."""
         with self._cond:
             t = _Ticket(org, next(self._seq))
             if org not in self._queues:

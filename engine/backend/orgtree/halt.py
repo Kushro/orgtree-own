@@ -1419,6 +1419,7 @@ def recover(org) -> bool:
             continue
         st = sup.state(slug, nid)
         st["halt_requested"] = True
+        sup._turn_slots.wake()      # the fair queue never polls its cancels
         if _settled(slug, nid, st):
             n["halt"]["phase"] = "halted"
             n["halt"].setdefault("at", now())
