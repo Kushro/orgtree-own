@@ -13143,14 +13143,15 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
         # S9 (plan decision 44 (2)): with the door on every agent verb is
         # routed (tests/test_write_org_door_tripwire.py), so a call that
         # arrives here is one of the cycle's refusals. State it without
-        # DOC_LOCK, in the cycle's words. A declared verb left unrouted would
-        # still fall through to the cycle, and that tripwire fails on it.
+        # DOC_LOCK, in the cycle's words. Only a name that is no verb at all
+        # is refused here: a catalogue verb left undeclared or unrouted still
+        # falls through to the cycle, where that tripwire fails on it.
         if body.tool == "orgtree_staff":
             try:
                 _staff_mode(a)
             except LedgerError as e:
                 raise HTTPException(422, str(e)) from None
-        if body.tool not in pgdoor.LOCKS:
+        if body.tool not in pgdoor.LOCKS and body.tool not in _profile_tool_names():
             raise HTTPException(422, f"unknown orgtree tool {body.tool!r}")
     with _op_inflight(body), _entry_ledger_422(store.write_org(body.org)) as org:
         try:
