@@ -20872,6 +20872,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                         # (decision 9): a restart sees the successor together
                         # with its own evidence, so it still cannot resurrect
                         # stale evidence.
+            _phantom_turn = False
             with halt.txn(slug, **_admission_rows(slug, nid)) as _adm_tx:
                 org = _adm_tx.org
                 _admission_gates(slug, org, nid)
@@ -20919,74 +20920,60 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 if toks:
                     with _state_lock:
                         mailruntime.adopt(st, attempt=turn_operation_id, toks=toks)
-            # turn-locals: `org` (the admission transaction's copy) is the
-            # one version the turn keeps; the transactions themselves are done
-            _cmp_tx = _adm_tx = None
-            if cache_forecast_event is not None:
-                stream(slug, nid, {"kind": "cache_forecast",
-                                   "forecast": cache_forecast_event})
-            prelude = []
-            # D-181: bound here, assigned under the lock below. Never folded
-            # into `prelude` — see the note at the assignment.
-            state_block = ""
-            state_facts: dict[str, Any] = {}
-            usage_org: Org | None = None
-            # D-223: what this turn's envelope claims the agent has now read.
-            # STAGED here, committed only at the `_confirm_delivered` seam
-            # below — see `_envelope_decide`.
-            env_pending: dict[str, envelope.Snapshot] = {}
-            if pending:
-                lines = "\n".join(f"- {p['at']}: {p['text']}" for p in pending)
-                prelude.append(f"[ORG NOTICES — {len(pending)} change(s) since your "
-                               f"last turn]\n{lines}\n[END NOTICES]")
-            turn_images: list[dict[str, Any]] = []
-            if mail:
-                # inline=True: this text becomes a CLI user event a few lines
-                # below, which is the one carrier that can hold an image
-                mtext, turn_images = _mail_block(mail, slug, nid, inline=True)
-                prelude.append(mtext)
-                human_mail = [m for m in mail if not m.get("model_only")]
-                if human_mail:
-                    # same composer as the steer path, so the two cannot word
-                    # the view — or its provenance — differently
-                    turn_view, view_spans = _human_view_spans(
-                        human_mail, turn_view, slug, nid, inline=True)
-            if prelude:
-                text = "\n\n".join(prelude) + "\n\n" + text
-            elif is_ping and not is_cmd and not toks:
-                # ⭐ THE SECOND PHANTOM SITE (D-175, found 2026-08-28 by
-                # @org:unity reporting a wake that survived the first fix).
-                # `_run_turn`'s gate asks "is there anything to point at"
-                # BEFORE this turn blocks on a slot, and the drain happens
-                # AFTER it — so the whole slot wait is a window in which the
-                # box can empty. A RETRACTED message is the reported way in
-                # (`node_mail_retract` deletes the entry and, correctly, never
-                # touches the queue), but any drain in that window does it.
-                # The earlier gate is not redundant: it saves the slot wait
-                # entirely when the box is already empty. This one is what
-                # makes the check TRUE AT THE MOMENT IT MATTERS.
-                #
-                # ⚠ THE `toks` CLAUSE IS LOAD-BEARING. A carrier that arrives
-                # holding journal tokens is already carrying a drained batch —
-                # its `text` HAS the mail block in it — and an empty `prelude`
-                # there means "nothing NEW", not "nothing at all". Dropping on
-                # `not prelude` alone would silently eat delivered mail, which
-                # is the one outcome worse than the phantom.
-                _phantom_log(slug, nid, "turn start (the box emptied while "
-                                        "this turn waited for a slot)")
-                dropped_here = True
-                # evaluated BEFORE the `finally` runs, and the flag above stops
-                # that block popping a second carrier off the queue
-                return _drop_ping(slug, nid)
-            # persist the in-flight turn: if orgtree dies mid-turn, reconcile()
-            # auto-resumes this node with the interrupted text (user ruling).
-            # PG-3e-A: one halt transaction on the agent's row; `delivering`
-            # (org-wide today) is locked only when this turn carries journal
-            # tokens, the one case `record_input` writes it.
-            with halt.txn(slug, nodes=[nid],
-                          sections=[("delivering", nid)] if toks else []) as _inf_tx:
-                o2 = _inf_tx.org
-                if nid in o2.nodes:
+                prelude = []
+                # D-181: bound here, assigned under the lock below. Never folded
+                # into `prelude` — see the note at the assignment.
+                state_block = ""
+                state_facts: dict[str, Any] = {}
+                usage_org: Org | None = None
+                # D-223: what this turn's envelope claims the agent has now read.
+                # STAGED here, committed only at the `_confirm_delivered` seam
+                # below — see `_envelope_decide`.
+                env_pending: dict[str, envelope.Snapshot] = {}
+                if pending:
+                    lines = "\n".join(f"- {p['at']}: {p['text']}" for p in pending)
+                    prelude.append(f"[ORG NOTICES — {len(pending)} change(s) since your "
+                                   f"last turn]\n{lines}\n[END NOTICES]")
+                turn_images: list[dict[str, Any]] = []
+                if mail:
+                    # inline=True: this text becomes a CLI user event a few lines
+                    # below, which is the one carrier that can hold an image
+                    mtext, turn_images = _mail_block(mail, slug, nid, inline=True)
+                    prelude.append(mtext)
+                    human_mail = [m for m in mail if not m.get("model_only")]
+                    if human_mail:
+                        # same composer as the steer path, so the two cannot word
+                        # the view — or its provenance — differently
+                        turn_view, view_spans = _human_view_spans(
+                            human_mail, turn_view, slug, nid, inline=True)
+                if prelude:
+                    text = "\n\n".join(prelude) + "\n\n" + text
+                elif is_ping and not is_cmd and not toks:
+                    # ⭐ THE SECOND PHANTOM SITE (D-175, found 2026-08-28 by
+                    # @org:unity reporting a wake that survived the first fix).
+                    # `_run_turn`'s gate asks "is there anything to point at"
+                    # BEFORE this turn blocks on a slot, and the drain happens
+                    # AFTER it — so the whole slot wait is a window in which the
+                    # box can empty. A RETRACTED message is the reported way in
+                    # (`node_mail_retract` deletes the entry and, correctly, never
+                    # touches the queue), but any drain in that window does it.
+                    # The earlier gate is not redundant: it saves the slot wait
+                    # entirely when the box is already empty. This one is what
+                    # makes the check TRUE AT THE MOMENT IT MATTERS.
+                    #
+                    # ⚠ THE `toks` CLAUSE IS LOAD-BEARING. A carrier that arrives
+                    # holding journal tokens is already carrying a drained batch —
+                    # its `text` HAS the mail block in it — and an empty `prelude`
+                    # there means "nothing NEW", not "nothing at all". Dropping on
+                    # `not prelude` alone would silently eat delivered mail, which
+                    # is the one outcome worse than the phantom.
+                    _phantom_turn = True
+                # persist the in-flight turn: if orgtree dies mid-turn, reconcile()
+                # auto-resumes this node with the interrupted text (user ruling).
+                # turn-tx merge S2: recorded in the ADMISSION transaction,
+                # atomically with the drain (the rows are a superset of the
+                # old in-flight transaction's: node row + delivering)
+                if not _phantom_turn and nid in org.nodes:
                     # The F-04 wake-void is RETIRED (user ruling 2026-08-06):
                     # a turn starting on other mail leaves an open ask
                     # standing. Requests die only by the user's hand
@@ -21016,14 +21003,28 @@ def _run_one_turn_recorded(slug: str, nid: str,
                         # mid-turn projection compares against what was
                         # actually sent (`_cache_inflight_attempt`).
                         inf["cache_attempt"] = cache_attempt
-                    mailruntime.record_input(o2, nid, toks,
+                    mailruntime.record_input(org, nid, toks,
                         attempt=turn_operation_id, base=mail_replay_base, marker=inf)
-                    o2.node(nid)["inflight"] = inf
+                    org.node(nid)["inflight"] = inf
                     # new work begins: a lingering done/blocked chip would lie —
                     # but the history is kept, not erased (gap audit №13)
-                    ls = o2.node(nid).pop("last_status", None)
+                    ls = org.node(nid).pop("last_status", None)
                     if ls:
-                        o2.node(nid)["prev_status"] = ls
+                        org.node(nid)["prev_status"] = ls
+            # turn-locals: `org` (the admission transaction's copy) is the
+            # one version the turn keeps; the transactions themselves are done
+            _cmp_tx = _adm_tx = None
+            if cache_forecast_event is not None:
+                stream(slug, nid, {"kind": "cache_forecast",
+                                   "forecast": cache_forecast_event})
+            if _phantom_turn:
+                _phantom_log(slug, nid, "turn start (the box emptied while "
+                                        "this turn waited for a slot)")
+                dropped_here = True
+                # evaluated BEFORE the `finally` runs, and the flag above stops
+                # that block popping a second carrier off the queue
+                return _drop_ping(slug, nid)
+            o2 = org      # the document the merged transaction committed
             if nid in o2.nodes:
                 # D-181: the live org state rides the turn, not the system
                 # prompt. Built off the doc this turn actually starts from:
