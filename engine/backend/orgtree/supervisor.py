@@ -15484,6 +15484,9 @@ def _run_turn(slug: str, nid: str, text: str | dict[str, Any]) -> None:
                     metadata.setdefault('recovery_intents',{}).setdefault(nid,dict(prior))
                 current_org.node(nid)['inflight'] = dict(nxt)
                 current_org.node(nid)['native_held_carriers'] = [c for c in held if c.get('_native_hold_id') != current_id]
+        # turn-locals: the committed copy is not read again — never pin a
+        # whole Org across the turn that follows
+        current_org = _loop_tx = None
         carrier_probe_token = _carrier_limit_probe_token(nxt)
         # DO NOT WAKE AT ALL, rather than wake quietly: a mail pointer whose
         # box is already empty is dropped BEFORE the CLI is launched, so it
@@ -20440,6 +20443,11 @@ def _run_one_turn_recorded(slug: str, nid: str,
         mailruntime.register(st, admission_org, nid,
             attempt=turn_operation_id, toks=initial_toks)
         mailruntime.adopt_handoffs(st, initial_toks)
+    # turn-locals: every whole-Org copy this turn body reads once is dropped
+    # after its last use, so a running turn pins ONE org version (`org`, the
+    # admission transaction's), not eight (mem-leak-probe, 2026-09-26: ~80 MB
+    # each, times every concurrent turn)
+    admission_org = None
     # WHEN THIS ATTEMPT BEGAN, on this process's wall clock — the lower bound
     # the retry banner filters operation receipts by (Phase 2 of w71d69aac,
     # see `_receipts_into_replay`). Taken HERE, before the slot wait and before
@@ -20711,6 +20719,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                         fzg["resource_pool"] = (
                             accounts.FABLE if _g_tier == accounts.FABLE
                             else "+".join(accounts.POOLED))
+        _g_org = _g_node = None                 # turn-locals: the gate is done
         st["waiting"] = True
         _slot_wait_t0 = time.monotonic()
         with _InterruptibleTurnSlot(st, slug):
@@ -20884,6 +20893,9 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 if toks:
                     with _state_lock:
                         mailruntime.adopt(st, attempt=turn_operation_id, toks=toks)
+            # turn-locals: `org` (the admission transaction's copy) is the
+            # one version the turn keeps; the transactions themselves are done
+            _cmp_tx = _adm_tx = None
             if cache_forecast_event is not None:
                 stream(slug, nid, {"kind": "cache_forecast",
                                    "forecast": cache_forecast_event})
@@ -21043,6 +21055,8 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 if view_segments is not None and usage_org is not None:
                     view_segments[:0] = _state_segments(
                         usage_org, nid, state_block, state_facts, usage_block)
+            # turn-locals: the in-flight record's copy is not read again
+            o2 = usage_org = _inf_tx = None
             # a new turn supersedes the previous failure: the durable system
             # row (_log_turn_error) already holds the history, so the banner
             # clears NOW instead of surviving until a later success — it used
@@ -22376,6 +22390,9 @@ def _run_one_turn_recorded(slug: str, nid: str,
                                 print(f"[orgtree] {slug}/{nid}: boundary cache "
                                       f"reconciliation unavailable "
                                       f"({type(exc).__name__}: {exc})")
+                            # turn-locals: the boundary's cache transaction
+                            # must not ride the rest of the turn
+                            _co = _co_tx = None
                             if _boundary_cache_event is not None:
                                 stream(slug, nid, {
                                     "kind": "cache_forecast",
@@ -22599,6 +22616,9 @@ def _run_one_turn_recorded(slug: str, nid: str,
                                     nxt = (turn_usage_block(
                                         nusage_org, nid, pending=env_pending)
                                         + "\n\n" + nxt)
+                                # turn-locals: the boundary transaction's copy
+                                # must not ride the rest of the turn
+                                o2 = nusage_org = _bnd_tx = None
                                 _record_prompt_view(slug, ran_sid or sid,
                                                     str(nxt), nview,
                                                     spans=nspans, segments=nsegs,
