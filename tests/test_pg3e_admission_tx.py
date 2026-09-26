@@ -132,6 +132,25 @@ class DrainTxTests(unittest.TestCase):
         self.assertIn(self.mail_id, box)
         self.assertFalse((org.d.get('delivering') or {}).get('worker'))
 
+    def test_a_phantom_ping_is_dropped_without_an_inflight_marker(self):
+        """turn-tx merge S2: the phantom decision is made INSIDE the merged
+        admission transaction; the in-flight record must not be written
+        for a turn that is then dropped (a stale marker would be resumed
+        by reconcile as if the turn had been interrupted)."""
+        org = store.load_org(self.slug)
+        org.d['mail']['worker'] = []          # the box emptied during the slot wait
+        store.save_org(org)
+        dropped = []
+        with patch.object(sup, '_drop_ping',
+                          side_effect=lambda s, n: dropped.append(n) or None):
+            sup._run_one_turn_recorded(
+                self.slug, 'worker',
+                sup._mark_ping('(orgtree) new mail', mail_ids=[self.mail_id]))
+        self.assertEqual(dropped, ['worker'], 'the phantom ping was not dropped')
+        self.assertEqual(self.reached, 0)
+        self.assertIsNone(store.load_org(self.slug).node('worker').get('inflight'),
+                          'a dropped phantom turn left an in-flight marker')
+
 
 class CompactionRowsTests(unittest.TestCase):
     """Review N1: the compaction transaction (tx1) runs on every ordinary
