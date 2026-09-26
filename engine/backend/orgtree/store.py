@@ -5633,8 +5633,11 @@ def save_org(org: Org) -> None:
 
 def _save_org(org: Org) -> None:
     _assert_synced_data_root()
-    if _TRIPWIRE.mode != "off" and not getattr(_orgtx_local, "rowlock_depth", 0):
-        _TRIPWIRE.hit(sys._getframe(1), "save")   # S8: a save outside any org_tx
+    if (_TRIPWIRE.mode != "off" and not getattr(_orgtx_local, "rowlock_depth", 0)
+            and org.d.get("slug") not in (getattr(_orgtx_local, "exclusive_slugs", None) or ())):
+        # S8: a save outside any org_tx. A save of an org this thread holds
+        # `orgtx.org_exclusive` on is covered: every org_tx on it is excluded
+        _TRIPWIRE.hit(sys._getframe(1), "save")
     from .notification_state import reconcile_attention
     _t0 = time.perf_counter()
     # reconcile reads only work_items and asks, and rewrites only work_items

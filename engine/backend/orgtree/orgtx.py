@@ -511,7 +511,12 @@ def _heal_pending(tx: OrgTx) -> list[str]:
     load-heals (`_migrations` markers, node scope, legacy freeze retags,
     their event rows). Not once per process — a heal recurs whenever any
     writer leaves a pre-heal shape (pg-supervisor-b, 18:47Z)."""
-    d = tx.org.d
+    return _heal_rows(tx.org)
+
+
+def _heal_rows(org: Org) -> list[str]:
+    """The rows a fresh load of `org` changed (see `_heal_pending`)."""
+    d = org.d
     if not isinstance(d, store.LazyDoc):
         return []
     rows = store._resident_dirty(d)                # pyright: ignore[reportPrivateUsage]
@@ -534,11 +539,23 @@ def _check_heal(tx: OrgTx) -> None:
 
 
 def _heal(slug: str) -> None:
-    """Commit a load-heal in its own save, with NO row lock held, through
-    store's internal save — not the public `store.save_org`, which tests patch
-    for fault injection (pg-supervisor-a, 18:50Z). The compare-and-set guards
-    it like any legacy save; under the transition fence DOC_LOCK is held."""
-    store._save_org(store._load_sqlite_org(slug))   # pyright: ignore[reportPrivateUsage]
+    """Commit a load-heal in its own save, through store's internal save —
+    not the public `store.save_org`, which tests patch for fault injection
+    (pg-supervisor-a, 18:50Z).
+
+    S9 (p01, WRITER-LEDGER-e9007a8): inside `org_exclusive(slug)`, which
+    excludes every org_tx on the org whether or not the transition fence is
+    on. Without it, with the fence off, the save ran under no lock at all
+    (only its compare-and-set), two writers that both found the heal pending
+    both saved it (measured: two heal saves; no StaleWrite was observed on
+    SQLite), and the tripwire counted every heal. Under the hold the org is re-loaded
+    and saved only if the heal is still pending: the writer that waited
+    behind another's heal finds nothing to do. The DOC_LOCK tripwire does
+    not count this save (store._save_org: a save under an exclusive hold)."""
+    with org_exclusive(slug):
+        org = store._load_sqlite_org(slug)          # pyright: ignore[reportPrivateUsage]
+        if _heal_rows(org):
+            store._save_org(org)                    # pyright: ignore[reportPrivateUsage]
 
 
 def _billed_save(org: Org, got: list[SaveChanges], receipt: bool) -> None:
@@ -1221,7 +1238,14 @@ def _attempts(b: Backend, txs: list[OrgTx], make: Callable[[], list[OrgTx]],
     failure raised while taking locks, before the body ran."""
     attempt = 0
     heals = 0
+    heal_next: str | None = None
     while True:
+        if heal_next is not None:
+            # after the failed attempt's `finally`, so this thread no longer
+            # counts as inside an org_tx on the slug (org_exclusive's NestedTx)
+            _heal(heal_next)
+            heal_next = None
+            txs = make()
         body_ran = False
         open_slugs.update(slugs)
         _open.slugs = open_slugs
@@ -1241,8 +1265,7 @@ def _attempts(b: Backend, txs: list[OrgTx], make: Callable[[], list[OrgTx]],
             if heals > MAX_HEALS:
                 raise OrgTxError(f"org_tx on {h.slug!r}: the load keeps healing "
                                  f"{h.rows} (a writer keeps restoring a pre-heal shape)") from h
-            _heal(h.slug)
-            txs = make()
+            heal_next = h.slug
             continue
         except Retryable:
             if body_ran or attempt >= retries:
@@ -1336,12 +1359,23 @@ def org_exclusive(slug: str, *, lock_timeout: float | None = None) -> Iterator[N
         else contextlib.nullcontext())
     b = backend()
     excl = getattr(b, "exclusive", None)
+    loc = store._orgtx_local                       # pyright: ignore[reportPrivateUsage]
     with fence:
         if excl is None:                           # a test backend without it
             yield
             return
         with excl(slug, timeout):
-            yield
+            # the DOC_LOCK tripwire's "covered" mark for a save of this org
+            # made under the hold (store._save_org); per slug, per thread
+            held: set[str] = getattr(loc, "exclusive_slugs", None) or set()
+            loc.exclusive_slugs = held
+            fresh = slug not in held
+            held.add(slug)
+            try:
+                yield
+            finally:
+                if fresh:
+                    held.discard(slug)
 
 
 def org_read(slug: str, *, sections: Iterable[str] = ()) -> Org:
