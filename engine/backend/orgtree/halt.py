@@ -64,9 +64,10 @@ class Cancelled(RuntimeError):
 # org_tx; org_tx never waits on DOC_LOCK). Each is short — no kill or wait
 # ever runs inside one — so this is the old lock's cost, not a new convoy.
 # ONE switch for both fences (S8, lead 2026-09-26): this one follows
-# `orgtx.TRANSITION_FENCE` (env ORGTREE_ORGTX_FENCE; default off on
-# postgres, on otherwise) at call time, so a fence-off run measures the real
-# thing. `_FENCE` True/False is a TEST-ONLY
+# `orgtx.TRANSITION_FENCE` (env ORGTREE_ORGTX_FENCE; default off only when
+# the store is postgres AND the door is enabled, on otherwise, so
+# ORGTREE_PGDOOR=0 keeps it) at call time, so a fence-off run measures the
+# real thing. `_FENCE` True/False is a TEST-ONLY
 # override; None (the default) follows org_tx.
 _FENCE: bool | None = None
 KILLSWITCH = "killswitch"

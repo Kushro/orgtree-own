@@ -144,18 +144,30 @@ DEFAULT_RETRIES = 5
 #: org_tx. Read at call time; tests set `orgtx.TRANSITION_FENCE` directly.
 #: store.StaleWrite stays as the backstop.
 #:
-#: DEFAULT (S9 step 5, plan decision 42): OFF on PostgreSQL, where every
-#: writer is converted (the fence-off gate), and ON for SQLite/JSON, where the
-#: legacy door-off DOC_LOCK fallbacks still run. ORGTREE_ORGTX_FENCE=0 or =1
-#: overrides the default both ways; see `default_transition_fence`.
+#: DEFAULT (S9 step 5, plan decisions 42 and 44): OFF only on PostgreSQL WITH
+#: the door enabled, where every writer is converted (the fence-off gate);
+#: ON otherwise — SQLite/JSON, and PostgreSQL with ORGTREE_PGDOOR=0, where the
+#: legacy door-off DOC_LOCK fallbacks run again. ORGTREE_ORGTX_FENCE=0 or =1
+#: overrides the default both ways; see `default_transition_fence`. Computed
+#: once at import: a startup setting, like store.STORE_BACKEND (pgdoor.enabled()
+#: itself reads its env at call time).
 def default_transition_fence(env: dict[str, str] | None = None,
-                             backend: str | None = None) -> bool:
+                             backend: str | None = None,
+                             door: bool | None = None) -> bool:
     """The fence's startup value: ORGTREE_ORGTX_FENCE "0" = off, any other
-    non-blank value = on; unset or blank = off on postgres, on otherwise."""
-    raw = (os.environ if env is None else env).get("ORGTREE_ORGTX_FENCE", "").strip()
+    non-blank value = on; unset or blank = off only when the store is postgres
+    AND the door is enabled, on otherwise. `door` defaults to pgdoor.enabled()'s
+    rule, mirrored here (importing pgdoor from orgtx would be a cycle):
+    ORGTREE_PGDOOR "0" = off, "1" = on, otherwise on iff postgres."""
+    env = os.environ if env is None else env
+    raw = env.get("ORGTREE_ORGTX_FENCE", "").strip()
     if raw:
         return raw != "0"
-    return (store.STORE_BACKEND if backend is None else backend) != "postgres"
+    backend = store.STORE_BACKEND if backend is None else backend
+    if door is None:
+        flag = env.get("ORGTREE_PGDOOR", "").strip()
+        door = flag == "1" or (flag != "0" and backend == "postgres")
+    return not (backend == "postgres" and door)
 
 
 TRANSITION_FENCE: bool = default_transition_fence()

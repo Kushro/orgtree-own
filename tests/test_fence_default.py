@@ -1,10 +1,11 @@
-"""S9 step 5 (plan decision 42): the transition fence's DEFAULT follows the
-store backend. It is OFF on PostgreSQL (every writer converted, the fence-off
-gate passed) and ON for SQLite/JSON (the legacy door-off DOC_LOCK fallbacks
-still run there). ORGTREE_ORGTX_FENCE=0/1 overrides it both ways.
+"""S9 step 5 (plan decisions 42 and 44): the transition fence's DEFAULT is OFF
+only on PostgreSQL with the door enabled (every writer converted, the
+fence-off gate passed) and ON otherwise: SQLite/JSON, and PostgreSQL with
+ORGTREE_PGDOOR=0, where the legacy door-off DOC_LOCK fallbacks run again.
+ORGTREE_ORGTX_FENCE=0/1 overrides it both ways.
 
 What these prove:
-  * `orgtx.default_transition_fence` gives all six backend x env answers;
+  * `orgtx.default_transition_fence` gives every backend x fence x door answer;
   * a fresh interpreter importing orgtree with only the env set gets the same
     answer in `orgtx.TRANSITION_FENCE` and in halt's fence, so the pin is on
     the real module-level value and not only on the helper.
@@ -31,16 +32,20 @@ import orgtree  # noqa: E402
 from orgtree import orgtx  # noqa: E402
 
 CASES = [
-    # (backend, ORGTREE_ORGTX_FENCE or None, expected fence)
-    ('postgres', None, False),
-    ('postgres', '', False),
-    ('postgres', '1', True),
-    ('postgres', '0', False),
-    ('sqlite', None, True),
-    ('sqlite', '', True),
-    ('sqlite', '1', True),
-    ('sqlite', '0', False),
-    ('json', None, True),
+    # (backend, ORGTREE_ORGTX_FENCE, ORGTREE_PGDOOR, expected fence); None = unset
+    ('postgres', None, None, False),
+    ('postgres', '', None, False),
+    ('postgres', '1', None, True),
+    ('postgres', '0', None, False),
+    ('postgres', None, '1', False),
+    ('postgres', None, '0', True),     # the door's escape hatch keeps the fence
+    ('postgres', '0', '0', False),     # ... unless the fence is overridden off
+    ('sqlite', None, None, True),
+    ('sqlite', '', None, True),
+    ('sqlite', '1', None, True),
+    ('sqlite', '0', None, False),
+    ('sqlite', None, '1', True),       # door on SQLite: unconverted writers remain
+    ('json', None, None, True),
 ]
 
 # The packaged interpreter's ._pth ignores PYTHONPATH and cwd, so the child
@@ -61,22 +66,29 @@ def tearDownModule() -> None:
 
 class FenceDefault(unittest.TestCase):
     def test_helper_gives_every_answer(self):
-        for backend, raw, want in CASES:
-            env = {} if raw is None else {'ORGTREE_ORGTX_FENCE': raw}
-            with self.subTest(backend=backend, env=raw):
+        for backend, raw, door, want in CASES:
+            env = {k: v for k, v in (('ORGTREE_ORGTX_FENCE', raw), ('ORGTREE_PGDOOR', door))
+                   if v is not None}
+            with self.subTest(backend=backend, fence=raw, door=door):
                 self.assertIs(orgtx.default_transition_fence(env, backend), want)
 
     def test_helper_reads_the_store_backend_when_not_told(self):
         self.assertIs(orgtx.default_transition_fence({}), orgtx.store.STORE_BACKEND != 'postgres')
+        # an explicit door wins over the env reading
+        self.assertIs(orgtx.default_transition_fence({'ORGTREE_PGDOOR': '0'}, 'postgres', door=True), False)
+        self.assertIs(orgtx.default_transition_fence({}, 'postgres', door=False), True)
 
     def test_a_fresh_import_gets_the_default(self):
         root = Path(orgtree.__file__).resolve().parents[1]      # engine/backend
-        for backend, raw, want in [c for c in CASES if c[0] != 'json']:
-            env = {k: v for k, v in os.environ.items() if k != 'ORGTREE_ORGTX_FENCE'}
+        for backend, raw, door, want in [c for c in CASES if c[0] != 'json']:
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ('ORGTREE_ORGTX_FENCE', 'ORGTREE_PGDOOR')}
             env.update(ORGTREE_STORE=backend)
             if raw is not None:
                 env['ORGTREE_ORGTX_FENCE'] = raw
-            with self.subTest(backend=backend, env=raw):
+            if door is not None:
+                env['ORGTREE_PGDOOR'] = door
+            with self.subTest(backend=backend, fence=raw, door=door):
                 out = subprocess.run([sys.executable, '-c', _CHILD, str(root)], env=env, cwd=str(root),
                                      capture_output=True, text=True, timeout=120)
                 self.assertEqual(out.returncode, 0, out.stderr[-2000:])
