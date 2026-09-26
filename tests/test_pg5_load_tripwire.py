@@ -142,6 +142,21 @@ class EvidenceSpread(unittest.TestCase):
                 self.assertLessEqual(max(per.values()), pg5_load.EVIDENCE_PER_ITEM)
 
 
+class LostEvidence(unittest.TestCase):
+    def test_a_lost_ref_is_named_with_its_actor_status_and_item(self) -> None:
+        plan = pg5_load._plan(400)                  # 100 evidence calls: 3 items
+        samples = [{"id": i, "kind": k, "actor": f"worker-{a}", "status": 200, "error": None}
+                   for i, k, a in plan]
+        samples[166]["status"], samples[166]["error"] = 500, "HTTP 500"
+        slugs = ["item-0", "item-1", "item-2"]
+        msg = pg5_load._lost_evidence("t", {"t-166", "t-2"}, 100, samples, slugs)
+        self.assertIn("2 of 100 refs missing (1 of them answered 200)", msg)
+        self.assertIn("{'ref': 't-2', 'actor': 'worker-2', 'status': 200, 'item': 'item-0'}", msg)
+        # op 166 is the 41st evidence call, so it went to the second item
+        self.assertIn("{'ref': 't-166', 'actor': 'worker-6', 'status': 500, 'item': 'item-1'}", msg)
+        self.assertLess(msg.index("t-2'"), msg.index("t-166'"))
+
+
 class StaleCounter(unittest.TestCase):
     def test_every_constructed_stale_write_is_counted(self) -> None:
         class StaleWrite(Exception):

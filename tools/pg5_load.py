@@ -187,6 +187,19 @@ def _evidence_item(i: int) -> int:
     return (i // len(KINDS)) // EVIDENCE_PER_ITEM
 
 
+def _lost_evidence(tag: str, lost_refs: set[str], wanted: int, samples: list[dict],
+                   slugs: list[str]) -> str:
+    """The error for evidence refs missing from the read-back, naming (up to
+    10 of) them with the actor that wrote each, its HTTP status and item."""
+    lost = sorted(lost_refs, key=lambda r: int(r.rsplit("-", 1)[1]))
+    by_ref = {f"{tag}-{s['id']}": s for s in samples if s["kind"] == "evidence"}
+    named = [{"ref": r, "actor": by_ref[r]["actor"], "status": by_ref[r]["status"],
+              "item": slugs[_evidence_item(int(r.rsplit("-", 1)[1]))]} for r in lost[:10]]
+    answered = sum(by_ref[r]["error"] is None for r in lost)
+    return (f"evidence: {len(lost)} of {wanted} refs missing "
+            f"({answered} of them answered 200): {named}")
+
+
 def measure(adapter, slugs: list[str], mode: str, config: dict) -> dict:
     operations, rate = config["operations"], config["rate"]
     tag = f"{mode}-{uuid.uuid4().hex[:8]}"
@@ -254,12 +267,7 @@ def measure(adapter, slugs: list[str], mode: str, config: dict) -> dict:
     landed = _mail_landed(adapter, tag)
     errors = []
     if len(got_refs) != len(want_refs):
-        lost = sorted(want_refs - got_refs, key=lambda r: int(r.rsplit("-", 1)[1]))
-        by_ref = {f"{tag}-{s['id']}": s for s in samples if s["kind"] == "evidence"}
-        named = [{"ref": r, "actor": by_ref[r]["actor"], "status": by_ref[r]["status"],
-                  "item": slugs[_evidence_item(int(r.rsplit("-", 1)[1]))]} for r in lost[:10]]
-        errors.append(f"evidence: {len(lost)} of {len(want_refs)} refs missing "
-                      f"({sum(by_ref[r]['error'] is None for r in lost)} of them answered 200): {named}")
+        errors.append(_lost_evidence(tag, want_refs - got_refs, len(want_refs), samples, slugs))
     for w, n in sent_to.items():
         if landed[w]["found"] < n:
             errors.append(f"mail: {w} has {landed[w]['found']} of {n} (boxed or archived)")
