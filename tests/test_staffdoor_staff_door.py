@@ -7,7 +7,7 @@ SQLite root.
     driven after the commit; the DOC_LOCK cycle is never entered;
   · update: the item passes from its owner to the new seat in one run — the
     previous owner's row (its handover notice) is declared from the snapshot;
-  · only hire mode is routed: a rehire-mode call keeps the DOC_LOCK cycle;
+  · both modes are routed (the rehire mode: test_staffdoor_staff_rehire);
   · a refused call is a 422 and commits nothing.
 """
 import os
@@ -151,10 +151,11 @@ class StaffDoor(unittest.TestCase):
         self.assertFalse(store.load_org(self.slug)._work_find(old)[1])
         self.assertEqual(len(self.runs), 1)
 
-    def test_only_hire_mode_is_routed(self):
+    def test_both_modes_are_routed(self):
+        # the rehire mode rides PG-3a's rehire_rows (test_staffdoor_staff_rehire)
         self.assertTrue(pgdoor.routed('orgtree_staff', dict(SEAT)))
-        self.assertFalse(pgdoor.routed('orgtree_staff',
-                                       {'node': 'peer', 'staff_mode': 'rehire'}))
+        self.assertTrue(pgdoor.routed('orgtree_staff',
+                                      {'node': 'peer', 'staff_mode': 'rehire'}))
 
     def test_refusal_is_422_and_commits_nothing(self):
         r0 = self.rev()
