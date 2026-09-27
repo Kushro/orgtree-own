@@ -10,7 +10,8 @@ import test from 'node:test'
 import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { ForegroundViewContext, resolveRef, useRefRoutes } from '../src/canvas/reflinks'
-import { proseCandidates, useProseAgentIndex } from '../src/canvas/docket'
+import { actorFit, proseCandidates, useNodeFacts, useProseAgentIndex } from '../src/canvas/docket'
+import type { NodeFacts } from '../src/canvas/docket'
 import type { MentionIndex } from '../src/canvas/workrefs'
 import type { RefRoutes } from '../src/canvas/reflinks'
 import { FOREGROUND_TREE_FORMAT as format } from '../src/foregroundtree'
@@ -147,4 +148,30 @@ test('a tree older than the server catalog asks once and settles pending (review
   await inAct(async () => { await flush(6) })
   assert.equal(asked.length, 1, 'one reference request, not a loop')
   assert.equal(resolveRef(agent('old'), world!()).outcome, 'pending', 'an answer about another catalog is not a verdict')
+})
+
+async function mountFacts(t: TestContext, catalog: string) {
+  let facts: Map<string, NodeFacts> | null = null
+  const tree = { slug: 'org', roots: [{ id: 'live', state: 'live', tier: 'haiku', generation: 0, children: [] }],
+    foreground: { catalog_revision: catalog, present: ['live'], missing: [] } } as unknown as TreePayload
+  const ids = ['live', 'old']
+  function Probe() { facts = useNodeFacts('org', tree, ids); return null }
+  const v = await mountView(<Probe />, h => h)
+  t.after(() => v.unmount())
+  await inAct(async () => { await flush(6) })
+  return () => facts!
+}
+
+test('a failed or stale owner lookup stays unconfirmed in docket facts, never gone (review f7)', async (t) => {
+  stubReferences(t, [], true)   // 503: the lookup fails
+  const failed = await mountFacts(t, 'failed-' + t.name)
+  assert.equal(failed().get('old')?.unresolved, true)
+  assert.equal(actorFit({ node: 'old', generation: 0 }, failed()).fit, 'unknown', 'a failed lookup is not a gone actor')
+})
+
+test('an owner answered only for another catalog stays unconfirmed, never gone (review f7)', async (t) => {
+  stubReferences(t, [])   // the server answers for its own catalog, not the tree's
+  const lagging = await mountFacts(t, 'lagging-' + t.name)
+  assert.equal(lagging().get('old')?.unresolved, true)
+  assert.equal(actorFit({ node: 'old', generation: 0 }, lagging()).fit, 'unknown', 'a stale answer is not a gone actor')
 })
