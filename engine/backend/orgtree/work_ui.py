@@ -9,6 +9,7 @@ import hashlib
 import json
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from typing import Any
 
@@ -27,10 +28,16 @@ dependencies scope_archive_summary""".split())
 GROUPS = ("items", "archived", "backlogged", "attention")
 MAX_ORGS = 8
 MAX_VERSIONS = 3
+MAX_BYTES = 32 * 1024 * 1024
 IDLE_S = 60.0
 _lock = threading.RLock()
 _cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
 _sweeper: threading.Timer | None = None
+_build_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
+class IdentityMigrationRequired(LedgerError):
+    pass
 
 
 def _sweep() -> None:
@@ -134,7 +141,7 @@ def project(payload: dict[str, Any]) -> dict[str, Any]:
 def _build(slug: str) -> dict[str, Any]:
     org = store.load_org(slug)
     if org.work_identity_state() != "slug":
-        raise LedgerError("work identity migration required")
+        raise IdentityMigrationRequired("work identity migration required")
     return project(org.work_list(USER, include_archived=True, include_backlogged=True))
 
 
@@ -168,28 +175,39 @@ def read(slug: str, archived: bool = False, backlogged: bool = False,
     """
     key = (str(store.DATA_ROOT), slug)
     with _lock:
+        build_lock = _build_locks.setdefault(key, threading.RLock())
+    # Coalesce only this org's builders. Never hold the global cache mutex
+    # across database reads or serialize another org behind a large docket.
+    with build_lock:
         now = time.monotonic()
-        for candidate, entry in list(_cache.items()):
-            if now - entry["used"] > IDLE_S:
-                del _cache[candidate]
-        entry = _cache.get(key)
+        with _lock:
+            entry = _cache.get(key)
+            if entry and now - entry["used"] > IDLE_S:
+                entry = None
         current = stamp(slug)
         if entry is None or entry["stamp"] != current:
             body = _build(slug)
-            token = _hash({k: v for k, v in body.items() if k != "now"})
+            encoded = _json({k: v for k, v in body.items() if k != "now"})
+            token = hashlib.sha256(encoded).hexdigest()[:32]
             versions = entry["versions"] if entry else OrderedDict()
+            sizes = entry["sizes"] if entry else {}
             # Keep the earlier object's time when only unrelated inputs moved.
             if token not in versions:
                 versions[token] = {**body, "revision": token}
+                sizes[token] = len(encoded)
             while len(versions) > MAX_VERSIONS:
-                versions.popitem(last=False)
-            entry = {"stamp": current, "token": token, "versions": versions, "used": now}
-            _cache[key] = entry
+                removed, _ = versions.popitem(last=False)
+                sizes.pop(removed)
+            entry = {"stamp": current, "token": token, "versions": versions,
+                     "sizes": sizes, "used": now, "bytes": sum(sizes.values())}
         entry["used"] = now
-        _cache.move_to_end(key)
-        while len(_cache) > MAX_ORGS:
-            _cache.popitem(last=False)
-        _arm_sweep()
+        with _lock:
+            _cache[key] = entry
+            _cache.move_to_end(key)
+            while len(_cache) > MAX_ORGS or sum(e["bytes"] for e in _cache.values()) > MAX_BYTES:
+                _cache.popitem(last=False)
+            if _cache:
+                _arm_sweep()
         flags = ("a" if archived else "n") + ("b" if backlogged else "n")
         token = entry["token"] + flags
         if since == token:

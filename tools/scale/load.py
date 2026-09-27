@@ -15,9 +15,10 @@ scheduled time whether or not earlier ones returned — that is what agents do):
    fleet's peak aggregate turn rate (0.936 Hz over 24 live agents, relayed
    charter figure) scaled per agent, × an ASSUMED 2 orgtree calls per turn
    (measured ≈1.1 write events per turn; reads/status are not logged).
-2. UI WINDOWS — W windows each polling as the renderer does: org tree every
-   6 s (If-None-Match), org list every 3 s, docket list every 5 s
-   (If-None-Match), and the chat of one streaming node every 2.5 s.
+2. UI WINDOWS — declared visible docket, desk, Attention and chooser roles
+   from ui_mix.py, with conditional light lists, closed optional groups and
+   live-change refreshes. Earlier runs polled all endpoints in every window;
+   that was a stress mix, not the renderer's normal visible-view traffic.
 3. SCREEN FEED — each window holds the org websocket (?win=scale-w<i>) and
    times every numbered stream marker it receives.
 4. LIVE TEXT — K streaming nodes (default 5 % of N) emit a frame at

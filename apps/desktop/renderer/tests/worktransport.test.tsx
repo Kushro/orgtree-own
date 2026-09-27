@@ -22,7 +22,8 @@ const fixture = () => {
     owner_current: true, owner_state: 'live', reviewer: null, participants: [],
     created_by: 'user', at: '2026-09-01', updated_at: '2026-09-01', docket_at: '2026-09-01',
     done_so_far: ['Completed step'], working_on_next: ['Next step'], manual_attention: null,
-    attention_sources: [], effective_attention: false, questions: [], acceptance: [],
+    attention_sources: [], effective_attention: false, questions: [],
+    acceptance: [{ text: 'DETAIL ACCEPTANCE IS PRESENT', checked: null }],
     dependencies: [], evidence: [{ kind: 'note', note: 'DETAIL EVIDENCE IS PRESENT' }],
     history: [], scope: [], delivery: null, parent: null, archived: false, superseded_by: null,
   } as unknown as WorkItem
@@ -44,7 +45,7 @@ const fixture = () => {
   const pending: ((value: unknown) => void)[] = []
   let hold = false
   const light = (v: WorkItem) => {
-    const { evidence: _ev, history: _history, ...row } = v
+    const { evidence: _ev, history: _history, acceptance: _acceptance, ...row } = v
     return { ...row, view: 'list', view_revision: `${v.slug}-${v.rev}` }
   }
   globalThis.fetch = ((url: string, init?: RequestInit) => {
@@ -93,7 +94,7 @@ for (const kind of ['docket', 'agent', 'team', 'desk'] as const) test(`${kind} u
   await inAct(() => row.click())
   await settle()
   assert.ok(f.calls.some(p => p.endsWith('/work-items/active')))
-  assert.match(m.el.textContent ?? '', /DETAIL EVIDENCE IS PRESENT/)
+  assert.match(m.el.textContent ?? '', /DETAIL ACCEPTANCE IS PRESENT/)
 })
 
 test('hidden deep link reveals group and Attention retains its manual flag without loading backlog', async t => {
@@ -131,7 +132,7 @@ test('a list refresh retains the selected pane and its reply draft while detail 
   f.item.rev++
   forgetWorkInflight()
   await inAct(() => bumpLive())
-  await new Promise(resolve => setTimeout(resolve, 140))
+  await inAct(() => new Promise(resolve => setTimeout(resolve, 140)))
   await settle()
   assert.ok(f.pending.length > 0, 'detail refresh must actually be pending')
   assert.equal(m.el.querySelector('.mailer-read textarea'), field)

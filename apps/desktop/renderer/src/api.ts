@@ -538,15 +538,11 @@ export const dismissDocument = (slug: string, did: string):
 // LOCKED docket wire contract v3 (luna-reserve/evidence/docket-wire-
 // contract-v3.md) — see types.ts's "work docket" section.
 //
-// CONDITIONAL AND SHARED (mem-leak-probe, 2026-09-26). Five surfaces poll this
-// list with both groups, the attention queue every 5 s, and on the operator's
-// org each answer was ~38 MB — parsed on the main thread that must also drain
-// the engine's websocket (a window that stopped reading it grew the engine by
-// GB per hour). The server stamps the list with an ETag and answers 304 while
-// nothing moved; the 304 path returns the SAME object the last 200 produced,
-// and concurrent pollers of one URL share one request. A mutation drops the
-// shared in-flight request (see req), so a refetch after a write is never
-// answered by a request that started before it.
+// Light rows shared across docket and Attention consumers. Closed groups stay
+// out of list requests; opening an item fetches its full detail separately.
+// A docket-content ETag returns 304 for unrelated saves, or a delta since the
+// retained revision. Concurrent callers of one URL share a request; mutations
+// detach older requests so their late answers cannot replace the newer cache.
 const workCache = new Map<string, { etag: string; body: WorkItemsPayload }>()
 const workInflight = new Map<string, Promise<WorkItemsPayload>>()
 let workGeneration = 0

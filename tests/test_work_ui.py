@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 _temp = tempfile.TemporaryDirectory(prefix="work-ui-", ignore_cleanup_errors=True)
+(Path(_temp.name) / "data").mkdir()
 os.environ.update(ORGTREE_DATA=str(Path(_temp.name) / "data"),
                   ORGTREE_STORE_BACKEND="sqlite", ORGTREE_V2_TOKEN="operator")
 for _key in ("ORGTREE_V1_ROOT", "ORGTREE_V1_DATA_ROOT", "ORGTREE_V2_PORT"):
