@@ -12,7 +12,7 @@ os.environ.update(ORGTREE_DATA=root.name, ORGTREE_STORE='sqlite', ORGTREE_V2_TOK
 import import_provenance  # noqa: E402,F401
 from engine.launch import load_app
 load_app()
-from orgtree import ledger, store, supervisor as sup
+from orgtree import ledger, policy_reads, store, supervisor as sup
 
 
 def view(nodes=None, **sections):
@@ -26,6 +26,14 @@ def node(state='live', **fields):
 
 
 class PollBehavior(unittest.TestCase):
+    def test_unreadable_org_does_not_hide_later_orgs(self):
+        good = view()
+        with patch.object(store, 'org_slugs', return_value=['gone', 'bad', 'fixture']), \
+                patch.object(store, 'cached_org', side_effect=[
+                    ledger.LedgerError('gone'), ValueError('bad JSON'), good]):
+            self.assertEqual(list(policy_reads.poll_orgs(policy_reads.watchdog_org)),
+                             [('fixture', good)])
+
     def tick(self, org):
         stack = ExitStack()
         self.addCleanup(stack.close)

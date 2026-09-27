@@ -29137,14 +29137,13 @@ def start_storage_watchdog() -> None:
         while True:
             time.sleep(20)
             try:
-                for slug in store.org_slugs():
+                from .policy_reads import poll_orgs, storage_org
+                for slug, org in poll_orgs(storage_org):
                     with _state_lock:
                         busy = any(k[0] == slug and v.get("busy")
                                    for k, v in _state.items())
-                    # read-only pre-checks on the shared snapshot; the real
-                    # storage_check does its own loading and saving
-                    from .policy_reads import storage_org
-                    org = storage_org(slug)
+                    # Bounded read-only pre-checks; storage_check still does
+                    # its own loading and saving.
                     # blocked orgs stay on the 20 s cadence even when idle —
                     # a storage-frozen org runs no turns, so this loop IS its
                     # auto-unblock path once usage drops
@@ -34722,17 +34721,10 @@ def _wd_cmd_submit(slug: str, w: dict[str, Any], org: Org,
 
 
 def _wd_tick() -> None:
-    # shared snapshots (REPORT.md #7): this tick ran list_orgs + a second
-    # full load PER ORG every 5 s — even with zero dogs anywhere — and was
-    # the fastest of the six loops re-parsing the unchanged root. The org
-    # here is READ-ONLY; every state change below goes through its own
-    # write of its own (_wd_write: _wd_pause, the check marks, the stream exits).
-    from .policy_reads import watchdog_org
-    for slug in store.org_slugs():
-        try:
-            org = watchdog_org(slug)
-        except LedgerError:
-            continue
+    # Only settings and dog owners are read, including archived owners whose
+    # dogs must pause. Every state change retains its existing locked write.
+    from .policy_reads import poll_orgs, watchdog_org
+    for slug, org in poll_orgs(watchdog_org):
         dogs = cast("list[dict[str, Any]]",
                     org.d.get("watchdogs") or [])
         if not dogs:

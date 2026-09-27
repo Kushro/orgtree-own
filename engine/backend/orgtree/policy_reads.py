@@ -6,6 +6,7 @@ blobs retain the shared Org path. This deliberately does not filter owner state:
 retired owners must still pause their dogs, and live frozen owners still run.
 """
 import json
+import sqlite3
 
 from . import store
 from .ledger import Org, norm_dirs, norm_tools
@@ -71,3 +72,14 @@ def watchdog_org(slug):
 
 def storage_org(slug):
     return _read(slug, False) or store.cached_org(slug)
+
+
+def poll_orgs(reader):
+    """Retain cached_list's per-org refusal isolation during enumeration."""
+    from .ledger import LedgerError
+    for slug in store.org_slugs():
+        try:
+            org = reader(slug)
+        except (LedgerError, sqlite3.Error, ValueError, OSError):
+            continue
+        yield slug, org
