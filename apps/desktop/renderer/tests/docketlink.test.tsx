@@ -108,9 +108,14 @@ function serve(items: WorkItem[], backlogged: WorkItem[] = []) {
         ok: true, status: 200, headers: new Headers(),
         json: () => Promise.resolve(p),
       })
+      if (path.includes('/work-items/')) {
+        return ok({ item: [...items, ...backlogged].find(it => path.endsWith('/' + it.slug)) })
+      }
       if (path.includes('/work-items')) {
         return ok({
           items,
+          references: [...items, ...backlogged].map(({ slug, title, parent, archived, status, rev }) =>
+            ({ slug, title, parent, archived, status, rev })),
           ...(path.includes('archived=1') ? { archived: [] } : {}),
           ...(path.includes('backlogged=1') ? { backlogged } : {}),
           counts: { attention: 0, active: items.length, archived: 0,
