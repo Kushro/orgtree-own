@@ -133,3 +133,27 @@ class LazyRows(unittest.TestCase):
         with orgtx.org_tx(self.slug,sections=['work_items','asks']) as tx: tx.d['work_items'][0]['rev']=2
         with orgtx.org_tx(self.slug,sections=['work_items','asks']) as tx: tx.d['work_items'][0]['rev']=3
         self.assertEqual(self.row()['rev'],3)
+
+    def test_metadata_body_race_refuses_instead_of_caching_wrong_version(self):
+        import psycopg
+        store._WORK_ITEM_META.clear()
+        original=pgstore.PgConn.execute; fired=[]
+        def execute(c,sql,params=()):
+            cur=original(c,sql,params)
+            if sql.startswith('SELECT key, xmin::text') and not fired:
+                fired.append(True)
+                with psycopg.connect(os.environ['ORGTREE_PG_URL'],autocommit=True) as other:
+                    row=other.execute(f'SELECT val FROM org_{c.org_id}.doc WHERE key=%s',(workrows.PREFIX+'one',)).fetchone()
+                    value=json.loads(row[0]);value['rev']=17
+                    other.execute(f'UPDATE org_{c.org_id}.doc SET val=%s WHERE key=%s',(store._dumps(value),workrows.PREFIX+'one'))
+            return cur
+        with patch.object(pgstore.PgConn,'execute',execute):
+            with self.assertRaises(store.StaleWrite): store._load_sqlite_org(self.slug,lazy_work=True)
+        self.assertEqual(fired,[True]);self.assertEqual(self.row()['rev'],17)
+
+    def test_delete_and_replace_unread_item_preserve_original_cas(self):
+        with orgtx.org_tx(self.slug,sections=['work_items','asks']) as tx:
+            tx.d['work_items'].pop(1)
+            tx.d['work_items'][0]={'slug':'one','rev':11,'notification_attention_active':False}
+        rows=store.read_work_items_rows(self.slug,['one','two'])
+        self.assertEqual(rows['ids'],['one']);self.assertEqual(rows['items']['one']['rev'],11)
