@@ -1,9 +1,10 @@
 """PostgreSQL Sent projection ordering, source preservation and bounded plans."""
 import json
 import unittest
+from unittest.mock import patch
 
 import test_mail_archive_bounds_pg as fixture
-from orgtree import store
+from orgtree import pgstore, store
 
 tearDownModule = fixture.tearDownModule
 
@@ -86,9 +87,19 @@ class MailSentIndex(unittest.TestCase):
             conn.execute("INSERT INTO log_d(sect,owner,val) SELECT 'mail_log','history',? "
                          "FROM generate_series(1,1000)", (json.dumps({'from': 'sender', 'at': 'same'}),))
             conn.execute('ANALYZE mail_sent')
-            plan = conn.execute("EXPLAIN (ANALYZE,FORMAT JSON) SELECT seq FROM mail_sent "
-                "WHERE sender=? ORDER BY sent_at DESC,owner_pos DESC,seq DESC LIMIT 5", ('sender',)).fetchone()[0]
             conn.execute('COMMIT')
+        statements = []
+        original = pgstore.PgConn.execute
+        def observed(conn, sql, params=()):
+            if 'l.owner' in sql and 'l.val' in sql:
+                statements.append((sql, params))
+            return original(conn, sql, params)
+        with patch.object(pgstore.PgConn, 'execute', observed):
+            self.assertEqual(len(store.read_mail_tails(self.slug, 'sender', keep=5, slack=0)[3]), 5)
+        self.assertEqual(len(statements), 1)
+        with store._POOL.acquire(self.slug) as conn:
+            plan = conn.execute('EXPLAIN (ANALYZE,FORMAT JSON) ' + statements[0][0],
+                                statements[0][1]).fetchone()[0]
         if isinstance(plan, str): plan = json.loads(plan)
         root = plan[0]['Plan']
         nodes = []
@@ -96,7 +107,9 @@ class MailSentIndex(unittest.TestCase):
             nodes.append(node)
             for child in node.get('Plans', []): walk(child)
         walk(root)
-        self.assertFalse(any(n['Node Type'] in ('Sort','Seq Scan') for n in nodes), plan)
+        # Sorting the capped five output rows is fine; a history-sized source
+        # scan/sort is not. Check the actual endpoint SQL, not a spare index.
+        self.assertFalse(any(n.get('Actual Rows', 0) > 5 for n in nodes), plan)
         index = next(n for n in nodes if n.get('Index Name') == 'ix_mail_sent_tail')
         self.assertEqual(index['Actual Rows'], 5)
         self.assert_projection()
