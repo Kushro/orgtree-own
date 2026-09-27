@@ -71,6 +71,52 @@ uiTest('foreground collapsed pile and hidden token count omitted siblings withou
   } finally { setHideRetiredOn(false) }
 })
 
+uiTest('mounted pile and hidden-retired picker offer no pick or delete all while siblings are omitted', async ({ mount }) => {
+  setHideRetiredOn(false)
+  const { el, setTree } = await mountCanvas(mount, ['first', 'live', 'last'])
+  const selected = (hidden: number) => {
+    const t = tree(['first', 'live', 'last'], { first: 'archived', last: 'archived' })
+    t.foreground = { catalog_revision: 'c1', present: ['first', 'live', 'last'], missing: [],
+      hidden_retired_roots: hidden, retired_total: hidden + 2 }
+    return t
+  }
+  const doc = el.ownerDocument
+  const picker = () => doc.querySelector('.pile-picker')
+  const deleteAll = () => [...doc.querySelectorAll('.pile-picker button')]
+    .find(b => /delete all/.test(b.textContent ?? ''))
+  const close = async () => { await inAct(async () => {
+    doc.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); await flush() }) }
+  try {
+    for (const hidden of [198, 0]) {
+      await inAct(() => setTree(selected(hidden)))
+      await flush()
+      const layer = el.querySelector<HTMLElement>('.pile-count')
+      assert.ok(layer, `pile rendered (hidden=${hidden})`)
+      await inAct(async () => { layer!.click(); await flush() })
+      assert.ok(picker(), 'pile picker opened')
+      if (hidden) {
+        assert.match(picker()!.textContent ?? '', /Loading retired agents/)
+        assert.equal(picker()!.querySelectorAll('.pile-row').length, 0, 'no row can be picked')
+        assert.equal(deleteAll(), undefined, 'no delete all while siblings are omitted')
+      } else {
+        assert.doesNotMatch(picker()!.textContent ?? '', /Loading retired agents/)
+        assert.ok(deleteAll(), 'control: a complete pile offers delete all')
+      }
+      await close()
+      assert.equal(picker(), null, 'picker closed')
+    }
+    await inAct(() => setTree(selected(198)))
+    await inAct(() => setHideRetiredOn(true))
+    await flush()
+    const token = el.querySelector<HTMLElement>('.retired-token')
+    assert.ok(token, 'hidden-retired token rendered')
+    await inAct(async () => { token!.click(); await flush() })
+    assert.match(picker()?.textContent ?? '', /Loading retired agents/)
+    assert.equal(picker()!.querySelectorAll('.pile-row').length, 0)
+    assert.equal(deleteAll(), undefined, 'token picker offers no delete all while siblings are omitted')
+  } finally { setHideRetiredOn(false) }
+})
+
 uiTest('foreground omission preserves pinned identity and drafts until explicit absence', async ({ mount }) => {
   const { setTree, toasts } = await mountCanvas(mount, ['ceo', 'cto'])
   await inAct(() => addPin('mine', 'cto', { x: 10, y: 10, w: 400, h: 400 }))
