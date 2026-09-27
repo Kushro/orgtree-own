@@ -32,7 +32,12 @@ exactly what to do.
 - **Manifest / checksum**: for each org, pgimport counts the rows of every
   kind of data and computes a SHA-256 checksum of them. `manifest_sha256` is
   one checksum over all of that. The same data always gives the same value, so
-  matching values before and after the copy mean the copy is exact.
+  matching expected values and the independent read-back prove the copy.
+  The active docket changes physical layout: one `work_items` header plus one
+  row per item. `source_manifest_sha256` describes the original five tables;
+  `manifest_sha256` describes the expected destination tables. They may differ.
+  The per-org `work_items` count and logical SHA-256 must match after rebuilding
+  the ordered item list; all other rows remain byte-identical.
 - **Cutover record**: the file `<data folder>\store-backend.json`. When it
   says `"backend": "postgres"`, Orgtree uses PostgreSQL. When it is absent
   and existing org files are present, Orgtree keeps using those files. A
@@ -438,3 +443,34 @@ Put these in one folder and give it to the user for the Orgtree team:
 
 Do not send the contents of `DATA\pg\` or any `.db` file unless asked. They
 hold the user's private data.
+
+
+## Per-item work storage (migration 0003)
+
+Use an approved package containing `0003_work_item_rows.sql`. Fresh PostgreSQL
+organizations and both pgimport input paths (SQLite and legacy JSON) write one
+active work-item row per slug. The small header records the layout version and
+ordered slugs. Existing PostgreSQL organizations are upgraded transactionally
+before the engine starts. Archive rows and scope-history logs keep their format.
+
+For an existing PostgreSQL root, stop the app and preserve a complete offline
+backup of its PostgreSQL data before starting the new build. The migration
+refuses unknown list/header shapes, duplicate/invalid slugs and mixed/orphaned
+rows. It verifies item counts and SHA-256 of the ordered raw item values, then
+records the count, item checksum and original document checksum in the per-org
+`work-items-layout/v1` operation receipt. A failed migration rolls back its data
+and schema-version receipt; do not clear the error or edit rows to bypass it.
+
+For SQLite/JSON cutover, retain the dry-run report and import report. Compare
+`manifest_sha256` between those reports and require no refusals. Each report
+also retains `source_manifest_sha256` and a `work_items` count/checksum. The
+importer independently rebuilds the destination item list and checks it against
+the source before publishing the org marker. Original files still move intact
+to `pre-postgres/orgs`; do not delete them.
+
+An older build must refuse the newer migration. Do not remove the migration
+receipt to force an old engine to open a new-layout database. Rollback is an
+offline restore of the complete pre-upgrade PostgreSQL backup, or the existing
+SQLite rollback procedure. Either restores a snapshot in time: preserve/export
+any writes made after cutover before choosing that rollback with the user.
+Never silently import the old SQLite snapshot over a currently used PG root.

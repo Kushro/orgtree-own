@@ -1179,6 +1179,8 @@ def _assemble(k: str, rows: Mapping[str, str]) -> Any:
     exist): a split section's owner rows merge into its container, in key
     order."""
     v = json.loads(rows[k])
+    if k == workrows.SECTION and isinstance(v, list) and len(rows) != 1:
+        raise ValueError("mixed work-items blob and item rows")
     if k == workrows.SECTION and isinstance(v, dict):
         values = workrows.assemble(rows)
         result = []
@@ -3920,7 +3922,13 @@ def _verify_scoped_save(d: dict[str, Any], lazy: LazyDoc) -> None:
     for k in list(dict.keys(d)):
         if k in ROWED or k in LAZY_SECTIONS:
             continue
-        if _split_rows(k, dict.__getitem__(d, k), reuse_work=False) != _snap_rows(lazy._snap_doc, k):
+        actual = _split_rows(k, dict.__getitem__(d, k), reuse_work=False)
+        expected = _snap_rows(lazy._snap_doc, k)
+        matches = actual == expected
+        if k == workrows.SECTION and STORE_BACKEND == "postgres":
+            matches = (actual.keys() == expected.keys()
+                       and all(_same_log_text(expected[rk], raw) for rk, raw in actual.items()))
+        if not matches:
             raise RuntimeError(
                 f"scoped save verification failed: doc key {k!r} differs "
                 "from its adopted baseline — a mutation escaped the read "
