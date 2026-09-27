@@ -1,6 +1,5 @@
 """The stream projection and races on PostgreSQL, in an owned database."""
 import os
-from pathlib import Path
 import unittest
 from urllib.parse import urlsplit, urlunsplit
 
@@ -27,9 +26,8 @@ class PostgresStreamIdentity(fixture.StreamIdentityReads):
 
 def tearDownModule():
     if ADMIN:
-        from orgtree import pgstore, store, transcript_records
+        from orgtree import pgstore, transcript_records
         transcript_records.close_all()
-        store._POOL.close_all()
         pgstore.close_idle()
         with psycopg.connect(ADMIN, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE {DBNAME} WITH (FORCE)')
