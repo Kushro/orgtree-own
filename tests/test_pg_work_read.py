@@ -253,10 +253,19 @@ class Counts(unittest.TestCase):
             self.assertEqual(workread.counts_raw(sink.conn,oid,viewer='a',now_ts=self.now)['active'],1)
             self.assertEqual(dict(sink.read_org('counts-import')['doc'])[workrows.PREFIX+'one'],body)
             rows['doc']=[('work_items',workrows.header([]))]
-            rows['log_l']=[(1,'work_items_archive',body)]
+            rows['log_l']=[(1,'work_items_archive',None,body)]
             sink.replace_org('counts-import',rows,{'source_fingerprint':'replacement'})
             self.assertEqual(workread.counts_raw(sink.conn,oid,viewer='a',now_ts=self.now),dict(active=0,attention=0,archived=1,backlogged=0))
         finally: sink.close()
+
+    def test_bootstrap_refuses_summary_disagreeing_with_raw_authority(self):
+        self.add(self.item())
+        self.c.execute(f'UPDATE {self.s}.work_read_state SET initialized=false,ready=false')
+        self.c.execute(f"UPDATE {self.s}.work_index SET summary=summary || '{{\"owner\":{{\"node\":\"b\"}}}}'")
+        with self.assertLogs('orgtree.workread',level='ERROR'):
+            workread.bootstrap(self.c)
+        self.assertIsNone(self.counts('b'))
+        self.assertEqual(json.loads(self.c.execute(f'SELECT val FROM {self.s}.doc WHERE key=%s',(workrows.PREFIX+'one',)).fetchone()[0])['owner']['node'],'a')
 
 
 if __name__ == '__main__':
