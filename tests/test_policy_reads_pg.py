@@ -50,7 +50,9 @@ class PolicyReads(unittest.TestCase):
         with patch.object(store, 'cached_org', side_effect=AssertionError('full read')):
             got = policy_reads.watchdog_org(self.slug)
         dog = dict(got.d['watchdogs'][0], kind='command')
-        self.assertIn('no longer holds bash', sup._wd_owner_lost(got, dog))
+        reason = sup._wd_owner_lost(got, dog)
+        self.assertIsNotNone(reason)
+        self.assertIn('no longer holds bash', reason)
 
     def test_storage_fields_and_unknown_node_blob_fallback(self):
         org = self.configure()
