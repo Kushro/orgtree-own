@@ -7739,15 +7739,21 @@ async def engine_stats() -> dict[str, Any]:
 
 @app.get("/api/orgs/{slug}/work-items/{wid}")
 def work_item_get(slug: str, wid: str, compact: int = 0) -> dict[str, Any]:
+    from . import workdetail
     try:
-        org = store.load_org(slug)
+        it = workdetail.get(slug, USER, wid, compact=bool(compact))
     except LedgerError as e:
         raise HTTPException(404, str(e))
-    _work_identity_guard(org)
-    try:
-        it = org.work_get(USER, wid, compact=bool(compact))
-    except LedgerError as e:
-        raise HTTPException(404, str(e))
+    if it is None:
+        try:
+            org = store.load_org(slug)
+        except LedgerError as e:
+            raise HTTPException(404, str(e))
+        _work_identity_guard(org)
+        try:
+            it = org.work_get(USER, wid, compact=bool(compact))
+        except LedgerError as e:
+            raise HTTPException(404, str(e))
     it["ref"] = refs.item(slug, str(it["slug"]))
     return {"item": it}
 
@@ -9030,6 +9036,16 @@ def _work_read_call(body: AgentCall, a: dict[str, Any]) -> dict[str, Any]:
             res = workitems.evaluate(cap["stage"], cap["sha"])
             return worktx.run(body.org, lambda org: org.work_verify_commit(
                 cap["wid"], cap["stage"], cap["rev"], res))
+        if act == "get":
+            from . import workdetail
+            it = workdetail.get(body.org, body.node, _work_ref(a),
+                                compact=_arg_flag(a, "compact"),
+                                projection=_work_projection(a, "full"),
+                                fields=a.get("fields"))
+            if it is not None:
+                return {"item": {"slug": it.get("slug"),
+                    "ref": refs.item(body.org, str(it["slug"])),
+                    **{k: v for k, v in it.items() if k != "slug"}}}
         # `list` and `get` only read. The shared snapshot (`org_seq`-guarded,
         # dropped by every save) serves them without a third whole-document
         # parse in a call that has already paid for two — 56 ms of the 266 ms
