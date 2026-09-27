@@ -57,6 +57,9 @@ BEGIN
   EXECUTE format('CREATE TABLE IF NOT EXISTS %I.mail_sent('
                  'seq bigint PRIMARY KEY,owner text NOT NULL,sender text,'
                  'sent_at text NOT NULL,owner_pos bigint NOT NULL)',s);
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='orgtree_runtime') THEN
+    EXECUTE format('GRANT SELECT,INSERT,UPDATE,DELETE ON %I.mail_sent TO orgtree_runtime',s);
+  END IF;
   EXECUTE format('CREATE INDEX IF NOT EXISTS ix_mail_sent_tail ON %I.mail_sent '
                  '(sender,sent_at DESC,owner_pos DESC,seq DESC)',s);
   EXECUTE format('CREATE INDEX IF NOT EXISTS ix_mail_sent_owner ON %I.mail_sent(owner,seq)',s);
@@ -98,7 +101,7 @@ BEGIN
 END
 $wrap$;
 CREATE OR REPLACE FUNCTION public.orgtree_create_org_schema(p_org_id bigint) RETURNS text
-LANGUAGE plpgsql AS $fn$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $fn$
 DECLARE s text;
 BEGIN
   s := public.orgtree_create_org_schema_before_mail_sent(p_org_id);
@@ -106,3 +109,11 @@ BEGIN
   RETURN s;
 END
 $fn$;
+REVOKE ALL ON FUNCTION public.orgtree_create_org_schema(bigint) FROM PUBLIC;
+DO $grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='orgtree_runtime') THEN
+    GRANT EXECUTE ON FUNCTION public.orgtree_create_org_schema(bigint) TO orgtree_runtime;
+  END IF;
+END
+$grants$;

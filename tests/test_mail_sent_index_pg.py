@@ -101,5 +101,17 @@ class MailSentIndex(unittest.TestCase):
         self.assertEqual(index['Actual Rows'], 5)
         self.assert_projection()
 
+    def test_runtime_can_read_and_update_projection(self):
+        with store._POOL.acquire(self.slug) as conn:
+            conn.execute('BEGIN')
+            conn.execute('SET LOCAL ROLE orgtree_runtime')
+            conn.execute("INSERT INTO log_d(sect,owner,val) VALUES('mail_log','worker',?)",
+                         (json.dumps({'from': 'sender', 'at': 'runtime'}),))
+            rows = conn.execute("SELECT seq FROM mail_sent WHERE sender='sender' "
+                                "ORDER BY sent_at DESC,owner_pos DESC,seq DESC LIMIT 2").fetchall()
+            self.assertEqual(len(rows), 2)
+            conn.execute('COMMIT')
+        self.assert_projection()
+
 
 if __name__ == '__main__': unittest.main()
