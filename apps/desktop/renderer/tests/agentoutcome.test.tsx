@@ -26,7 +26,7 @@ function stubReferences(t: TestContext, found: string[], fail = false): string[]
     const query = new URL(String(url), 'http://x').searchParams.getAll('include')
     asked.push(query)
     if (fail) return { ok: false, status: 503, headers: new Headers(), json: async () => ({ detail: 'down' }) }
-    const body = { format, kind: 'references', revision: 'r', catalog_revision: 'cat-' + t.name.length,
+    const body = { format, kind: 'references', revision: 'r', catalog_revision: 'cat-' + t.name,
       org_rev: 1, sync_rev: 1,
       references: Object.fromEntries(query.filter(id => found.includes(id)).map(id => [id,
         { id, tier: 'astra', state: 'archived', generation: 1, axis: 'org', successor: null }])),
@@ -50,7 +50,7 @@ async function mountWorld(t: TestContext, view: TreePayload['foreground']) {
 
 test('a selected tree looks up omitted agents and never calls them absent on a guess', async (t) => {
   const asked = stubReferences(t, ['old'])
-  const world = await mountWorld(t, { catalog_revision: 'cat-' + t.name.length,
+  const world = await mountWorld(t, { catalog_revision: 'cat-' + t.name,
     present: ['live', 'lineage-only'], missing: ['erased'] })
   assert.equal(resolveRef(agent('live'), world()).outcome, 'ready')
   assert.equal(resolveRef(agent('lineage-only'), world()).outcome, 'ready', 'an off-axis row is present')
@@ -94,7 +94,7 @@ test('bare names in prose resolve omitted agents in a bounded lookup; items keep
   const base: MentionIndex = new Map([['shared-name', { kind: 'item', slug: 'shared-name' }],
     ['live', { kind: 'agent', id: 'live', tier: 'haiku' }]])
   const item = { objective: 'ask old-agent about shared-name, not missing-one', notes: ['live erased'] }
-  const index = await mountIndex(t, { catalog_revision: 'cat-' + t.name.length, present: ['live'], missing: ['erased'] },
+  const index = await mountIndex(t, { catalog_revision: 'cat-' + t.name, present: ['live'], missing: ['erased'] },
     item, base)
   assert.equal(index(), base, 'unchanged until the lookup answers')
   await inAct(async () => { await flush(4) })
