@@ -124,6 +124,39 @@ class WorkUI(unittest.TestCase):
         self.assertEqual([r["slug"] for r in after["delta"]["items"]["upsert"]], ["visible"])
         self.assertEqual(after["delta"]["attention"]["upsert"], [])
 
+    def test_group_validator_cannot_hide_newly_opened_group(self):
+        self.edit(lambda org: org.d["work_items"][1].update(manual_attention=None))
+        before = self.get()
+        after = self.get(before.headers["etag"], "?backlogged=1")
+        self.assertEqual(after.status_code, 200)
+        self.assertNotIn("delta", after.json())
+        self.assertEqual(after.json()["backlogged"][0]["slug"], "hidden")
+
+    def test_evicted_base_gets_complete_light_snapshot(self):
+        before = self.get()
+        for rev in range(2, 6):
+            self.edit(lambda org: org.d["work_items"][0].update(rev=rev))
+            self.get()
+        after = self.get(before.headers["etag"])
+        self.assertNotIn("delta", after.json())
+        self.assertEqual(after.json()["items"][0]["rev"], 5)
+        self.assertNotIn("evidence", after.json()["items"][0])
+        with patch.object(work_ui, "MAX_BYTES", 1):
+            self.get()
+            self.assertFalse(work_ui._cache, "oversized snapshots must not stay resident")
+
+    def test_concurrent_commit_during_build_is_not_labeled_with_newer_stamp(self):
+        original = work_ui._build
+        def build(slug):
+            old = original(slug)
+            self.edit(lambda org: org.d["work_items"][0].update(title="Committed during read", rev=2))
+            return old
+        with patch.object(work_ui, "_build", side_effect=build):
+            before = self.get()
+        after = self.get(before.headers["etag"])
+        self.assertEqual(after.status_code, 200)
+        self.assertEqual(after.json()["delta"]["items"]["upsert"][0]["title"], "Committed during read")
+
 
 if __name__ == "__main__":
     unittest.main()

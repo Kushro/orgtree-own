@@ -50,7 +50,7 @@ import { ago, jumpKey, useEsc, usePolled } from './shared'
 import { fmtFull } from '../timefmt'
 import { buildMentionIndex } from './workrefs'
 import type { MentionIndex } from './workrefs'
-import { RefProse, refToken } from './reflinks'
+import { RefProse, refToken, resolveRef } from './reflinks'
 import { DocketDescription } from './docketdesc'
 import { copyToClipboard, useContextMenu } from './contextmenu'
 import { quickStaffEntry, quickStaffPath } from './quickstaff'
@@ -857,7 +857,9 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
     const map = new Map<string, WorkItem>()
     // References carry identity/group membership only. They make hidden-group
     // links resolvable without fetching those groups' descriptions or records.
-    for (const item of data?.references ?? []) map.set(item.slug, { ...item, view: 'list' } as WorkItem)
+    // Reference-only selections enter DocketPane's hydration branch; they
+    // never render as full rows or details until the group/item read returns.
+    for (const item of data?.references ?? []) map.set(item.slug, { ...item, view: 'list' } as unknown as WorkItem)
     if (!data?.references) {
       for (const item of archivedCache) map.set(item.slug, item)
       for (const item of backlogCache) map.set(item.slug, item)
@@ -1556,7 +1558,7 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
     [byName, facts, references])
   const hiddenSelection = references?.find(it => it.slug === selId)
   const cur = byName.get(selId ?? '') ?? (hiddenSelection
-    ? { ...hiddenSelection, view: 'list' } as WorkItem : undefined)
+    ? { ...hiddenSelection, view: 'list' } as unknown as WorkItem : undefined)
   /** THE DESK'S WORLD, WITH EXACTLY ONE ROUTE TAKEN OVER.
    *
    *  ⚠ THIS TAB USED TO BUILD ITS OWN NARROW WORLD (`handles` = item + agent),
