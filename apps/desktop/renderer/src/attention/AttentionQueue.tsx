@@ -232,6 +232,7 @@ export function AttentionQueue({
     // Wrapping unconditionally would advertise mail this view cannot route.
     onOpenMail: onOpenMail ? (r: TypedRef) => onOpenMail(mailRefTarget(r)) : undefined,
     tierOf: (id: string) => nodeMap.get(id)?.tier,
+    view: tree.foreground,
   })
 
   // ---- the three resolutions, each through the surface that already owns it

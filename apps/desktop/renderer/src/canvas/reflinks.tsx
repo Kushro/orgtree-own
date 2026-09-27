@@ -21,12 +21,14 @@
 // one of the two is a lie that appears while the page is still loading — which
 // is exactly when a user is most likely to read it.
 
-import { useCallback, useMemo } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { agentNavProps } from './agentnav'
 import { WorkRefText, parseRef, scanRefs } from './workrefs'
 import { TIER_LETTER } from './shared'
 import { useHistoricalWorkReferences } from './workrefresolve'
+import { agentReferences } from '../api'
+import type { TreePayload } from '../types'
 import type { MentionIndex, RefKind, TypedRef } from './workrefs'
 
 export type RefOutcome =
@@ -58,6 +60,9 @@ export interface RefWorld {
   itemTitles?: ReadonlyMap<string, string>
   docs?: RefIndexOf
   agents?: RefIndexOf
+  /** Exact per-agent result for a SELECTED tree, where absence from `agents`
+   *  is only omission. Overrides `agents` for the judgement, not the label. */
+  agentOutcome?: (id: string) => RefOutcome
   /** mail is not a list this side holds — the boxes are fetched per box, so a
    *  surface answers for the BOX (can I address it at all?) and the mail list
    *  answers for the message once it has loaded one. */
@@ -169,7 +174,8 @@ export function resolveRef(ref: TypedRef, world: RefWorld): ResolvedRef {
   const index = ref.kind === 'item' ? world.items
     : ref.kind === 'doc' ? world.docs : world.agents
   const [indexedOutcome, label] = judge(index, ref.id)
-  const outcome = ref.kind === 'item' && world.itemOutcome ? world.itemOutcome(ref.id) : indexedOutcome
+  const outcome = ref.kind === 'item' && world.itemOutcome ? world.itemOutcome(ref.id)
+    : ref.kind === 'agent' && world.agentOutcome ? world.agentOutcome(ref.id) : indexedOutcome
   // AN AGENT REFERENCE CARRIES THE SAME TWO FACTS ITS NAME DOES ELSEWHERE:
   // the model it is running now, and whether you are already looking at it.
   // ⚠ THE MODEL IS ONLY CLAIMED FOR ONE THAT RESOLVES. Drawing an icon beside
@@ -246,6 +252,45 @@ export interface RefRoutes {
  *  `(id) => centerOn(id)` and never bare `centerOn`. `centerOn(id, z)` reads
  *  `z ?? fit`, so a DOM event in the second parameter is non-null, defeats the
  *  default, and the camera is computed from an object. */
+/** The selected tree's omission boundary for surfaces mounted under the
+ *  canvas, which hold only its flattened map. */
+export const ForegroundViewContext = createContext<TreePayload['foreground'] | undefined>(undefined)
+
+/** Judges an agent a SELECTED tree may have omitted. Present rows are ready,
+ *  the backend's explicit `missing` is absent, and anything else is looked up
+ *  by exact reference for the tree's catalog: pending until it answers or if
+ *  the lookup fails, never absent on a guess. `undefined` for a complete tree,
+ *  whose map is authoritative as it stands. */
+export function useAgentOutcome(org: string, agents: ReadonlyMap<string, unknown> | null,
+  view: TreePayload['foreground'] | undefined): ((id: string) => RefOutcome) | undefined {
+  const [answers, setAnswers] = useState(0)
+  useEffect(() => agentReferences.subscribe(() => setAnswers(n => n + 1)), [])
+  const asked = useRef(new Set<string>())
+  const [asking, setAsking] = useState(0)
+  const catalog = view?.catalog_revision
+  useEffect(() => {
+    if (catalog === undefined || !asked.current.size) return
+    const ids = [...asked.current]
+    asked.current.clear()
+    agentReferences.request(org, catalog, ids)
+  }, [org, catalog, asking])
+  return useMemo(() => {
+    if (!view || !agents) return undefined
+    const present = new Set(view.present), missing = new Set(view.missing)
+    return (id: string): RefOutcome => {
+      if (agents.has(id) || present.has(id)) return 'ready'
+      if (missing.has(id)) return 'absent'
+      const state = agentReferences.get(org, view.catalog_revision, id)
+      if (state && 'ref' in state) return state.ref ? 'ready' : 'absent'
+      if (!state && !asked.current.has(id)) {
+        asked.current.add(id)
+        queueMicrotask(() => setAsking(n => n + 1))
+      }
+      return 'pending'
+    }
+  }, [org, agents, view, answers])   // eslint-disable-line react-hooks/exhaustive-deps
+}
+
 export function useRefRoutes(org: string, agents: ReadonlyMap<string, unknown> | null,
   routes: {
     onOpenItem?: (itemSlug: string) => void
@@ -256,9 +301,14 @@ export function useRefRoutes(org: string, agents: ReadonlyMap<string, unknown> |
     destination?: string | null
     /** an agent's current model (`RefWorld`) */
     tierOf?: (id: string) => string | null | undefined
+    /** the selected tree's omission boundary, when the agents came from one */
+    view?: TreePayload['foreground']
   }): RefRoutes {
   const { onOpenItem, onFocusAgent, onOpenDoc, onOpenMail,
     destination, tierOf } = routes
+  const inherited = useContext(ForegroundViewContext)
+  const view = 'view' in routes ? routes.view : inherited
+  const agentOutcome = useAgentOutcome(org, agents, view)
   const world = useMemo<RefWorld>(() => {
     const handles = new Set<RefKind>()
     if (onOpenItem) handles.add('item')
@@ -270,15 +320,17 @@ export function useRefRoutes(org: string, agents: ReadonlyMap<string, unknown> |
       agents: agents
         ? new Map([...agents.keys()].map((id) => [id, id]))
         : 'loading',
+      ...(agentOutcome ? { agentOutcome } : {}),
       mail: (r) => (r.box !== 'node' ? 'ready'
         : !agents ? 'pending'
-          : agents.has(String(r.node ?? '')) ? 'ready' : 'absent'),
+          : agentOutcome ? agentOutcome(String(r.node ?? ''))
+            : agents.has(String(r.node ?? '')) ? 'ready' : 'absent'),
       destination: destination ?? null,
       tierOf,
       handles,
     }
   }, [org, agents, onOpenItem, onFocusAgent, onOpenDoc, onOpenMail,
-    destination, tierOf])
+    destination, tierOf, agentOutcome])
   const onOpen = useCallback((r: ResolvedRef) => {
     // ⚠ THE DESTINATION IS NOT A ROUTE. A chip at its own desk renders inert,
     // but a click can still arrive — a keyboard, an old chip, a caller that

@@ -51,7 +51,7 @@ import { useWorkItems, useSelectedWork } from './useworkitems'
 import { fmtFull } from '../timefmt'
 import { buildMentionIndex } from './workrefs'
 import type { MentionIndex } from './workrefs'
-import { RefProse, refToken, resolveRef } from './reflinks'
+import { RefProse, refToken, resolveRef, useAgentOutcome } from './reflinks'
 import { DocketDescription } from './docketdesc'
 import { copyToClipboard, useContextMenu } from './contextmenu'
 import { quickStaffEntry, quickStaffPath } from './quickstaff'
@@ -278,20 +278,22 @@ export function useNodeFacts(slug: string, tree: TreePayload | null | undefined,
   const wanted = useMemo(() => catalog === undefined ? []
     : ids.filter(id => !base.has(id) && !known?.includes(id)), [catalog, base, known, ids])
   const wantedKey = JSON.stringify(wanted)
-  const [, setAnswered] = useState(0)
+  const [answered, setAnswered] = useState(0)
   useEffect(() => agentReferences.subscribe(() => setAnswered(n => n + 1)), [])
   useEffect(() => {
     if (catalog !== undefined && wanted.length) agentReferences.request(slug, catalog, wanted)
   }, [slug, catalog, wantedKey])   // eslint-disable-line react-hooks/exhaustive-deps
-  if (catalog === undefined || !wanted.length) return base
-  const facts = new Map(base)
-  for (const id of wanted) {
-    const state = agentReferences.get(slug, catalog, id)
-    if (!state || 'error' in state) facts.set(id, { tier: '', generation: 0, live: false, unresolved: true })
-    else if (state.ref) facts.set(id, { tier: state.ref.tier ?? '', generation: state.ref.generation ?? 0,
-      live: state.ref.state === 'live' })
-  }
-  return facts
+  return useMemo(() => {
+    if (catalog === undefined || !wanted.length) return base
+    const facts = new Map(base)
+    for (const id of wanted) {
+      const state = agentReferences.get(slug, catalog, id)
+      if (!state || 'error' in state) facts.set(id, { tier: '', generation: 0, live: false, unresolved: true })
+      else if (state.ref) facts.set(id, { tier: state.ref.tier ?? '', generation: state.ref.generation ?? 0,
+        live: state.ref.state === 'live' })
+    }
+    return facts
+  }, [slug, catalog, base, wanted, answered])
 }
 
 export function actorFit(actor: WorkActor | null | undefined,
@@ -952,6 +954,9 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
   // will", and the destination is the reader below, which reports "could not
   // load the document: …" from the exact GET. An empty Map here would call
   // every real document missing.
+  // an unresolved placeholder is not evidence the agent exists
+  const settled = useMemo(() => new Map([...facts].filter(([, f]) => !f.unresolved)), [facts])
+  const agentOutcome = useAgentOutcome(slug, settled, tree?.foreground)
   const refWorld = useMemo<RefWorld>(() => {
     const handles = new Set<RefKind>(['item', 'agent', 'doc'])
     if (onOpenMail) handles.add('mail')
@@ -962,6 +967,7 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
       workRevision: data?.revision,
       itemTitles: new Map([...allKnown].map(([s, item]) => [s, item.title])),
       agents: new Map([...facts.keys()].map((id) => [id, id])),
+      ...(agentOutcome ? { agentOutcome } : {}),
       // ⚠ A NODE'S INBOX IS ONLY REAL IF THE NODE IS. The user's box and the
       // org's box always exist; a NODE box named after somebody this org has
       // never had (or who was dissolved out of the tree) does not, and the
@@ -970,10 +976,11 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
       // this panel was handed is the same tree the canvas routes against, so
       // asking it here is the same question, asked before the click.
       mail: (r) => (r.box !== 'node' ? 'ready'
-        : facts.has(String(r.node ?? '')) ? 'ready' : 'absent'),
+        : agentOutcome ? agentOutcome(String(r.node ?? ''))
+          : facts.has(String(r.node ?? '')) ? 'ready' : 'absent'),
       handles,
     }
-  }, [slug, data, allKnown, facts, onOpenMail])
+  }, [slug, data, allKnown, facts, onOpenMail, agentOutcome])
   const [flash, setFlash] = useState<string | null>(null)
   const rows = useRef(new Map<string, HTMLDivElement>())
   const captureRow = useCallback((id: string, el: HTMLDivElement | null) => {

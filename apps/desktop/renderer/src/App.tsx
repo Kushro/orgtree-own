@@ -2412,7 +2412,7 @@ function useShellRefs(slug: string, tree: TreePayload | null, routes: {
   // one is running
   const tierOf = useCallback(
     (id: string) => nodes?.get(id)?.tier, [nodes])
-  return useRefRoutes(slug, nodes, { ...routes, tierOf })
+  return useRefRoutes(slug, nodes, { ...routes, tierOf, view: tree?.foreground })
 }
 
 export function InboxPanel({ slug, tree, toast, refresh, close, jumpTo, jumpSeq,

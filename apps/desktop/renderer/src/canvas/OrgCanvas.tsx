@@ -38,7 +38,7 @@ import { OrgDefaultEffort, resolveOrgDefault } from './effort'
 import { TempDeskModal } from './tempdesk'
 import { FirstUseGuide, firstUseToken, firstUseCancel, firstUseHired } from './firstuse'
 import { DocReader } from './docs'
-import { mailRefTarget, useRefRoutes, Written } from './reflinks'
+import { ForegroundViewContext, mailRefTarget, useRefRoutes, Written } from './reflinks'
 import type { ResolvedRef } from './reflinks'
 import type { TypedRef } from './workrefs'
 import { NodeInboxModal, OrgInboxModal } from './mail'
@@ -1899,6 +1899,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     // the canvas is not AT any agent, so every name here is somewhere to
     // go; it can say what each one is running
     tierOf: (id: string) => map.get(id)?.tier,
+    view: tree.foreground,
   })
   // the DOCUMENT READER's own copy: same world, same routes, plus the one
   // thing that belongs to the reader rather than to the canvas — a document
@@ -3198,6 +3199,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   return (
     <AgentNavProvider>
     <OrgKillswitchContext.Provider value={!!tree.killswitch}>
+    <ForegroundViewContext.Provider value={tree.foreground}>
     {/* THE ORG'S ORDINARY THINKING EFFORT, for the non-default effort card on
         the canvas cards and the desk headers. Provided once, here, because
         this subtree contains every mount site of both surfaces — canvas
@@ -4112,6 +4114,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     </DeskHosts>
     </AgentSurfaceRoutesProvider>
     </OrgDefaultEffort.Provider>
+    </ForegroundViewContext.Provider>
     </OrgKillswitchContext.Provider>
     </AgentNavProvider>
   )
