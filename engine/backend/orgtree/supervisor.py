@@ -3405,11 +3405,11 @@ def working_count(slug: str) -> int:
         return sum(1 for k, v in _state.items() if k[0] == slug and v.get("busy"))
 
 
-def scratch_dir(slug: str, nid: str) -> str:
+def scratch_dir(slug: str, nid: str, *, policy_org: Any = None) -> str:
     # lineage nodes ("name@gen") share their successor's scratch — they are the same
     # self at different times, and the CLAUDE.md self-notes belong to that self.
     # A disk-migrated org's scratch lives ON the disk (UNC view for the backend).
-    if sbx.on_disk(slug):
+    if (bool(policy_org.d.get("disk")) if policy_org is not None else sbx.on_disk(slug)):
         from . import disk as dsk
         base = dsk.windows_sub(slug, "scratch")
     else:
@@ -3421,7 +3421,7 @@ def scratch_dir(slug: str, nid: str) -> str:
         # root; the CLI runs as agent) — hand a NEW node dir over immediately,
         # or its first turn cannot write its own cwd (live bug 2026-08-04)
         try:
-            org = store.load_runtime_org(slug)
+            org = policy_org if policy_org is not None else store.load_runtime_org(slug)
             sbx.chown_agent(org, nid)
         except Exception:                                    # noqa: BLE001
             pass          # container down → ensure_container's heal covers it
@@ -29137,14 +29137,14 @@ def start_storage_watchdog() -> None:
         while True:
             time.sleep(20)
             try:
-                for o in store.cached_list():
-                    slug = o["slug"]
+                for slug in store.org_slugs():
                     with _state_lock:
                         busy = any(k[0] == slug and v.get("busy")
                                    for k, v in _state.items())
                     # read-only pre-checks on the shared snapshot; the real
                     # storage_check does its own loading and saving
-                    org = store.cached_org(slug)
+                    from .policy_reads import storage_org
+                    org = storage_org(slug)
                     # blocked orgs stay on the 20 s cadence even when idle —
                     # a storage-frozen org runs no turns, so this loop IS its
                     # auto-unblock path once usage drops
@@ -33631,7 +33631,7 @@ def _wd_popen(org: Org, owner: str, cmd: str,
     else:
         argv, shell = cmd, True
     proc = subprocess.Popen(
-        argv, shell=shell, cwd=scratch_dir(slug, owner),
+        argv, shell=shell, cwd=scratch_dir(slug, owner, policy_org=org),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
         # spawn_env, not clean_env (the d840331 family rule): the dog runs
@@ -34176,7 +34176,7 @@ def wd_file_roots(org: Org, owner: str) -> list[str]:
     boundary deliberately: a containment rule checked at create time and a
     containment rule checked every tick must be the SAME rule, or one of them
     is a fiction."""
-    roots = [os.path.realpath(scratch_dir(org.d["slug"], owner))]
+    roots = [os.path.realpath(scratch_dir(org.d["slug"], owner, policy_org=org))]
     if org.d.get("workspace"):
         roots.append(os.path.realpath(cast(str, org.d["workspace"])))
     try:
@@ -34727,10 +34727,10 @@ def _wd_tick() -> None:
     # the fastest of the six loops re-parsing the unchanged root. The org
     # here is READ-ONLY; every state change below goes through its own
     # write of its own (_wd_write: _wd_pause, the check marks, the stream exits).
-    for o in store.cached_list():
-        slug = str(o["slug"])
+    from .policy_reads import watchdog_org
+    for slug in store.org_slugs():
         try:
-            org = store.cached_org(slug)
+            org = watchdog_org(slug)
         except LedgerError:
             continue
         dogs = cast("list[dict[str, Any]]",
@@ -34792,7 +34792,7 @@ def _wd_tick() -> None:
     for key in live_keys:
         slug, wid = key
         try:
-            org = store.cached_org(slug)
+            org = watchdog_org(slug)
             w = org._watchdog(wid)
             if w.get("state") == "armed":
                 continue
