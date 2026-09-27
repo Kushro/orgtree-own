@@ -128,6 +128,22 @@ def _replace_access(raw,schema,slug,allowed):
 
 
 def refresh(raw, org_id: int) -> bool:
+    """Keep raw writes compatible when legacy data cannot be projected.
+
+    SQL errors still abort the transaction. A malformed policy input disables
+    indexed answers and retains dirty markers; it must not break an otherwise
+    supported raw save or manufacture an empty count.
+    """
+    try:
+        return _refresh(raw,org_id)
+    except (KeyError,ValueError) as exc:
+        schema=f'org_{int(org_id)}'
+        raw.execute(f'UPDATE {schema}.work_read_state SET ready=false WHERE singleton')
+        log.error('Docket access input cannot be projected for org %s (%s); use exact compatibility path',org_id,type(exc).__name__)
+        return False
+
+
+def _refresh(raw, org_id: int) -> bool:
     """Called inside the writer's transaction, after raw rows and before commit.
 
     The SQL marker's state-row lock serializes work/topology/ask writers before

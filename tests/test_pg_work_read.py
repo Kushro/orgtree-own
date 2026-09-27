@@ -267,6 +267,16 @@ class Counts(unittest.TestCase):
         self.assertIsNone(self.counts('b'))
         self.assertEqual(json.loads(self.c.execute(f'SELECT val FROM {self.s}.doc WHERE key=%s',(workrows.PREFIX+'one',)).fetchone()[0])['owner']['node'],'a')
 
+    def test_incomplete_legacy_ask_preserves_raw_save_and_refuses_counts(self):
+        org=store.load_org(self.slug)
+        org.d['work_items']=[self.item()]
+        malformed=[dict(id='legacy',status='open',questions=[dict(work_item='one')])]
+        org.d['asks']=malformed
+        with self.assertLogs('orgtree.workread',level='ERROR'):
+            store.save_org(org)
+        self.assertEqual(json.loads(self.c.execute(f"SELECT val FROM {self.s}.doc WHERE key='asks'").fetchone()[0]),malformed)
+        self.assertIsNone(self.counts())
+
 
 if __name__ == '__main__':
     unittest.main()
