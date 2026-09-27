@@ -5382,14 +5382,26 @@ def read_mail_tails(slug: str, nid: str, keep: int, slack: int = 40
         # rows keep (owner position, list position), NOT global insertion seq
         # (perf-review round 3, equal-time fixture: the wrong last-50). The
         # join reproduces that composite key inside the capped query.
-        for owner, raw in reversed(conn.execute(
+        if STORE_BACKEND == "postgres":
+            # Materialize only the indexed capped keys before fetching bodies.
+            # The projection preserves owner/list ties without a global owner
+            # aggregate or sorting all historical rows from this sender.
+            sent_rows = conn.execute(
+                "WITH tail AS MATERIALIZED (SELECT seq,sent_at,owner_pos FROM mail_sent "
+                "WHERE sender=? ORDER BY sent_at DESC,owner_pos DESC,seq DESC LIMIT ?) "
+                "SELECT l.owner,l.val FROM tail JOIN log_d l ON l.seq=tail.seq "
+                "ORDER BY tail.sent_at DESC,tail.owner_pos DESC,tail.seq DESC",
+                (nid, cap)).fetchall()
+        else:
+            sent_rows = conn.execute(
                 "SELECT l.owner, l.val FROM log_d l JOIN "
                 "(SELECT owner, MIN(seq) AS pos FROM log_d "
                 " WHERE sect='mail_log' GROUP BY owner) o ON o.owner=l.owner "
                 "WHERE l.sect='mail_log' AND json_extract(l.val,'$.from')=? "
                 "ORDER BY COALESCE(json_extract(l.val,'$.at'),'') DESC, "
                 "o.pos DESC, l.seq DESC "
-                "LIMIT ?", (nid, cap)).fetchall()):
+                "LIMIT ?", (nid, cap)).fetchall()
+        for owner, raw in reversed(sent_rows):
             sent.append({**json.loads(cast(str, raw)), "to": cast(str, owner)})
         row = conn.execute("SELECT val FROM doc WHERE key='user_inbox'"
                            ).fetchone()
