@@ -94,7 +94,7 @@ class WorkUI(unittest.TestCase):
         before = self.get()
         self.edit(lambda org: org.d.setdefault("asks", []).append({
             "id": "q", "node": "boss", "status": "open", "kind": "question", "rev": 1,
-            "question": "Decision?", "work_item": "visible"}))
+            "questions": [{"question": "Decision?", "work_item": "visible"}]}))
         after = self.get(before.headers["etag"])
         self.assertEqual(after.status_code, 200)
         self.assertTrue(after.json()["delta"]["items"]["upsert"][0]["questions"])

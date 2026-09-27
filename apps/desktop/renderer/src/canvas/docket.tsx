@@ -1554,7 +1554,9 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
     () => buildMentionIndex([...(references ?? []), ...byName.values()],
                             [...facts].map(([id, f]) => [id, f.tier] as const)),
     [byName, facts, references])
-  const cur = byName.get(selId ?? '')
+  const hiddenSelection = references?.find(it => it.slug === selId)
+  const cur = byName.get(selId ?? '') ?? (hiddenSelection
+    ? { ...hiddenSelection, view: 'list' } as WorkItem : undefined)
   /** THE DESK'S WORLD, WITH EXACTLY ONE ROUTE TAKEN OVER.
    *
    *  ⚠ THIS TAB USED TO BUILD ITS OWN NARROW WORLD (`handles` = item + agent),
@@ -1660,7 +1662,7 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
       </div>
       {mine === null
         ? <div className="dim pad">loading…</div>
-        : sections.length === 0
+        : sections.length === 0 && !cur
           ? <div className="dim pad">
               {emptyText ?? <>
                 no docket items are assigned to {nid} — assignment is ownership,
@@ -1716,7 +1718,10 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
                       asksById={new Map()} onDismiss={onDismiss}
                       close={() => setSelId(null)} onFocusAgent={onFocusAgent}
                       facts={facts} refIndex={refIndex}
-                      onGoToItem={(id) => { if (byName.has(id)) setSelId(id) }}
+                      onGoToItem={(id) => {
+                        if (byName.has(id)) setSelId(id)
+                        else refs.onOpen(resolveRef({ kind: 'item', org: slug, id }, refs.world))
+                      }}
                       refWorld={refWorld} onOpenRef={openRef}
                       refresh={() => onChanged?.()} />
                   : <div className="dim pad mailer-none">select an item to view it</div>}
