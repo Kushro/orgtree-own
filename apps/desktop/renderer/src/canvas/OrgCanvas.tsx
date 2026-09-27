@@ -1032,6 +1032,12 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   const hireDeskRef = useRef<{ id: string; at: number } | null>(null)
   const targetRef = useRef(target); targetRef.current = target
   const mapRef = useRef(map); mapRef.current = map
+  const foregroundRef = useRef(tree.foreground); foregroundRef.current = tree.foreground
+  // A jump to an agent a SELECTED tree omitted: the id joins this canvas's
+  // tree selection and the jump finishes once the tree carries it, or says so
+  // when the backend reports it missing. Never a silent no-op.
+  const [pendingJump, setPendingJump] = useState<{ id: string; z: number | null; onCanvas: boolean } | null>(null)
+  useEffect(() => { setPendingJump(null) }, [slug])
   // The tree payload replaces ids on a full rename. Keep the prior projection
   // just long enough to distinguish that identity transition from a genuine
   // removal followed by a new hire. Explicit websocket rename mappings are
@@ -1785,6 +1791,13 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       showPin(slug, id, vpSizeNow())
       return
     }
+    const view = foregroundRef.current
+    if (view && !mapRef.current.has(id) && id !== USER && id !== DRAFT && id !== INBOX
+        && id !== EXTERN && !id.startsWith('dog:')) {
+      if (view.missing.includes(id)) toast([`${id} is not in this organization`])
+      else setPendingJump({ id, z, onCanvas })
+      return
+    }
     // a HIDDEN retiree (hide-retired setting) is revealed by ANY jump to it —
     // desk-nav chips, tray rows, mail sender links, the retired-list token —
     // then the glide lands once the re-layout gives it a position. Archived
@@ -1851,6 +1864,24 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
    *  window it was invoked from, which is where the reader already was). */
   const showOnCanvas = useCallback((id: string) => { centerOn(id, null, true) },
     [centerOn])
+  useEffect(() => {
+    if (!pendingJump) return
+    if (map.has(pendingJump.id)) {
+      const { id, z, onCanvas } = pendingJump
+      setPendingJump(null)
+      requestAnimationFrame(() => centerRef.current?.(id, z, onCanvas))
+    } else if (tree.foreground?.present.includes(pendingJump.id)) {
+      // carried only as a prior generation on the lineage axis
+      toast([`${pendingJump.id} has no card on the canvas`])
+      setPendingJump(null)
+    } else if (tree.foreground?.missing.includes(pendingJump.id)) {
+      toast([`${pendingJump.id} is not in this organization`])
+      setPendingJump(null)
+    } else if (!tree.foreground) {
+      // a complete tree without it is authoritative
+      setPendingJump(null)
+    }
+  }, [pendingJump, map, tree.foreground, toast])
 
   // Re-aim an ALREADY FOCUSED target after the canvas changed under it.
   // NOT `centerOn`: a refit is not a focus gesture, so it reveals no hidden
@@ -2635,7 +2666,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     include: [...new Set([...(restoredModalOrg.current === slug ? [] : savedSelection.include),
       ...restoreDesks.map(([, id]) => id), ...pins.map(pin => pin.id), ...shownRetired,
       configId, lineageId, inboxId, agentDocketId, teamDocketId, tempDeskId, sheetId,
-      focusId, draft?.parent, draft?.beside?.anchor, draft?.above?.anchor,
+      focusId, draft?.parent, draft?.beside?.anchor, draft?.above?.anchor, pendingJump?.id,
     ].filter((id): id is string => !!id && id !== USER && id !== DRAFT))].sort(),
     hideRetired, fronts: retiredFronts(pileFront), browse,
   })

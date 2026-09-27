@@ -117,6 +117,42 @@ uiTest('mounted pile and hidden-retired picker offer no pick or delete all while
   } finally { setHideRetiredOn(false) }
 })
 
+uiTest('a jump to an omitted agent asks the selected tree for it and finishes when it arrives', async ({ mount }) => {
+  const { el, setTree, focus, toasts } = await mountCanvas(mount, ['ceo', 'cto'])
+  const selected = (ids: string[], missing: string[] = []) => {
+    const t = tree(ids, { old: 'archived' })
+    t.foreground = { catalog_revision: 'c1', present: ids, missing, hidden_retired_roots: 0, retired_total: 1 }
+    return t
+  }
+  const fallback = { include: [], hideRetired: false, fronts: {} }
+  await inAct(() => setTree(selected(['ceo', 'cto'])))
+  await flush()
+  const quiet = toasts.length
+  await inAct(() => focus('old'))
+  await flush()
+  assert.ok(treeSelections.read('mine', fallback).selection.include.includes('old'),
+    'the pending jump joins the canvas selection')
+  assert.equal(toasts.length, quiet, 'omission is not reported as absence')
+  await inAct(() => setTree(selected(['ceo', 'cto', 'old'])))
+  await flush()
+  await settle(1200)
+  await flush()
+  const at = centreOf(el, posAny(el, 'old'))
+  const other = centreOf(el, posAny(el, 'ceo'))
+  const vp = el.querySelector('.viewport')!.getBoundingClientRect()
+  const mid = { x: vp.width / 2, y: vp.height / 2 }
+  assert.ok(Math.hypot(at.x - mid.x, at.y - mid.y) < Math.hypot(other.x - mid.x, other.y - mid.y),
+    'the camera finished the jump onto the arrived agent')
+  await inAct(() => focus('ghost'))
+  await flush()
+  await inAct(() => setTree(selected(['ceo', 'cto', 'old'], ['ghost'])))
+  await flush()
+  assert.ok(toasts.some(lines => lines.join(' ').includes('ghost is not in this organization')),
+    'explicit absence is reported, never a silent no-op')
+  assert.ok(!treeSelections.read('mine', fallback).selection.include.includes('ghost'),
+    'the settled jump releases its selection')
+})
+
 uiTest('foreground omission preserves pinned identity and drafts until explicit absence', async ({ mount }) => {
   const { setTree, toasts } = await mountCanvas(mount, ['ceo', 'cto'])
   await inAct(() => addPin('mine', 'cto', { x: 10, y: 10, w: 400, h: 400 }))
@@ -294,13 +330,16 @@ async function drag(target: Element, from: Pos, to: Pos) {
 let canvasMod: typeof import('../src/canvas/OrgCanvas') | null = null
 
 function makeHost(toast: (lines: string[] | null | undefined) => void) {
-  const box: { set?: (t: TreePayload) => void } = {}
+  const box: { set?: (t: TreePayload) => void; focus?: (id: string | null) => void } = {}
   const Host = ({ initial }: { initial: TreePayload }) => {
     const [t, setT] = useState(initial)
+    const [focus, setFocus] = useState<string | null>(null)
     box.set = setT
+    box.focus = setFocus
     const { OrgCanvas } = canvasMod!
     return <OrgCanvas tree={t} op={() => Promise.resolve({} as never)}
-      slug="mine" toast={toast} mailEvt={null} />
+      slug="mine" toast={toast} mailEvt={null}
+      focusAgent={focus} onFocusAgentHandled={() => setFocus(null)} />
   }
   return { Host, box }
 }
@@ -340,7 +379,8 @@ async function mountCanvas(mount: Mount, ids: string[],
   await flush()
   const viewport = el.querySelector('.viewport') as HTMLElement | null
   assert.ok(viewport, 'the canvas viewport rendered')
-  return { el, viewport: viewport!, setTree: (t: TreePayload) => box.set!(t), unmount, toasts }
+  return { el, viewport: viewport!, setTree: (t: TreePayload) => box.set!(t),
+    focus: (id: string) => box.focus!(id), unmount, toasts }
 }
 
 /** put `id` under a desk-zoom camera, through the public gesture surface:
