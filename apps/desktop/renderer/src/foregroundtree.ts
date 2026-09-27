@@ -148,6 +148,9 @@ export class ForegroundTreeReader {
   private pending = new Map<string, Promise<ForegroundRead>>()
   private owners = new Map<string, Promise<ForegroundRead>>()
   private generation = 0
+  /** Orgs whose backend answered `compatibility`: it serves no selected
+   * tree, so callers may keep using the conditional full-tree read. */
+  readonly unavailable = new Set<string>()
   constructor(private read: Read, private legacy: (org: string) => Promise<TreePayload>) {}
 
   invalidate(): void { ++this.generation; this.cache.clear(); this.pending.clear(); this.owners.clear() }
@@ -193,7 +196,10 @@ export class ForegroundTreeReader {
           else if (generation === this.generation && this.owners.get(org) === task) this.cache.delete(org)
           return value
         } catch (error) {
-          if (error instanceof ForegroundControl && error.kind === 'compatibility') break
+          if (error instanceof ForegroundControl && error.kind === 'compatibility') {
+            this.unavailable.add(org)
+            break
+          }
           if (error instanceof DeltaBaseError || error instanceof ForegroundControl && error.kind === 'reset') {
             hit = undefined
             continue

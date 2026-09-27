@@ -323,9 +323,13 @@ const foregroundTreeReader = new ForegroundTreeReader(async (path, etag) => {
 const foregroundTreeViews = new TreeViewReader(foregroundTreeReader, getCompleteTree)
 /** Identity facts for agents omitted from a selected tree, per catalog. */
 export const agentReferences = new AgentReferences((org, ids) => foregroundTreeReader.references(org, ids))
-/** Not activated in App until all consumers preserve partial-tree semantics. */
 export const getSelectedTree = async (slug: string, selection: TreeSelection): Promise<TreePayload> =>
   (await foregroundTreeViews.get(slug, selection)).tree
+/** App's tree read. A backend without the selected-tree endpoint keeps the
+ * conditional (ETag) full read on every later heartbeat instead of an
+ * uncached whole-history fetch. */
+export const getAppTree = async (slug: string, selection: TreeSelection): Promise<TreePayload | null> =>
+  foregroundTreeReader.unavailable.has(slug) ? getTree(slug) : getSelectedTree(slug, selection)
 
 /** An unchanged content token can advance its replay boundary without a body.
  * Never alter a shared cached tree: in-flight readers may still be using it. */

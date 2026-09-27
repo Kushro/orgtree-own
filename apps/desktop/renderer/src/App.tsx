@@ -21,12 +21,14 @@ import {
   getAccountRegistry, getRegisteredAccountUsage,
   getAntigravityUsage, getAntigravityUsagePeek,
   getCodexUsage, getCodexUsagePeek, getOpenRouterUsage, getOpenRouterUsagePeek,
-  getProviders, getTree, invalidateTreeCache,
+  getProviders, getAppTree, invalidateTreeCache,
   getUsage, getUsagePeek, killAll,
   markRead, openWs,
   probeHub, putOrgMd,
   resumeFrozen, runOp, saveDefaults, saveHireDefaults, saveSettings,
 } from './api'
+import { treeSelections } from './treeselection'
+import { savedTreeSelection } from './canvas/treeselection'
 import { AdvancedOrgModal } from './shell/advancedorg'
 import { OrgRows } from './shell/orgrows'
 export { AdvancedOrgModal, OrgRows }
@@ -727,7 +729,14 @@ export default function App() {
     if (treeBusy.current) { treePending.current = s; return }
     const run = (want: string) => {
       treeBusy.current = true
-      getTree(want).then((t) => {
+      // THE SELECTED TREE: what mounted surfaces registered, or — before any
+      // registers — what the saved windows, pins and piles will need. An
+      // answer for a selection that changed in flight is still one coherent
+      // snapshot, so it is applied; one trailing read then catches up.
+      // Rejecting it instead would starve the tree while the camera moves.
+      const { version, selection } = treeSelections.read(want, savedTreeSelection(want))
+      getAppTree(want, selection).then((t) => {
+        if (treeSelections.version(want) !== version && !treePending.current) treePending.current = want
         // ⚠ an ORG SWITCH mid-flight: this payload is the PREVIOUS org's
         // tree and painting it would show the old org under the new org's
         // header until the next poll. Not new caution — before coalescing,
@@ -776,6 +785,18 @@ export default function App() {
     }
     run(s)
   }, [fetchOk, fetchErr])
+  // A mounted surface changing what it needs (a picker, a pin, a pending
+  // jump) asks for the tree again. Debounced: camera focus moves publish
+  // often, and the coalescing above already allows only one read in flight.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const off = treeSelections.subscribe((org) => {
+      if (org !== wantSlug.current) return
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => { timer = null; refreshTree(org) }, 150)
+    })
+    return () => { off(); if (timer) clearTimeout(timer) }
+  }, [refreshTree])
 
   // the mount fetch lives in useOrgStatus now — it refreshes on mount and on
   // every change of visibility, so a second one here would only double the
