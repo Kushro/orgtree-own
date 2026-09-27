@@ -70,7 +70,7 @@ class SummaryVolume(unittest.TestCase):
                     outputs[archived, mode, entry] = result
                     results.append(dict(archived=archived, live=30, mode=mode, entry=entry, **count))
             def explain(conn, sql, params=None, **kw):
-                if str(sql).startswith(('SELECT n.id,n.ord,n.val', 'SELECT n.val::jsonb')):
+                if str(sql).startswith(('SELECT n.id,n.ord,n.val', 'SELECT n.val::jsonb', 'SELECT 1 FROM nodes WHERE')):
                     plans.append(execute(conn, 'EXPLAIN (ANALYZE, FORMAT JSON) ' + sql, params).fetchone()[0])
                 return execute(conn, sql, params, **kw)
             with patch.object(psycopg.Connection, 'execute', explain):

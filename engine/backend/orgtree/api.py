@@ -2023,10 +2023,8 @@ def orgs_list(request: Request) -> list[dict[str, Any]]:
     # admin: attach the kiosk dashboard summary (incl. the secret token —
     # this listener is loopback-only).
     #
-    # ONE parse per org, not two. This used to call `store.list_orgs()` (which
-    # reads and parses every org document) and then `store.load_org()` per org
-    # (which parses every one of them again) — 168 ms per request against this
-    # machine's 18.53 MB data root, on a route the desk polls every 3 s.
+    # Current-format orgs use coherent totals and active funding rows; legacy
+    # settings or exceptional cost shapes use the complete per-org reader.
     out: list[dict[str, Any]] = []
     for o, org in org_summary.admin_rows():
         row = {**o, "cost_usd_total": org.cost_total(),

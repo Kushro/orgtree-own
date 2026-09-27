@@ -73,6 +73,8 @@ def _read(slug, public):
                     'nodes': stamp['node_count'], 'live': sum(state == 'live' for state, in states),
                     'kiosk': True, 'net_slug': fields.get('net_identity'),
                     'created': fields.get('created')}
+        if raw.execute('SELECT 1 FROM nodes WHERE public.orgtree_summary_cost_exception(val) LIMIT 1').fetchone():
+            raise CompatibilityRequired('legacy cost conversion is required')
         settings = {key: json.loads(value) for key, value in raw.execute(
             'SELECT key,val FROM doc WHERE key=ANY(%s)', (list(_ADMIN_KEYS),)).fetchall()}
         if settings.get('slug') != slug:

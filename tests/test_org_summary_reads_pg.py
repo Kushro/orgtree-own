@@ -110,5 +110,58 @@ class SummaryReads(unittest.TestCase):
             self.setting('_migrations', json.loads(migrations))
             self.setting('deleted_cost_usd', 1.25)
 
+    def test_archived_cost_shapes_use_exact_legacy_conversion_or_error(self):
+        self.seed()
+        node = store.load_org(self.slug).node('archived')
+        try:
+            for value in ('2.125', True, 'invalid', [1], {'bad': 1}):
+                with self.subTest(value=value):
+                    node['cost_usd'] = value
+                    self.query('UPDATE nodes SET val=? WHERE id=?', (json.dumps(node), 'archived'))
+                    self.assertEqual(self.query('SELECT count(*) FROM nodes WHERE public.orgtree_summary_cost_exception(val)')[0][0], 1)
+                    legacy = store.load_org(self.slug)
+                    try:
+                        expected = legacy.cost_total()
+                    except (ValueError, TypeError) as error:
+                        with self.assertRaises(type(error)): self.row()
+                    else:
+                        self.assertEqual(self.row()['cost_usd_total'], expected)
+                    # Public output has no cost and needs no whole-node fallback.
+                    with patch.object(store, '_load_lazy', side_effect=AssertionError('public full load')):
+                        self.assertEqual(self.row(public=True)['nodes'], 3)
+        finally:
+            node['cost_usd'] = 0.00005
+            self.query('UPDATE nodes SET val=? WHERE id=?', (json.dumps(node), 'archived'))
+
+    def test_zero_shapes_need_no_fallback_and_exception_index_tracks_writes(self):
+        self.seed()
+        node = store.load_org(self.slug).node('archived')
+        for value in (None, False, '', [], {}, 0, 3.5):
+            with self.subTest(value=value):
+                node['cost_usd'] = value
+                self.query('UPDATE nodes SET val=? WHERE id=?', (json.dumps(node), 'archived'))
+                self.assertEqual(self.query('SELECT count(*) FROM nodes WHERE public.orgtree_summary_cost_exception(val)')[0][0], 0)
+                with patch.object(store, '_load_lazy', side_effect=AssertionError('unneeded fallback')):
+                    self.assertEqual(self.row()['cost_usd_total'], round(0.3 + float(value or 0) + 1.25, 4))
+        node['cost_usd'] = '4'
+        self.query('INSERT INTO nodes(id,ord,val) VALUES(?,?,?)', ('exception', 100, json.dumps(node)))
+        self.assertEqual(self.query('SELECT count(*) FROM nodes WHERE public.orgtree_summary_cost_exception(val)')[0][0], 1)
+        self.query("DELETE FROM nodes WHERE id='exception'")
+        self.assertEqual(self.query('SELECT count(*) FROM nodes WHERE public.orgtree_summary_cost_exception(val)')[0][0], 0)
+
+    def test_index_install_covers_existing_rows_and_new_schema_bootstrap(self):
+        self.seed()
+        # The fixture schema is created after migration, exercising bootstrap.
+        self.assertEqual(len(self.query("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='nodes_summary_cost_exceptions'")), 1)
+        node = store.load_org(self.slug).node('archived')
+        node['cost_usd'] = '7'
+        self.query('UPDATE nodes SET val=? WHERE id=?', (json.dumps(node), 'archived'))
+        with store._POOL.acquire(self.slug) as conn:
+            oid = conn.org_id
+        with pgstore.connect(os.environ['ORGTREE_TEST_PG_ADMIN_URL']) as admin:
+            admin.execute(f'DROP INDEX org_{oid}.nodes_summary_cost_exceptions')
+            admin.execute('SELECT public.orgtree_install_summary_cost_index(%s)', (oid,))
+        self.assertEqual(self.query('SELECT count(*) FROM nodes WHERE public.orgtree_summary_cost_exception(val)')[0][0], 1)
+
 
 if __name__ == '__main__': unittest.main()
