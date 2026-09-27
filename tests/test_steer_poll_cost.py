@@ -5,9 +5,9 @@ EVERY tool call; at N=100 that is 68% of all requests (scale item, evidence
 12). `claim_steer` already had an idle fast path, but the door in front of it
 still did a full private `orgtx.org_read` to check the credential's seat, and
 a seat's first (unproven) poll opened the halt gate's transaction only to
-choose nothing. Now the actor is checked against the shared snapshot
-(`store.cached_org`, as `_agent_identity` does for /api/agent) and the empty
-claim transaction is skipped.
+choose nothing. Now the actor is checked against a small committed node
+projection, independent of cache invalidation, and the empty claim
+transaction is skipped.
 
 Speed must not cost a meaning, so besides the cost these tests pin, each
 through the door: mail is still delivered; a halted seat and a killswitched

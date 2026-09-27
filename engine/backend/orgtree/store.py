@@ -4803,6 +4803,30 @@ def node_row_exists(slug: str, nid: str) -> bool | None:
     return _bounded_read(slug, body)
 
 
+def read_node_credential(slug: str, nid: str) -> dict[str, Any] | None:
+    """Committed credential fields for one node, independent of cache/feed lag.
+
+    The indexed row projection avoids transferring or decoding its charter,
+    history and scope. {} means the node is absent (refuse); None means the
+    caller must use a committed Org read for JSON/legacy normalization.
+    """
+    def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+        if conn.execute("SELECT 1 FROM doc WHERE key='nodes'").fetchone():
+            return None
+        row = conn.execute(
+            "SELECT json_extract(val,'$.state','$.generation','$.seat_id') "
+            "FROM nodes WHERE id=?", (nid,)).fetchone()
+        if row is None:
+            return {}
+        state, generation, seat = json.loads(cast(str, row[0]))
+        if generation is None or not seat:
+            # Org supplies legacy generation/seat defaults. Never consult a
+            # cached Org here: an external revoke may precede its feed event.
+            return None
+        return {"state": state, "generation": generation, "seat_id": seat}
+    return cast("dict[str, Any] | None", _bounded_read(slug, body))
+
+
 def read_node(slug: str, nid: str) -> dict[str, Any] | None:
     """One node as STORED — a single primary-key row, parsed alone
     (rearchitecture Phase A: reading one node must not materialize the node
