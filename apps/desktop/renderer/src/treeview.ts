@@ -15,11 +15,15 @@ export type TreeSelection = {
   browse?: TreeBrowse | null
 }
 type Reader = Pick<ForegroundTreeReader, 'get' | 'page'>
-type Plan = { key: string; catalog: string; include: string[] }
+type Plan = { key: string; rest: string; catalog: string; include: string[]; covered: ReadonlySet<string> }
 const identity = (s: TreeSelection) => JSON.stringify([
   [...new Set(s.include)].sort(), s.hideRetired,
   Object.entries(s.fronts).sort(([a], [b]) => a.localeCompare(b)), s.browse ?? null,
 ])
+/** Everything but the protected IDs: a plan whose rows already carry every
+ * requested ID answers the same question without re-planning. */
+const rest = (s: TreeSelection) => JSON.stringify([s.hideRetired,
+  Object.entries(s.fronts).sort(([a], [b]) => a.localeCompare(b)), s.browse ?? null])
 const coherent = (catalog: string, got: { catalog_revision: string }) => {
   if (catalog !== got.catalog_revision) throw new ForegroundControl('reset')
 }
@@ -42,7 +46,12 @@ export class TreeViewReader {
     const owner = {}
     this.owners.set(org, owner)
     const previous = this.plans.get(org)
-    const plan = previous?.key === key ? previous : undefined
+    // A camera focus usually lands on a card already on screen. When every
+    // requested ID is already carried by the current plan, keep that plan
+    // (and its conditional-read base) instead of re-reading its edges.
+    const wanted = [...selected.include, ...(selected.hideRetired ? [] : Object.values(selected.fronts))]
+    const plan = previous && (previous.key === key
+      || (previous.rest === rest(selected) && wanted.every(id => previous.covered.has(id)))) ? previous : undefined
     if (!plan) this.plans.delete(org)
     const full = async (): Promise<ForegroundRead> => {
       if (this.owners.get(org) === owner) this.plans.delete(org)
@@ -118,7 +127,8 @@ export class TreeViewReader {
           }
           if (answer.snapshot && this.owners.get(org) === owner) {
             this.plans.delete(org)
-            this.plans.set(org, { key, catalog, include: [...requested] })
+            this.plans.set(org, { key, rest: rest(selected), catalog, include: [...requested],
+              covered: new Set([...requested, ...Object.keys(answer.snapshot.nodes)]) })
             while (this.plans.size > 8) this.plans.delete(this.plans.keys().next().value!)
           }
           return answer

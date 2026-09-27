@@ -117,3 +117,34 @@ test('a complete tree adds nothing and asks nothing; candidate scanning is bound
   assert.equal(proseCandidates({ text: many }, () => false).length, 256)
   assert.equal(proseCandidates({ text: many }, () => false, 256, 50).length <= 10, true)
 })
+
+test('a tree older than the server catalog asks once and settles pending (review f3 regression)', async (t) => {
+  const asked: string[][] = []
+  const had = (globalThis as { fetch?: typeof fetch }).fetch;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (url: string) => {
+    const query = new URL(String(url), 'http://x').searchParams.getAll('include')
+    asked.push(query)
+    const body = { format, kind: 'references', revision: 'r', catalog_revision: 'server-' + t.name, org_rev: 2, sync_rev: 1,
+      references: Object.fromEntries(query.map(id => [id,
+        { id, tier: 'astra', state: 'archived', generation: 1, axis: 'org', successor: null }])), missing: [] }
+    return { ok: true, status: 200, headers: new Headers(), json: async () => body }
+  }) as unknown as typeof fetch
+  let world: (() => ReturnType<typeof useRefRoutes>['world']) | null = null
+  const view = { catalog_revision: 'tree-' + t.name, present: ['live'], missing: [] }
+  function Probe() {
+    const routes = useRefRoutes('org', new Map([['live', {}]]), { onFocusAgent: () => {}, view })
+    world = () => routes.world
+    resolveRef(agent('old'), routes.world)   // judged on every render, as prose does
+    return null
+  }
+  const mounted = mountView(<Probe />, h => h)
+  const settled = await Promise.race([mounted.then(() => true),
+    new Promise<boolean>(resolve => setTimeout(() => resolve(false), 1000))])
+  // an unsettled mount keeps its stub: restoring it would release the loop
+  assert.equal(settled, true, 'the component settles while its tree lags the catalog')
+  const v = await mounted
+  t.after(async () => { await v.unmount(); (globalThis as { fetch?: typeof fetch }).fetch = had })
+  await inAct(async () => { await flush(6) })
+  assert.equal(asked.length, 1, 'one reference request, not a loop')
+  assert.equal(resolveRef(agent('old'), world!()).outcome, 'pending', 'an answer about another catalog is not a verdict')
+})

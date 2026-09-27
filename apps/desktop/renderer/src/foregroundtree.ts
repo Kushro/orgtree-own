@@ -33,7 +33,10 @@ export type ForegroundRead = { tree: TreePayload; snapshot: ForegroundSnapshot |
 type Read = (path: string, etag?: string) => Promise<Response>
 
 export class ForegroundControl extends Error {
-  constructor(public kind: 'reset' | 'compatibility') { super(`Foreground tree ${kind}`) }
+  /** `inferred`: no explicit 409 said so — a 404 or a body that is not a
+   * foreground answer. It may be transient (an org being created), so it is
+   * remembered only briefly. */
+  constructor(public kind: 'reset' | 'compatibility', public inferred = false) { super(`Foreground tree ${kind}`) }
 }
 class DeltaBaseError extends Error {}
 const strings = (value: unknown): value is string[] =>
@@ -136,13 +139,18 @@ async function answer(response: Response): Promise<unknown> {
   // A server without the selected-tree routes (an older or non-PostgreSQL
   // engine, or a catch-all answering any path) is a compatibility answer:
   // the full tree remains correct there, a hard failure would not be.
-  if (response.status === 404) throw new ForegroundControl('compatibility')
-  const body = await response.json()
-  if (response.status === 409 && (body.kind === 'reset' || body.kind === 'compatibility')) {
-    throw new ForegroundControl(body.kind)
+  if (response.status === 404) throw new ForegroundControl('compatibility', true)
+  let body: Record<string, unknown>
+  try { body = await response.json() } catch {
+    // a catch-all answering HTML is a server without these routes
+    if (response.ok) throw new ForegroundControl('compatibility', true)
+    throw new Error(`Foreground request failed (${response.status})`)
   }
-  if (!response.ok) throw new Error(body.detail || `Foreground request failed (${response.status})`)
-  if (!record(body) || !('format' in body)) throw new ForegroundControl('compatibility')
+  if (response.status === 409 && (body?.kind === 'reset' || body?.kind === 'compatibility')) {
+    throw new ForegroundControl(body.kind as 'reset' | 'compatibility')
+  }
+  if (!response.ok) throw new Error(String(body?.detail || `Foreground request failed (${response.status})`))
+  if (!record(body) || !('format' in body)) throw new ForegroundControl('compatibility', true)
   return body
 }
 
@@ -153,9 +161,18 @@ export class ForegroundTreeReader {
   private pending = new Map<string, Promise<ForegroundRead>>()
   private owners = new Map<string, Promise<ForegroundRead>>()
   private generation = 0
-  /** Orgs whose backend answered `compatibility`: it serves no selected
-   * tree, so callers may keep using the conditional full-tree read. */
-  readonly unavailable = new Set<string>()
+  /** Orgs whose backend answered `compatibility`, until when: it serves no
+   * selected tree, so callers may keep the conditional full-tree read. An
+   * explicit 409 holds ten minutes, an inferred one thirty seconds; after
+   * that the selected route is probed again. */
+  private unavailableUntil = new Map<string, number>()
+  isUnavailable(org: string, now = Date.now()): boolean {
+    const until = this.unavailableUntil.get(org)
+    if (until === undefined) return false
+    if (now < until) return true
+    this.unavailableUntil.delete(org)
+    return false
+  }
   constructor(private read: Read, private legacy: (org: string) => Promise<TreePayload>) {}
 
   invalidate(): void { ++this.generation; this.cache.clear(); this.pending.clear(); this.owners.clear() }
@@ -202,7 +219,7 @@ export class ForegroundTreeReader {
           return value
         } catch (error) {
           if (error instanceof ForegroundControl && error.kind === 'compatibility') {
-            this.unavailable.add(org)
+            this.unavailableUntil.set(org, Date.now() + (error.inferred ? 30_000 : 600_000))
             break
           }
           if (error instanceof DeltaBaseError || error instanceof ForegroundControl && error.kind === 'reset') {

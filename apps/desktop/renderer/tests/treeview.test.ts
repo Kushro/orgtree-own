@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { TreeViewReader } from '../src/treeview'
-import { ForegroundControl, projectForeground } from '../src/foregroundtree'
+import { FOREGROUND_TREE_FORMAT, ForegroundControl, projectForeground } from '../src/foregroundtree'
 import type { FlatTreeNode, ForegroundSnapshot, ForegroundPage } from '../src/foregroundtree'
 import type { TreeSelection } from '../src/treeview'
 import type { TreePayload } from '../src/types'
@@ -114,4 +114,42 @@ test('changed catalog invalidates old implicit fronts before recomputing visible
   assert.ok(f.calls[0]!.startsWith('get:retired-0,retired-19'))
   assert.equal(f.calls[1], 'get:', 'old fronts are not a source of retained historical branches')
   assert.equal(f.calls.filter(c => c.startsWith('page:')).length, 2)
+})
+
+test('a focus on an id the current plan already carries keeps the plan: one read, no edge re-plan (review f5)', async () => {
+  const count = 20
+  const ids = Array.from({ length: count }, (_, i) => `retired-${i}`)
+  const calls: string[] = []
+  const flat = (id: string) => ({ id, state: id === 'live' ? 'live' : 'archived', parent: null, axis: 'org',
+    children: [], hidden_retired_children: 0, lineage_loaded: false, lineage_count: 0 })
+  const reader = {
+    async get(_org: string, include: readonly string[] = []) {
+      calls.push(`get:${[...include].sort().join(',')}`)
+      const chosen = ids.filter(id => include.includes(id))
+      const roots = [...chosen.filter(id => id === ids[0]), 'live', ...chosen.filter(id => id !== ids[0])]
+      const snapshot = { format: FOREGROUND_TREE_FORMAT, kind: 'snapshot', revision: 'c1', catalog_revision: 'c1',
+        org_rev: 1, sync_rev: 1, nodes: Object.fromEntries(roots.map(id => [id, flat(id)])), roots,
+        missing_requested: include.filter(id => id !== 'live' && !ids.includes(id)),
+        header: { slug: 'org', hidden_retired_roots: count - chosen.length, retired_total: count } } as unknown as ForegroundSnapshot
+      return { snapshot, tree: projectForeground(snapshot) }
+    },
+    async page(_org: string, kind: 'children' | 'search', query: string, _c = '', _s?: string, limit = 100, edge?: 'last') {
+      calls.push(`page:${kind}:${query}:${edge ?? 'first'}`)
+      const matches = edge ? ids.slice(-1) : ids.slice(0, limit)
+      return { format: FOREGROUND_TREE_FORMAT, kind: 'page', revision: 'c1', catalog_revision: 'c1', org_rev: 1,
+        sync_rev: 1, nodes: Object.fromEntries(matches.map(id => [id, flat(id)])), matches, next_cursor: null } as unknown as ForegroundPage
+    },
+  }
+  const view = new TreeViewReader(reader, async () => { throw new Error('no legacy') })
+  const sel = (include: string[]): TreeSelection => ({ include, hideRetired: false, fronts: {} })
+  await view.get('org', sel([]))
+  for (const focus of [['live'], ['retired-19'], ['live', 'retired-0']]) {
+    calls.length = 0
+    const got = await view.get('org', sel(focus))
+    assert.equal(calls.length, 1, `focus ${focus} re-planned: ${calls.join(' ')}`)
+    assert.ok(focus.every(id => got.snapshot!.nodes[id]), 'and the focused cards are in the answer')
+  }
+  calls.length = 0
+  await view.get('org', sel(['retired-7']))   // a genuinely omitted retiree still re-plans
+  assert.ok(calls.some(c => c.includes('retired-7')) && calls.length > 1, 'an uncovered id is still requested')
 })

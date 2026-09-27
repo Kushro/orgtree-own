@@ -149,16 +149,22 @@ test('lookup and page use exact landed routes and keep explicit absence/reset di
   assert.equal(paths[2], '/api/orgs/org/foreground-tree/search?q=a&limit=100&cursor=cursor&state=archived')
 })
 
-test('a server without the selected-tree route is a compatibility answer, never a failed tree', async () => {
-  for (const reply of [response({ detail: 'Not Found' }, 404), response({})]) {
+test('a server without the selected-tree route is a compatibility answer, never a failed tree (re-probed later, review f6)', async () => {
+  const html = { status: 200, ok: true, headers: new Headers(), json: async () => { throw new SyntaxError('Unexpected token <') } } as unknown as Response
+  for (const reply of [response({ detail: 'Not Found' }, 404), response({}), html]) {
     const full = { slug: 'org', roots: [{ id: 'whole' }] } as unknown as TreePayload
     const reader = new ForegroundTreeReader(async () => reply, async () => full)
     const got = await reader.get('org')
     assert.equal(got.snapshot, null)
     assert.equal(got.tree, full)
-    assert.ok(reader.unavailable.has('org'), 'later reads may keep the conditional full read')
+    assert.ok(reader.isUnavailable('org'), 'later reads may keep the conditional full read')
+    assert.equal(reader.isUnavailable('org', Date.now() + 31_000), false, 'an inferred answer is re-probed after 30 s')
   }
+  const explicit = new ForegroundTreeReader(async () => response({ kind: 'compatibility' }, 409), legacy)
+  await explicit.get('org')
+  assert.ok(explicit.isUnavailable('org', Date.now() + 31_000), 'an explicit 409 holds longer')
+  assert.equal(explicit.isUnavailable('org', Date.now() + 601_000), false, 'but not for the whole session')
   const reader = new ForegroundTreeReader(async () => response({ detail: 'inconsistent' }, 503), legacy)
   await assert.rejects(reader.get('org'), /inconsistent/)
-  assert.equal(reader.unavailable.has('org'), false, 'a server error is not compatibility')
+  assert.equal(reader.isUnavailable('org'), false, 'a server error is not compatibility')
 })

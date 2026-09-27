@@ -381,6 +381,33 @@ panelTest('§9c a selected tree that omits a retired owner asks for it and never
     'explicit absence is final: the ordinary empty state returns')
 })
 
+panelTest('§9d over 128 omitted owners stay requested through the legacy fallback, never flip-flop (review f4)', async (t) => {
+  const ghosts = Array.from({ length: 130 }, (_, i) => `ghost-${String(i).padStart(3, '0')}`)
+  const payload = { items: ghosts.map(g => owned('task-' + g, g)) }
+  const had = (globalThis as { fetch?: typeof fetch }).fetch;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = compatibilityWorkFixture(((url: string) => {
+    const body = String(url).includes('/work-items') ? payload : {}
+    return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve(body) })
+  }) as typeof fetch)
+  t.after(() => { (globalThis as { fetch?: typeof fetch }).fetch = had })
+  const roots = [mkNode('lead')]
+  const selected = { ...tree(roots), foreground: { catalog_revision: 'c1', present: ['lead'], missing: [] } }
+  const panel = (tr: TreePayload) => <TeamDocketModal slug="mine" nid="lead" tree={tr} toast={noop}
+    close={noop} refs={{ world: { org: 'mine' }, onOpen: noop }} />
+  const fallback = { include: [], hideRetired: false, fronts: {} }
+  const v = await mountView(panel(selected), (h) => h)
+  t.after(() => v.unmount())
+  await flush(4)
+  const asked = treeSelections.read('mine', fallback)
+  assert.equal(asked.selection.include.length, 130, 'over 128: the next read is the complete legacy tree')
+  await v.render(panel(tree(roots)))   // the legacy fallback answer: no foreground
+  await flush(4)
+  const held = treeSelections.read('mine', fallback)
+  assert.equal(held.selection.include.length, 130, 'the fallback does not release the request')
+  assert.equal(held.version, asked.version, 'so no new selected read is scheduled: no flip-flop')
+  assert.doesNotMatch(v.el.textContent ?? '', /Checking team membership/, 'the complete tree settles membership')
+})
+
 panelTest('§9b a team of one with work still shows it', async (t) => {
   const p = await mountPanel(t, ORG, 'deeper', { items: [owned('deeper-task', 'deeper')] })
   assert.deepEqual(rowNames(p.el), ['deeper-task'])

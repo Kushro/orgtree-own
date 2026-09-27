@@ -329,7 +329,7 @@ export const getSelectedTree = async (slug: string, selection: TreeSelection): P
  * conditional (ETag) full read on every later heartbeat instead of an
  * uncached whole-history fetch. */
 export const getAppTree = async (slug: string, selection: TreeSelection): Promise<TreePayload | null> =>
-  foregroundTreeReader.unavailable.has(slug) ? getTree(slug) : getSelectedTree(slug, selection)
+  foregroundTreeReader.isUnavailable(slug) ? getTree(slug) : getSelectedTree(slug, selection)
 
 /** An unchanged content token can advance its replay boundary without a body.
  * Never alter a shared cached tree: in-flight readers may still be using it. */

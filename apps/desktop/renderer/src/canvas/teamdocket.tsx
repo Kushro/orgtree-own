@@ -22,7 +22,7 @@
 // can only ever show a subset of what the full docket would have shown them.
 // See `teamNodeIds` in docket.tsx for why an unknown root is a team of one.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { treeSelections } from '../treeselection'
 import { useWorkItems } from './useworkitems'
 import type { ToastFn, TreePayload } from '../types'
@@ -65,13 +65,22 @@ export function TeamDocketModal({ slug, nid, tree, toast, close, refs }: {
       ...(showArchived ? (work.archived ?? []) : [])].map(it => it.owner?.node)
     return [...new Set(owners)].filter((id): id is string => !!id && !known.has(id)).sort()
   }, [tree.foreground, work, showArchived])
-  const unplacedKey = JSON.stringify(unplaced)
+  // ⚠ HELD THROUGH A LEGACY FALLBACK. Past 128 requested IDs the selected
+  // tree is answered by the complete legacy tree, which has no `foreground`
+  // and so nothing unplaced. Releasing on that answer would make the next
+  // read selected again and re-register: an endless flip between the two.
+  // Only a selected tree (or closing the panel) may shrink the request.
+  const held = useRef<{ slug: string; ids: string[] }>({ slug, ids: [] })
+  if (held.current.slug !== slug) held.current = { slug, ids: [] }
+  if (tree.foreground && work) held.current = { slug, ids: unplaced }
+  const registered = held.current.ids
+  const registeredKey = JSON.stringify(registered)
   useEffect(() => {
-    if (!unplaced.length) return
+    if (!registered.length) return
     const owner = {}
-    treeSelections.set(slug, owner, { include: unplaced })
+    treeSelections.set(slug, owner, { include: registered })
     return () => treeSelections.release(slug, owner)
-  }, [slug, unplacedKey])   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [slug, registeredKey])   // eslint-disable-line react-hooks/exhaustive-deps
   const routes: RefRoutes = { world: refs.world, onOpen: r => {
     closeIfCentred('team-docket', close, slug)
     refs.onOpen(r)

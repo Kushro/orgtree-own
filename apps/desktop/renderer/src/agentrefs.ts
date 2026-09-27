@@ -5,12 +5,16 @@ import { MAX_REFERENCES } from './foregroundtree'
 import type { AgentReference, ForegroundReferences } from './foregroundtree'
 
 export type ReferenceState = { catalog: string; ref: AgentReference | null } | { catalog: string; error: true }
+  /** Asked for this catalog, answered for another (the tree lags or leads the
+   * server). Not an answer about this tree, and not to be asked again for it. */
+  | { catalog: string; stale: true }
+type Stored = ReferenceState & { asked: string }
 type Fetch = (org: string, ids: readonly string[]) => Promise<ForegroundReferences>
 
 /** Bounded: at most `perOrg` identities for each of eight orgs. Nothing here
  * is a whole-history index; only IDs a mounted surface asked about. */
 export class AgentReferences {
-  private orgs = new Map<string, Map<string, ReferenceState>>()
+  private orgs = new Map<string, Map<string, Stored>>()
   private inflight = new Set<string>()
   private listeners = new Set<() => void>()
   constructor(private fetch: Fetch, private perOrg = 512) {}
@@ -22,7 +26,9 @@ export class AgentReferences {
 
   get(org: string, catalog: string, id: string): ReferenceState | undefined {
     const known = this.orgs.get(org)?.get(id)
-    return known?.catalog === catalog ? known : undefined
+    if (!known) return undefined
+    if (known.catalog === catalog) return known
+    return known.asked === catalog ? { catalog, stale: true } : undefined
   }
 
   /** Starts reads for IDs not yet answered for this catalog. Failures are
@@ -37,10 +43,10 @@ export class AgentReferences {
       this.fetch(org, batch).then(answer => {
         const got = answer.catalog_revision
         for (const id of batch) {
-          this.store(org, id, { catalog: got, ref: answer.references[id] ?? null })
+          this.store(org, id, { catalog: got, ref: answer.references[id] ?? null, asked: catalog })
         }
       }, () => {
-        for (const id of batch) this.store(org, id, { catalog, error: true })
+        for (const id of batch) this.store(org, id, { catalog, error: true, asked: catalog })
       }).finally(() => {
         keys.forEach(key => this.inflight.delete(key))
         this.listeners.forEach(fn => fn())
@@ -48,7 +54,7 @@ export class AgentReferences {
     }
   }
 
-  private store(org: string, id: string, state: ReferenceState): void {
+  private store(org: string, id: string, state: Stored): void {
     let entries = this.orgs.get(org)
     if (!entries) entries = new Map()
     this.orgs.delete(org); this.orgs.set(org, entries)

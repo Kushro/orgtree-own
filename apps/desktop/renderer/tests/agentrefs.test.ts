@@ -94,3 +94,20 @@ test('an unresolved omitted agent is never reported gone', () => {
     { owner: actor('o'), reviewer: null, last_updater: actor('u'), created_by: actor('c') }] as unknown as WorkItem[]
   assert.deepEqual(itemActorIds(items), ['c', 'o', 'r', 'u'])
 })
+
+test('an answer for a newer catalog is remembered as asked: no re-request while the tree lags (review f3)', async () => {
+  let reads = 0
+  const refs = new AgentReferences(async (_org, ids) => { reads++; return answer('server-new', [...ids], []) })
+  refs.request('org', 'tree-old', ['a'])
+  await settle()
+  const lagging = refs.get('org', 'tree-old', 'a')
+  assert.ok(lagging && 'stale' in lagging, 'the lagging tree sees a stale marker, not nothing')
+  for (let n = 0; n < 50; ++n) refs.request('org', 'tree-old', ['a'])
+  await settle()
+  assert.equal(reads, 1, 'the same id is not re-asked for the same lagging catalog')
+  const caught = refs.get('org', 'server-new', 'a')
+  assert.ok(caught && 'ref' in caught && caught.ref, 'once the tree reaches that catalog the answer serves it')
+  refs.request('org', 'tree-newer-still', ['a'])
+  await settle()
+  assert.equal(reads, 2, 'a genuinely different catalog asks again')
+})

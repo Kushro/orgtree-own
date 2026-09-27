@@ -345,7 +345,7 @@ export function useNodeFacts(slug: string, tree: TreePayload | null | undefined,
     const facts = new Map(base)
     for (const id of wanted) {
       const state = agentReferences.get(slug, catalog, id)
-      if (!state || 'error' in state) facts.set(id, { tier: '', generation: 0, live: false, unresolved: true })
+      if (!state || !('ref' in state)) facts.set(id, { tier: '', generation: 0, live: false, unresolved: true })
       else if (state.ref) facts.set(id, { tier: state.ref.tier ?? '', generation: state.ref.generation ?? 0,
         live: state.ref.state === 'live' })
     }
