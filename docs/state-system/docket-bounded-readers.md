@@ -62,5 +62,27 @@ this new migration.
 The fixtures compare 40 and 400 archived bodies. The old `_work_find` path
 materializes 40/400 records; `detail` decodes 1/1 and foreground summaries remain
 identical. This is a cardinality control, not a latency or memory qualification.
-Public route/projection integration, renderer references and loaded history
-qualification (at most 5% growth while meeting absolute targets) remain open.
+List projections, renderer references and loaded history qualification (at most
+5% growth while meeting absolute targets) remain open.
+
+## Single-item public reads
+
+`workdetail.get` serves the existing desktop and agent `get` responses through
+the canonical ledger projection methods. Its context is not an `Org`, has no
+document or mutation surface, and cannot be saved. One read-only repeatable-read
+transaction holds the index, authorized raw body, current actor identities,
+dependency permissions, questions and this item's spilled scope history.
+
+The selected item's complete scope is intentionally available. Other item bodies
+and other agents' rows are not hydrated. Actor lookups have a 128-entry cache
+local to the request; nothing persists between requests. Named historical links
+use indexed summaries with the caller's authority. Missing and hidden items keep
+the ledger's identical refusal, including retired-ID guidance. Agent callers
+must still be live. Full, compact, summary and field selection use the same pure
+ledger methods as the old path.
+
+Unhealthy indexes, legacy blobs, missing identity normalization, or a scope-count
+mismatch return `None` to the route, which then executes the complete existing
+reader and identity guard. This is compatibility fallback, not an empty answer.
+Unknown database errors propagate. Reusing a writer transaction is refused.
+No mutations or list routes are changed by this integration.
