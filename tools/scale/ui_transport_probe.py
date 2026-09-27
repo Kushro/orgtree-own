@@ -112,6 +112,7 @@ for repeat in range(3):
         slug, archived=1, backlogged=1, request=request(etag)))
     work_ui._cache.clear()
     light = measure('light_cold', lambda: api.work_items_view(slug, request=request()))
+    item = json.loads(light.body)['items'][0]['slug']
     stamp = light.headers['etag']
     measure('light_warm_body', lambda: api.work_items_view(slug, request=request()))
     measure('light_304', lambda: api.work_items_view(slug, request=request(stamp)), expected=304)
@@ -121,8 +122,9 @@ for repeat in range(3):
     del org
     measure('light_after_status_save', lambda: api.work_items_view(slug, request=request(stamp)), expected=304)
     org = store.load_org(slug)
-    org.d['work_items'][0]['title'] = f'Edited item {repeat}'
-    org.d['work_items'][0]['rev'] += 1
+    selected = next(row for row in org.d['work_items'] if row['slug'] == item)
+    selected['title'] = f'Edited item {repeat}'
+    selected['rev'] += 1
     store.save_org(org)
     del org
     changed = measure('light_one_item_delta', lambda: api.work_items_view(slug, request=request(stamp)))

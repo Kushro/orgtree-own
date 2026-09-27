@@ -78,9 +78,19 @@ def _dependencies(conn: Any) -> list[Any]:
     """
     docs = conn.execute("SELECT key,val FROM doc WHERE key IN "
                         "('asks','work_identity','nodes','release') ORDER BY key").fetchall()
-    nodes = conn.execute(
-        "SELECT id,json_extract(val,'$.state','$.generation','$.seat_id','$.parent') "
-        "FROM nodes ORDER BY id").fetchall()
+    if hasattr(conn, "raw"):
+        # The compatibility json_extract parses the entire node once per
+        # requested field. PG's record projection parses it once and returns
+        # only these four fields, not charters/status/transcript metadata.
+        nodes = conn.raw.execute(
+            f"SELECT id,json_build_array(n.state,n.generation,n.seat_id,n.parent)::text "
+            f"FROM org_{int(conn.org_id)}.nodes CROSS JOIN LATERAL "
+            "json_to_record(val::json) AS n(state json,generation json,seat_id json,parent json) "
+            "ORDER BY id").fetchall()
+    else:
+        nodes = conn.execute(
+            "SELECT id,json_extract(val,'$.state','$.generation','$.seat_id','$.parent') "
+            "FROM nodes ORDER BY id").fetchall()
     return [list(map(list, docs)), list(map(list, nodes))]
 
 
