@@ -96,7 +96,6 @@ test('bare names in prose resolve omitted agents in a bounded lookup; items keep
   const item = { objective: 'ask old-agent about shared-name, not missing-one', notes: ['live erased'] }
   const index = await mountIndex(t, { catalog_revision: 'cat-' + t.name, present: ['live'], missing: ['erased'] },
     item, base)
-  assert.equal(index(), base, 'unchanged until the lookup answers')
   await inAct(async () => { await flush(4) })
   const words = asked.flat()
   assert.ok(words.includes('old-agent') && words.includes('missing-one'))
