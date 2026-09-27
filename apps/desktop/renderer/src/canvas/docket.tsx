@@ -257,12 +257,12 @@ export function buildNodeFacts(roots?: TreeNode[]): Map<string, NodeFacts> {
 }
 
 /** Every agent an item names. Only these are looked up when omitted. */
-export function itemActorIds(items: Iterable<WorkItem>): string[] {
+export function itemActorIds(items: Iterable<WorkItem> | null | undefined): string[] {
   const ids = new Set<string>()
   const add = (a: unknown) => {
     if (a && typeof a === 'object' && typeof (a as WorkActor).node === 'string') ids.add((a as WorkActor).node)
   }
-  for (const it of items) { add(it.owner); add(it.reviewer); add(it.last_updater); add(it.created_by) }
+  for (const it of items ?? []) { add(it.owner); add(it.reviewer); add(it.last_updater); add(it.created_by) }
   return [...ids].sort()
 }
 
