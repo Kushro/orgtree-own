@@ -19,6 +19,17 @@ class SummaryReads(unittest.TestCase):
     seed = behavior.SummaryBehavior.seed
     row = behavior.SummaryBehavior.row
 
+    def test_missing_org_and_disappeared_marker_are_omitted(self):
+        self.assertEqual(org_summary.public_rows('no-such-summary-org'), [])
+        marker = store._db_path(self.slug)
+        saved = marker + '.held'
+        os.replace(marker, saved)
+        try:
+            self.assertEqual(org_summary.public_rows(self.slug), [])
+            self.assertFalse(any(row['slug'] == self.slug for row, _ in org_summary.admin_rows()))
+        finally:
+            os.replace(saved, marker)
+
     def test_supported_admin_and_public_outputs_match_legacy_except_approved_rounding(self):
         self.seed()
         with patch.object(org_listing, '_native', return_value=False):
