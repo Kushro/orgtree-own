@@ -26,7 +26,9 @@ class _AdminSummary:
     children_index = Org.children_index
 
     def __init__(self, settings, nodes, cost):
-        _compatible(settings, nodes)
+        # Listing does not use prompt/cache predecessor identity. Only the
+        # settings migrations affect this projection's normalization.
+        _compatible(settings, {})
         self.d = ProjectionDoc(copy.deepcopy(settings))
         self.d['nodes'] = copy.deepcopy(nodes)
         Org._normalize_display_basics(self)
