@@ -7629,8 +7629,11 @@ def work_items_view(slug: str, archived: int = 0, backlogged: int = 0,
         raise HTTPException(404, str(e))
     headers = {"ETag": '"' + revision + '"', "Cache-Control": "private, no-cache"}
     if body is None:
+        _work_list_polls.record(304)
         return Response(status_code=304, headers=headers)
-    return Response(content=_dump_tree(body), media_type="application/json", headers=headers)
+    encoded = _dump_tree(body)
+    _work_list_polls.record(200, len(encoded))
+    return Response(content=encoded, media_type="application/json", headers=headers)
 
 
 _engine_proc: Any = None

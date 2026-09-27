@@ -16,7 +16,7 @@ import import_provenance  # noqa: E402,F401
 from engine.launch import load_app  # noqa: E402
 app, *_ = load_app()
 from fastapi.testclient import TestClient  # noqa: E402
-from orgtree import ledger, store, work_ui  # noqa: E402
+from orgtree import api, ledger, store, work_ui  # noqa: E402
 
 OP = {"X-Orgtree-Desktop-Token": "operator"}
 
@@ -132,6 +132,14 @@ class WorkUI(unittest.TestCase):
         self.assertEqual(after.status_code, 200)
         self.assertNotIn("delta", after.json())
         self.assertEqual(after.json()["backlogged"][0]["slug"], "hidden")
+
+    def test_developer_poll_counters_keep_light_traffic_visible(self):
+        with patch.object(api, "_work_list_polls", api._PollStats()):
+            first = self.get()
+            second = self.get(first.headers["etag"])
+            self.assertEqual(second.status_code, 304)
+            self.assertEqual(api._work_list_polls.last_minute(), {
+                "full_200": 1, "not_modified_304": 1, "bytes_200": len(first.content)})
 
     def test_evicted_base_gets_complete_light_snapshot(self):
         before = self.get()
