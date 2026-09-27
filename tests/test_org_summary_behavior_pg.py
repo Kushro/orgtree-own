@@ -34,6 +34,9 @@ class SummaryBehavior(unittest.TestCase):
         full.d['kiosk'] = {'enabled': False, 'token': 'KIOSK-PRIVATE', 'credits': 100,
                            'spend_limit': 10, 'storage_limit_mb': 20, 'sandbox': False}
         store.save_org(full)
+        # Persist the existing ceiling normalization so this is a native
+        # current-format fixture, not the separate pre-ceiling fallback case.
+        store.save_org(store.load_org(self.slug))
         return store.load_org(self.slug)
 
     def test_admin_spend_and_holds_keep_deleted_cost_and_unrecoverable_seats(self):
@@ -61,16 +64,16 @@ class SummaryBehavior(unittest.TestCase):
         self.assertEqual(row['kiosk_cfg']['held'], full.audit()['top_level_holds'])
         self.assertNotIn('kiosk_cfg', self.row(public=True))
 
-    def test_cost_rounding_matches_ordered_float_sum_at_half_decimal_boundary(self):
+    def test_cost_rounding_matches_tree_decimal_total_at_half_boundary(self):
         self.seed()
         self.setting('deleted_cost_usd', 0)
         row = self.row()
-        expected = round(sum([0.1, 0.2, 0.00005]), 4)
-        self.assertEqual(row['cost_usd_total'], expected)
-        # The maintained decimal sum cannot be substituted blindly: canonical
-        # six-place node costs can still reach different four-place rounding.
+        legacy = round(sum([0.1, 0.2, 0.00005]), 4)
+        # Coordinator decision 4: match tree-header decimal display instead
+        # of reloading history to preserve a float half-boundary artifact.
         decimal_total = self.query('SELECT cost FROM foreground_meta WHERE singleton=1')[0][0]
-        self.assertNotEqual(expected, round(float(decimal_total), 4))
+        self.assertNotEqual(legacy, round(float(decimal_total), 4))
+        self.assertEqual(row['cost_usd_total'], round(float(decimal_total), 4))
 
 
 if __name__ == '__main__': unittest.main()

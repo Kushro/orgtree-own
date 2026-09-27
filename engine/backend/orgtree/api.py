@@ -2014,12 +2014,12 @@ async def _orgs_list_route(request: Request) -> list[dict[str, Any]]:
 
 
 def orgs_list(request: Request) -> list[dict[str, Any]]:
+    from . import org_summary
     pub = _public_slug(request)
     if pub:
         # public visitors see exactly their token's org — nothing to discover,
         # and no document body needed, so this branch keeps the cheap listing
-        return [{**o, "kiosk": True} for o in store.list_orgs()
-                if o["slug"] == pub]
+        return org_summary.public_rows(pub)
     # admin: attach the kiosk dashboard summary (incl. the secret token —
     # this listener is loopback-only).
     #
@@ -2028,7 +2028,7 @@ def orgs_list(request: Request) -> list[dict[str, Any]]:
     # (which parses every one of them again) — 168 ms per request against this
     # machine's 18.53 MB data root, on a route the desk polls every 3 s.
     out: list[dict[str, Any]] = []
-    for o, org in store.list_orgs_with_docs():
+    for o, org in org_summary.admin_rows():
         row = {**o, "cost_usd_total": org.cost_total(),
                # F-09: agents with a running turn. Deliberately absent from the
                # public/kiosk branch above — visitors don't see how busy an org is.
@@ -2044,7 +2044,7 @@ def orgs_list(request: Request) -> list[dict[str, Any]]:
                 "spend_frozen": bool(org.d.get("spend_frozen")),
                 "storage_blocked": bool(org.d.get("storage_blocked")),
                 "sandbox": bool(k.get("sandbox")),
-                "held": org.audit()["top_level_holds"],
+                "held": org_summary.top_level_holds(org),
                 # stale-served + background-refreshed: the walk never runs on
                 # the request path (arti's took ~7 s and stalled every load)
                 "storage_mb": (round(u / 1048576, 2)
