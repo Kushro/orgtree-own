@@ -157,3 +157,5 @@ class LazyRows(unittest.TestCase):
             tx.d['work_items'][0]={'slug':'one','rev':11,'notification_attention_active':False}
         rows=store.read_work_items_rows(self.slug,['one','two'])
         self.assertEqual(rows['ids'],['one']);self.assertEqual(rows['items']['one']['rev'],11)
+
+if __name__=='__main__': unittest.main()
