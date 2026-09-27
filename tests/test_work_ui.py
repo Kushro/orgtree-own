@@ -61,6 +61,9 @@ class WorkUI(unittest.TestCase):
         self.assertIn("manual", body["attention"][0]["attention_sources"])
         detail = self.client.get(f"/api/orgs/{self.slug}/work-items/visible", headers=OP).json()["item"]
         self.assertEqual(detail["evidence"][0]["note"], "heavy evidence " * 10000)
+        # Attention-bearing backlog stays in the main list by ledger policy.
+        self.assertIn("hidden", [r["slug"] for r in body["items"]])
+        self.edit(lambda org: org.d["work_items"][1].update(manual_attention=None))
         opened = self.get(query="?backlogged=1").json()
         self.assertEqual(opened["backlogged"][0]["slug"], "hidden")
 
