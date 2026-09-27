@@ -448,7 +448,9 @@ def main(argv=None) -> int:
                             pass
                         if "[[m" in raw:
                             for m in MARK.finditer(raw):
-                                feed_tracker.receive(w, int(m.group(1)), now)
+                                receipt = feed_tracker.receive(w, int(m.group(1)), now)
+                                if receipt is not None:
+                                    rec.write("feed-receipts", receipt)
             except Exception as e:                           # noqa: BLE001
                 rec.write("ws", {"t": round(time.time() - t0, 3), "w": w, "ev": "close",
                                  "why": f"{type(e).__name__}: {e}"[:200]})

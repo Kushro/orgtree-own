@@ -6,6 +6,17 @@ from tools.scale.control import BoundedPool, Feed, Workload, memory_breach
 
 
 class ScaleControlTests(unittest.TestCase):
+    def test_feed_receipts_preserve_first_arrival_and_ignore_retired_markers(self):
+        feed = Feed(1)
+        feed.emit(7, 10)
+        self.assertEqual(feed.receive(0, 7, 10.5),
+                         {'w': 0, 'm': 7, 'emit': 10, 'receive': 10.5})
+        self.assertIsNone(feed.receive(0, 7, 11))
+        feed.acknowledge([7], True)
+        feed.retire(16)
+        self.assertIsNone(feed.receive(0, 7, 17))
+        self.assertEqual(list(feed.latencies[0]), [500])
+
     def test_saturated_producer_is_bounded_and_records_rejected_demand(self):
         release, entered = threading.Event(), threading.Event()
         calls = []

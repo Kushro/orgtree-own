@@ -146,8 +146,10 @@ class Feed:
     def receive(self, window, marker, when):
         with self.lock:
             item = self.pending.get(marker)
-            if item is not None:
-                item[2].setdefault(window, when)
+            if item is not None and window not in item[2]:
+                item[2][window] = when
+                return {"w": window, "m": marker, "emit": item[0], "receive": when}
+        return None
 
     def retire(self, now):
         with self.lock:

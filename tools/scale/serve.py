@@ -304,6 +304,16 @@ def child(args) -> int:
     desc = json.loads((root / "scale-descriptor.json").read_text(encoding="utf-8"))
     slug = desc["org"]
 
+    feed_trace = None
+    if os.environ.get("ORGTREE_SCALE_FEED_TRACE") == "1":
+        from feed_trace import install
+        from orgtree import assistant_messages, reply_events
+        feed_trace = install(api, supervisor, assistant_messages, reply_events)
+
+        @api.app.get("/scale/feed-trace")
+        def _feed_trace():
+            return feed_trace.snapshot()
+
     from fastapi import Body
 
     @api.app.post("/scale/stream")
@@ -316,6 +326,10 @@ def child(args) -> int:
         if fn is None:
             return {"ok": False, "why": "supervisor.stream not wired (lifespan did not run)"}
         frames = payload.get("frames") or [payload]
+        if feed_trace is not None:
+            from feed_trace import marker
+            for frame in frames:
+                feed_trace.note('handler_start', marker(frame.get('text', '')))
         for f in frames:
             node = str(f["node"])
             fn(slug, node, {"kind": "delta", "text": str(f["text"]),
