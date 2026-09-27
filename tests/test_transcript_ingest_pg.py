@@ -51,6 +51,28 @@ class PostgresTranscriptCapture(fixture.CaptureTests):
         self.assertEqual(store.org_seq(slug),seq)
         self.assertEqual(store.read_transcript_source(slug,'agent')['nodes']['agent']['session_id'],'outside')
 
+    def test_cache_miss_tags_payload_with_same_statement_revision(self):
+        from orgtree import store,pgstore
+        from unittest.mock import patch
+        slug=self.org.d['slug'];fired=[];original=pgstore.PgConn.execute
+        with store._transcript_source_cache_lock:store._transcript_source_cache.clear()
+        def between(conn,sql,*a,**kw):
+            if '__source_node' in sql and not fired:
+                fired.append(True)
+                with psycopg.connect(os.environ['ORGTREE_PG_URL']) as writer:
+                    writer.execute(f"UPDATE org_{int(conn.org_id)}.nodes SET val=jsonb_set(val::jsonb,'{{session_id}}','\"raced\"'::jsonb)::text WHERE id='agent'")
+                    writer.execute('UPDATE public.orgs SET revision=revision+1 WHERE org_id=%s',(conn.org_id,))
+            return original(conn,sql,*a,**kw)
+        with patch.object(pgstore.PgConn,'execute',between):
+            result=store.read_transcript_source(slug,'agent')
+        self.assertEqual(fired,[True],'actual commit must cross revision check and payload read')
+        self.assertEqual(result['nodes']['agent']['session_id'],'raced')
+        def forbid_payload(conn,sql,*a,**kw):
+            self.assertNotIn('__source_node',sql,'coherent payload revision must be reusable immediately')
+            return original(conn,sql,*a,**kw)
+        with patch.object(pgstore.PgConn,'execute',forbid_payload):
+            self.assertEqual(store.read_transcript_source(slug,'agent'),result)
+
     def test_source_projection_cache_is_bounded_and_org_settings_invalidate(self):
         from orgtree import store
         from unittest.mock import patch
