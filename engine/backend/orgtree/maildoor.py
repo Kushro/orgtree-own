@@ -288,7 +288,8 @@ def declare_message(before: Callable[[Any, dict[str, Any]], dict[str, Any]],
                     body: Callable[[pgdoor.AgentTx], dict[str, Any]]) -> None:
     """`orgtree_message` on the door. Its before-step and body live in api
     (they use api's attachment, hub-roster and inter-org helpers)."""
-    pgdoor.declare(MESSAGE, message_spec, body=body, before=before)
+    pgdoor.declare(MESSAGE, message_spec, body=body, before=before,
+                   runtime_snapshot=True)
 
 
 def declare(notify: Notify, steer: Steer, note: Note) -> None:

@@ -12072,18 +12072,13 @@ def _agent_identity(body: AgentCall, request: Request, *, durable: bool = False)
         raise HTTPException(403, "bridge secret is scoped to its own org")
     if body.node == USER:
         return {}
-    # THE READ HALF takes the shared snapshot (store.cached_org), not a
-    # private parse — and NO LONGER UNDER DOC_LOCK (state-access
-    # rearchitecture, incident 2026-09-19: a user message send stalled for
-    # minutes). The snapshot is seq-gated and torn-proof without the lock,
-    # the identity→dispatch window was never covered by it anyway (the lock
-    # released between the two), and the dispatch re-validates the seat,
-    # halt and killswitch under its own lock on the resident. What the lock
-    # DID do under swarm load was convoy: a snapshot rebuild that fell back
-    # to a full parse ran inside it and stalled every write behind a
-    # 20-second hold.
+    # PG preflight needs the normalized caller, not docket bodies. The
+    # explicit runtime view keeps node/section coherence without refreshing
+    # the eager UI cache. Dispatch still repeats seat, halt and killswitch
+    # checks on its locked rows; no authorization relies on this preflight.
     try:
-        org = store.cached_org(body.org)
+        org = (store.load_runtime_org(body.org) if store.STORE_BACKEND == "postgres"
+               else store.cached_org(body.org))
         caller = org.node(body.node)
     except LedgerError as exc:
         raise HTTPException(403, "authenticated seat is missing; reconnect through a live seat") from exc
@@ -12348,11 +12343,12 @@ def _message_door_before(call: Any, a: dict[str, Any]) -> dict[str, Any]:
         raise LedgerError(
             "kind 'notice' is minted by orgtree_send_notice (a send that "
             "never wakes the recipient) — use that tool instead")
-    # S-C: the seq-gated shared snapshot (the one the door's spec already
-    # resolved on — a dict lookup while nothing committed), not a fresh full
-    # load. Safe because the body re-resolves on the locked document and
-    # refuses when the recipient moved away from what this step checked.
-    snap = store.cached_org(str(call.org))
+    # Recipient prediction reads only node relationships. Attachment handling
+    # retains its ordinary coherent snapshot. The locked body re-resolves
+    # the destination and refuses/widens when this prediction became stale.
+    snap = (store.load_runtime_org(str(call.org))
+            if store.STORE_BACKEND == "postgres" and not a.get("attachments")
+            else store.cached_org(str(call.org)))
     dest = snap._resolve_recipient(str(a.get("to", "")), outward=True)
     if dest.startswith("@net:"):
         _require_net_peer(dest[5:])

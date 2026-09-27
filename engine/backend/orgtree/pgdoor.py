@@ -260,6 +260,7 @@ class TxSpec:
 SpecFn = Callable[[Any, Any, "dict[str, Any]"], TxSpec]
 LOCKS: "dict[str, TxSpec | SpecFn]" = {}
 SNAPSHOT_FREE: set[str] = set()
+RUNTIME_SNAPSHOTS: set[str] = set()
 BODIES: "dict[str, Callable[[AgentTx], Any]]" = {}
 KIOSK_EXEMPT: "set[str]" = set()
 # route only the calls a predicate accepts (one tool whose modes belong to
@@ -284,6 +285,7 @@ def declare(name: str, spec: "TxSpec | SpecFn",
             body: "Callable[[AgentTx], Any] | None" = None, *,
             kiosk_exempt: bool = False,
             needs_snapshot: bool = True,
+            runtime_snapshot: bool = False,
             when: "Callable[[dict[str, Any]], bool] | None" = None,
             before: "Callable[[Any, dict[str, Any]], dict[str, Any] | None] | None"
             = None) -> None:
@@ -299,6 +301,9 @@ def declare(name: str, spec: "TxSpec | SpecFn",
     `needs_snapshot=False`: the spec is proven to depend only on arguments;
     it receives None and avoids a whole-org preflight read. The locked body
     still rechecks every decision and widens through the usual rollback path.
+    `runtime_snapshot=True`: this spec explicitly accepts version-checked
+    deferred work bodies on PG; ordinary specs retain their coherent cache.
+    Test snapshot seams still override both forms.
     `kiosk_exempt` (lead decision 18.8): the tool is PROVEN unable to move
     top-level holdings, so the door skips the kiosk credit-cap check for it —
     the family carries the proof. Re-declaring a name with a DIFFERENT spec
@@ -309,6 +314,10 @@ def declare(name: str, spec: "TxSpec | SpecFn",
             old_body is not None and body is not None and old_body != body):
         raise ValueError(f"pgdoor: {name!r} is already declared")
     LOCKS[name] = spec
+    if runtime_snapshot:
+        RUNTIME_SNAPSHOTS.add(name)
+    else:
+        RUNTIME_SNAPSHOTS.discard(name)
     if needs_snapshot:
         SNAPSHOT_FREE.discard(name)
     else:
@@ -383,7 +392,15 @@ def _resolve(name: str, slug: str, body: Any, a: dict[str, Any]) -> TxSpec:
                           f"still runs under DOC_LOCK")
     if isinstance(spec, TxSpec):
         return spec
-    return spec(None if name in SNAPSHOT_FREE else _snapshot(slug), body, a)
+    if name in SNAPSHOT_FREE:
+        snapshot = None
+    elif name in RUNTIME_SNAPSHOTS and _SEAM.snapshot is None:
+        from . import store
+        snapshot = (store.load_runtime_org(slug) if store.STORE_BACKEND == "postgres"
+                    else _snapshot(slug))
+    else:
+        snapshot = _snapshot(slug)
+    return spec(snapshot, body, a)
 
 
 # the transaction open on this thread/context, so a writer called from

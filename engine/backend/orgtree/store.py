@@ -2322,7 +2322,7 @@ class _NodeDict(dict):
 
 # Small metadata only: no evidence/body cache and no connection retained by an Org.
 # Version keys include the data root, database/schema and PostgreSQL tuple identity.
-_WORK_ITEM_META: dict[tuple[Any, ...], tuple[str, tuple[int, bool]]] = {}
+_WORK_ITEM_META: dict[tuple[Any, ...], tuple[str, tuple[int, bool] | None]] = {}
 _WORK_ATTENTION_FIELDS = ("id", "slug", "manual_attention", "notification_attention_active", "notification_attention_epoch",
                           "status", "docket_at", "updated_at")
 
@@ -2410,8 +2410,10 @@ def _load_work_refs(conn: Any, slug: str, rows: dict[str, str]) -> None:
             elif len(metadata) <= 2048:
                 if len(_WORK_ITEM_META) >= 2048:
                     _WORK_ITEM_META.clear()
-                _WORK_ITEM_META[identities[key]] = (metadata,
-                    (len(value.get("scope") or []), bool(value.get("scope_archive"))))
+                scope = value.get("scope") or []
+                summary = ((len(scope), bool(value.get("scope_archive")))
+                           if isinstance(scope, (list, dict, str)) else None)
+                _WORK_ITEM_META[identities[key]] = (metadata, summary)
             rows[key] = raw
         if not ready:
             # Legacy attention initialization retains the full coherent load.

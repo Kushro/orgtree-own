@@ -301,4 +301,56 @@ class LazyRows(unittest.TestCase):
             for name in names:
                 pgdoor.LOCKS.pop(name,None);pgdoor.SNAPSHOT_FREE.discard(name)
 
+
+    def test_runtime_agent_identity_does_not_refresh_work_cache(self):
+        from types import SimpleNamespace
+        from orgtree import api
+        from fastapi import HTTPException
+        body=SimpleNamespace(org=self.slug,node='a')
+        state=SimpleNamespace(agent_identity=None,bridge_slug=None)
+        request=SimpleNamespace(state=state)
+        seen,watch=self.watch()
+        with watch, patch.object(store,'cached_org',side_effect=AssertionError('eager identity')):
+            caller=api._agent_identity(body,request)
+        self.assertEqual(caller['id'],'a')
+        self.assertFalse(any('ANY' in sql or 'xmin' in sql for sql,_ in seen),seen)
+        state.agent_identity=(self.slug,'a',int(caller.get('generation',0))+1,caller.get('seat_id'))
+        with self.assertRaises(HTTPException) as rejected: api._agent_identity(body,request)
+        self.assertEqual(rejected.exception.status_code,403)
+        state.agent_identity=None
+        body.node='absent'
+        with self.assertRaises(HTTPException) as rejected: api._agent_identity(body,request)
+        self.assertEqual(rejected.exception.status_code,403)
+
+    def test_runtime_message_spec_preserves_snapshot_seam_and_no_work_reads(self):
+        from types import SimpleNamespace
+        from orgtree import api,maildoor,pgdoor
+        from orgtree.ledger import USER
+        call=SimpleNamespace(org=self.slug,node='a')
+        args={'to':USER}
+        seen,watch=self.watch()
+        with watch, patch.object(store,'cached_org',side_effect=AssertionError('eager mail')):
+            spec=pgdoor._resolve(maildoor.MESSAGE,self.slug,call,args)
+            before=api._message_door_before(call,args)
+        self.assertEqual(before['dest'],USER)
+        self.assertFalse(any('ANY' in sql or 'xmin' in sql for sql,_ in seen),seen)
+        # Explicit test seams retain precedence; normal lock prediction is equal.
+        old=pgdoor._SEAM.snapshot
+        try:
+            snapshot=store.load_org(self.slug)
+            pgdoor._SEAM.snapshot=lambda slug:snapshot
+            with patch.object(store,'load_runtime_org',side_effect=AssertionError('seam bypass')):
+                self.assertEqual(pgdoor._resolve(maildoor.MESSAGE,self.slug,call,args),spec)
+        finally: pgdoor._SEAM.snapshot=old
+
+    def test_malformed_scope_does_not_break_unrelated_runtime_reads(self):
+        org=store.load_org(self.slug)
+        org.d['work_items'][0]['scope']=3
+        store.save_org(org)
+        # Legacy malformed scope is not interpreted until a caller uses it.
+        self.assertEqual(store.load_runtime_org(self.slug).nodes['a']['id'],'a')
+        lazy=store.load_runtime_org(self.slug)
+        self.assertFalse(lazy.d['work_items'][0]._loaded)
+        self.assertEqual(lazy.d['work_items'][0]['scope'],3)
+
 if __name__=='__main__': unittest.main()
