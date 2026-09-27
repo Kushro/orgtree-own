@@ -43,6 +43,15 @@ class PolicyReads(unittest.TestCase):
         got = policy_reads.watchdog_org(self.slug)
         self.assertEqual(sup._wd_owner_lost(got, got.d['watchdogs'][0]), ledger.Org.WATCHDOG_ARCHIVE_PAUSE)
 
+    def test_owner_scope_revocation_is_seen_without_cached_org(self):
+        org = self.configure()
+        org.node('worker')['scope']['tools']['bash'] = False
+        store.save_org(org)
+        with patch.object(store, 'cached_org', side_effect=AssertionError('full read')):
+            got = policy_reads.watchdog_org(self.slug)
+        dog = dict(got.d['watchdogs'][0], kind='command')
+        self.assertIn('no longer holds bash', sup._wd_owner_lost(got, dog))
+
     def test_storage_fields_and_unknown_node_blob_fallback(self):
         org = self.configure()
         org.d.update(kiosk={'enabled': False, 'storage_limit_mb': 3}, storage_blocked={'at': 'x'})
