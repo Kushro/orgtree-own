@@ -5,7 +5,8 @@ type Entry = { version: number; owners: Map<object, TreeSelectionPart> }
 
 /** Mounted surfaces own their IDs. Removing a surface removes its contribution;
  * visiting history never installs a permanent selection. Versions let App
- * reject a response for a picker that was closed while its read was in flight. */
+ * notice a selection that changed while its read was in flight and read once
+ * more (the in-flight answer is still one coherent snapshot). */
 export class TreeSelections {
   private orgs = new Map<string, Entry>()
   private serial = 0

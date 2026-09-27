@@ -2651,8 +2651,8 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   const pinnedFocusId = nearestId && pinnedIds.has(nearestId) ? nearestId : null
   const focusId = pinnedFocusId ? null : nearestId
   focusRef.current = focusId
-  // Registration is preparatory until App adopts getSelectedTree. Owners
-  // release their contribution on unmount/org change, never on omission.
+  // App reads the selected tree from this registration. Owners release
+  // their contribution on unmount/org change, never on omission.
   const treeSelectionOwner = useRef({})
   const savedSelection = useMemo(() => savedTreeSelection(slug), [slug])
   const browse: TreeBrowse | null = retiredOpen
