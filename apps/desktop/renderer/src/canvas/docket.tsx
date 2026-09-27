@@ -22,7 +22,7 @@
 // `questions` array (wire contract v3) is only used to know WHICH asks to
 // look up and for the "who is asking" header — never to answer directly.
 
-import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useDocketWindow } from './docketwindow'
 import { usePendingAttention } from '../pending-attention'
 import type { ComponentProps, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
@@ -51,7 +51,7 @@ import { useWorkItems, useSelectedWork } from './useworkitems'
 import { fmtFull } from '../timefmt'
 import { buildMentionIndex } from './workrefs'
 import type { MentionIndex } from './workrefs'
-import { RefProse, refToken, resolveRef, useAgentOutcome } from './reflinks'
+import { ForegroundViewContext, RefProse, refToken, resolveRef, useAgentOutcome } from './reflinks'
 import { DocketDescription } from './docketdesc'
 import { copyToClipboard, useContextMenu } from './contextmenu'
 import { quickStaffEntry, quickStaffPath } from './quickstaff'
@@ -254,6 +254,63 @@ export function buildNodeFacts(roots?: TreeNode[]): Map<string, NodeFacts> {
   }
   walk(roots)
   return map
+}
+
+const PROSE_TOKEN = /[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?/g
+
+/** Name-shaped words in an item's text, excluding what the caller already
+ *  resolves. Bounded by count and by characters scanned: a candidate list,
+ *  never an index of history. */
+export function proseCandidates(value: unknown, skip: (id: string) => boolean,
+                                cap = 256, chars = 200_000): string[] {
+  const out = new Set<string>()
+  let budget = chars
+  const visit = (v: unknown, depth: number) => {
+    if (out.size >= cap || budget <= 0 || depth > 6) return
+    if (typeof v === 'string') {
+      const text = v.slice(0, budget)
+      budget -= text.length
+      for (const m of text.matchAll(PROSE_TOKEN)) {
+        const id = m[0]
+        if (id.length >= 2 && id.length <= 64 && !skip(id)) out.add(id)
+        if (out.size >= cap) return
+      }
+    } else if (Array.isArray(v)) v.forEach(x => visit(x, depth + 1))
+    else if (v && typeof v === 'object') Object.values(v).forEach(x => visit(x, depth + 1))
+  }
+  visit(value, 0)
+  return [...out].sort()
+}
+
+/** A bare agent name in an item's prose is a mention only when the agent
+ *  resolves. On a SELECTED tree a retired agent may be omitted, so the
+ *  name-shaped words are looked up in bounded batches for the tree's
+ *  catalog; found agents join the index, and an item of the same name keeps
+ *  winning the collision. A complete tree's index is returned unchanged. */
+export function useProseAgentIndex(slug: string, source: unknown, index: MentionIndex): MentionIndex {
+  const view = useContext(ForegroundViewContext)
+  const catalog = view?.catalog_revision
+  const candidates = useMemo(() => catalog === undefined ? []
+    : proseCandidates(source, id => index.has(id) || !!view?.missing.includes(id)),
+  [catalog, source, index, view])
+  const key = JSON.stringify(candidates)
+  const [answered, setAnswered] = useState(0)
+  useEffect(() => agentReferences.subscribe(() => setAnswered(n => n + 1)), [])
+  useEffect(() => {
+    if (catalog !== undefined && candidates.length) agentReferences.request(slug, catalog, candidates)
+  }, [slug, catalog, key])   // eslint-disable-line react-hooks/exhaustive-deps
+  return useMemo(() => {
+    if (catalog === undefined || !candidates.length) return index
+    let out: MentionIndex | null = null
+    for (const id of candidates) {
+      const state = agentReferences.get(slug, catalog, id)
+      if (state && 'ref' in state && state.ref && !index.has(id)) {
+        out ??= new Map(index)
+        out.set(id, { kind: 'agent', id, tier: state.ref.tier })
+      }
+    }
+    return out ?? index
+  }, [slug, catalog, key, index, answered])   // eslint-disable-line react-hooks/exhaustive-deps
 }
 
 /** Every agent an item names. Only these are looked up when omitted. */
@@ -1181,7 +1238,7 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
   }, [query, clearSearch, firstRow, setSelId])
 
   return (
-    <>
+    <ForegroundViewContext.Provider value={tree?.foreground}>
     <PinFrame kind="docket" title="Work docket" panel="settings wide docket-modal"
       close={close} onEsc={escClose}>
         {/* One mounted set of controls: inline when wide, disclosed when narrow. */}
@@ -1442,7 +1499,7 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
           openRef(r)
         } }} />
     )}
-    </>
+    </ForegroundViewContext.Provider>
   )
 }
 
@@ -2528,7 +2585,7 @@ function DocketPane(props: ComponentProps<typeof FullDocketPane>) {
 }
 
 function FullDocketPane({ slug, item, toast, asksById, onDismiss, close, onFocusAgent,
-  facts, refIndex, onGoToItem, refWorld, onOpenRef, refresh }: {
+  facts, refIndex: panelIndex, onGoToItem, refWorld, onOpenRef, refresh }: {
   slug: string
   item: WorkItem
   toast: ToastFn
@@ -2545,6 +2602,7 @@ function FullDocketPane({ slug, item, toast, asksById, onDismiss, close, onFocus
    *  alone would leave the pane showing the pre-mutation copy */
   refresh: () => void
 }) {
+  const refIndex = useProseAgentIndex(slug, item, panelIndex)
   const attention = item.effective_attention
   const label = attention ? 'Needs attention' : statusLabel(item.status)
   const canDismiss = item.attention_sources.includes('manual')
