@@ -158,10 +158,12 @@ class SummaryReads(unittest.TestCase):
         self.query('UPDATE nodes SET val=? WHERE id=?', (json.dumps(node), 'archived'))
         with store._POOL.acquire(self.slug) as conn:
             oid = conn.org_id
-        with pgstore.connect(os.environ['ORGTREE_TEST_PG_ADMIN_URL']) as admin:
+        with pgstore.connect(os.environ['ORGTREE_PG_URL']) as admin:
             admin.execute(f'DROP INDEX org_{oid}.nodes_summary_cost_exceptions')
             admin.execute('SELECT public.orgtree_install_summary_cost_index(%s)', (oid,))
         self.assertEqual(self.query('SELECT count(*) FROM nodes WHERE public.orgtree_summary_cost_exception(val)')[0][0], 1)
+        node['cost_usd'] = 0.00005
+        self.query('UPDATE nodes SET val=? WHERE id=?', (json.dumps(node), 'archived'))
 
 
 if __name__ == '__main__': unittest.main()
