@@ -50,6 +50,12 @@ print(json.dumps({'pid': os.getpid(), 'file': store.__file__, 'state': current['
 @unittest.skipUnless(ADMIN, 'ORGTREE_TEST_PG_ADMIN_URL not set: NOT RUN')
 class ExternalRevocationTests(unittest.TestCase):
     CHEAP = True
+
+    @classmethod
+    def setUpClass(cls):
+        from orgtree import pgstore
+        pgstore.migrate(os.environ['ORGTREE_PG_URL'])
+
     setUp = fixture.SteerPollCostTests.setUp
     tearDown = fixture.SteerPollCostTests.tearDown
     token = fixture.SteerPollCostTests.token
