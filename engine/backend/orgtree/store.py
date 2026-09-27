@@ -2475,7 +2475,11 @@ class _LazyWorkItem(_WorkItem):
     def pop(self, key, *default): self._load(); return super().pop(key, *default)
     def popitem(self): self._load(); return super().popitem()
     def clear(self): self._load(); super().clear()
-    def __eq__(self, other): self._load(); return dict.__eq__(self, other)
+    def __eq__(self, other):
+        self._load()
+        if isinstance(other, _LazyWorkItem):
+            other._load()
+        return dict.__eq__(self, other)
     def __ne__(self, other): return not self == other
     def __repr__(self): self._load(); return dict.__repr__(self)
     def __deepcopy__(self, memo): self._load(); return super().__deepcopy__(memo)

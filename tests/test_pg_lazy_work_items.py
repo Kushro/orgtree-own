@@ -169,4 +169,31 @@ class LazyRows(unittest.TestCase):
         self.assertEqual(self.row()['nested']['values'],[1,13])
 
 
+    def test_cold_equality_and_inequality_load_both_operands(self):
+        for different in (False, True):
+            for unequal in (False, True):
+                with self.subTest(different=different, unequal=unequal):
+                    left=store._load_sqlite_org(self.slug,lazy_work=True).d['work_items'][0]
+                    right=store._load_sqlite_org(self.slug,lazy_work=True).d['work_items'][int(different)]
+                    self.assertFalse(left._loaded)
+                    self.assertFalse(right._loaded)
+                    actual=(left != right) if unequal else (left == right)
+                    self.assertEqual(actual,different if unequal else not different)
+                    self.assertTrue(left._loaded)
+                    self.assertTrue(right._loaded)
+
+    def test_cold_equality_rejects_stale_right_operand(self):
+        for unequal in (False, True):
+            with self.subTest(unequal=unequal):
+                right=store._load_sqlite_org(self.slug,lazy_work=True).d['work_items'][0]
+                self.assertFalse(right._loaded)
+                fresh=store.load_org(self.slug)
+                fresh.d['work_items'][0]['rev'] += 1
+                store.save_org(fresh)
+                left=store._load_sqlite_org(self.slug,lazy_work=True).d['work_items'][0]
+                with self.assertRaises(store.StaleWrite):
+                    if unequal: left != right
+                    else: left == right
+                self.assertEqual(self.row()['rev'],fresh.d['work_items'][0]['rev'])
+
 if __name__=='__main__': unittest.main()
