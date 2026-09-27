@@ -268,8 +268,9 @@ def due(org: Org, now_ts: float | None = None) -> bool:
     # WORK_SCOPE_INLINE inline, or a legacy inline scope_archive)? The heal
     # runs inside the same transaction, so without this clause it would wait
     # for something to become archivable (pg-workitems review N1).
-    if any(it.get("scope_archive")
-           or len(it.get("scope") or []) > org.WORK_SCOPE_INLINE
+    if any(it.scope_needs_heal(org.WORK_SCOPE_INLINE)
+           if isinstance(it, store._LazyWorkItem) else
+           bool(it.get("scope_archive")) or len(it.get("scope") or []) > org.WORK_SCOPE_INLINE
            for it in active):
         return True
     return any(org._work_eligible(it, now_ts)  # pyright: ignore[reportPrivateUsage]
@@ -286,7 +287,9 @@ def sweep(slug: str, now_ts: float | None = None, *,
     the `work_items` lock. `snapshot` is the caller's current lock-free read
     of the org, when it already has one."""
     try:
-        snap = snapshot if snapshot is not None else store.cached_org(slug)
+        snap = snapshot if snapshot is not None else (
+            store.load_runtime_org(slug) if store.STORE_BACKEND == "postgres"
+            else store.cached_org(slug))
         if not due(snap, now_ts):
             return []
     except Exception:                                   # noqa: BLE001

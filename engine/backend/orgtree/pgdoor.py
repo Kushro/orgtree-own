@@ -259,6 +259,7 @@ class TxSpec:
 
 SpecFn = Callable[[Any, Any, "dict[str, Any]"], TxSpec]
 LOCKS: "dict[str, TxSpec | SpecFn]" = {}
+SNAPSHOT_FREE: set[str] = set()
 BODIES: "dict[str, Callable[[AgentTx], Any]]" = {}
 KIOSK_EXEMPT: "set[str]" = set()
 # route only the calls a predicate accepts (one tool whose modes belong to
@@ -282,6 +283,7 @@ class Widen(Exception):
 def declare(name: str, spec: "TxSpec | SpecFn",
             body: "Callable[[AgentTx], Any] | None" = None, *,
             kiosk_exempt: bool = False,
+            needs_snapshot: bool = True,
             when: "Callable[[dict[str, Any]], bool] | None" = None,
             before: "Callable[[Any, dict[str, Any]], dict[str, Any] | None] | None"
             = None) -> None:
@@ -294,6 +296,9 @@ def declare(name: str, spec: "TxSpec | SpecFn",
     THEMSELVES, once per call, not only the `agent_call` hook — so a family
     that calls `agent_tx`/`op_tx` directly gets it too, and must not also
     run it by hand.
+    `needs_snapshot=False`: the spec is proven to depend only on arguments;
+    it receives None and avoids a whole-org preflight read. The locked body
+    still rechecks every decision and widens through the usual rollback path.
     `kiosk_exempt` (lead decision 18.8): the tool is PROVEN unable to move
     top-level holdings, so the door skips the kiosk credit-cap check for it —
     the family carries the proof. Re-declaring a name with a DIFFERENT spec
@@ -304,6 +309,10 @@ def declare(name: str, spec: "TxSpec | SpecFn",
             old_body is not None and body is not None and old_body != body):
         raise ValueError(f"pgdoor: {name!r} is already declared")
     LOCKS[name] = spec
+    if needs_snapshot:
+        SNAPSHOT_FREE.discard(name)
+    else:
+        SNAPSHOT_FREE.add(name)
     if body is not None:
         BODIES[name] = body
     if kiosk_exempt:
@@ -374,7 +383,7 @@ def _resolve(name: str, slug: str, body: Any, a: dict[str, Any]) -> TxSpec:
                           f"still runs under DOC_LOCK")
     if isinstance(spec, TxSpec):
         return spec
-    return spec(_snapshot(slug), body, a)
+    return spec(None if name in SNAPSHOT_FREE else _snapshot(slug), body, a)
 
 
 # the transaction open on this thread/context, so a writer called from

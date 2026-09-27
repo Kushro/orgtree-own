@@ -36,7 +36,7 @@ TOOL = "orgtree_work"
 def before(call: Any, _a: dict[str, Any]) -> None:
     """The archive move as its own transaction, before the call's — opened
     only when the door's own snapshot has something due (S-D)."""
-    worktx.sweep(call.org, snapshot=pgdoor._snapshot(call.org))  # pyright: ignore[reportPrivateUsage]
+    worktx.sweep(call.org)
 
 
 def spec(_snapshot: Any, call: Any, a: dict[str, Any]) -> pgdoor.TxSpec:
@@ -82,4 +82,4 @@ def declare(identity_ready: Callable[[Any, str], Any],
             notify: Callable[[str, str, str], None]) -> None:
     """Register `orgtree_work` on the door (api calls this once at import)."""
     pgdoor.declare(TOOL, spec, body=body(identity_ready, mutate, notify),
-                   before=before)
+                   before=before, needs_snapshot=False)

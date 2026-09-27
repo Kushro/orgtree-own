@@ -198,4 +198,107 @@ class LazyRows(unittest.TestCase):
                     else: left == right
                 self.assertEqual(self.row()['rev'],fresh.d['work_items'][0]['rev'])
 
+    def test_runtime_projection_skips_bodies_but_rejects_later_version(self):
+        seen,watch=self.watch()
+        with watch:
+            old=store.load_runtime_org(self.slug,('mail','notices'))
+        self.assertFalse(any('ANY' in sql or 'xmin' in sql for sql,_ in seen),seen)
+        self.assertEqual(old.nodes['a']['id'],'a')
+        fresh=store.load_org(self.slug)
+        fresh.d['work_items'][0]['rev']=19
+        store.save_org(fresh)
+        with self.assertRaises(store.StaleWrite): old.d['work_items'][0]['rev']
+        self.assertEqual(self.row()['rev'],19)
+
+    def test_runtime_preloaded_mail_stays_in_snapshot(self):
+        fresh=store.load_org(self.slug)
+        fresh.d['mail']={'a':[{'id':'before','body':'one'}]}
+        store.save_org(fresh)
+        old=store.load_runtime_org(self.slug,('mail',))
+        fresh=store.load_org(self.slug)
+        fresh.d['mail']['a'].append({'id':'after','body':'two'})
+        store.save_org(fresh)
+        self.assertEqual([m['id'] for m in old.d['mail']['a']],['before'])
+        self.assertEqual([m['id'] for m in store.load_runtime_org(self.slug,('mail',)).d['mail']['a']],['before','after'])
+
+    def test_runtime_escape_hatch_retains_eager_snapshot(self):
+        with patch.object(store,'ORGTX_RESCOPE',False):
+            old=store.load_runtime_org(self.slug)
+        fresh=store.load_org(self.slug)
+        fresh.d['work_items'][0]['rev']=23
+        store.save_org(fresh)
+        self.assertEqual(old.d['work_items'][0]['rev'],1)
+
+    def test_sweep_metadata_preserves_scope_heal_and_mutated_scope(self):
+        from orgtree import worktx
+        org=store.load_org(self.slug)
+        org.d['work_items'][0]['scope']=[{'seq':n} for n in range(org.WORK_SCOPE_INLINE+1)]
+        store.save_org(org)
+        store.load_runtime_org(self.slug)  # validate the new version once
+        lazy=store.load_runtime_org(self.slug)
+        self.assertTrue(worktx.due(lazy))
+        item=lazy.d['work_items'][0]
+        self.assertFalse(item._loaded)
+        item['scope']=[]
+        self.assertFalse(worktx.due(lazy))
+        item['scope_archive']=[{'seq':1}]
+        self.assertTrue(worktx.due(lazy))
+
+    def test_sweep_metadata_preserves_age_status_and_question_hold(self):
+        from orgtree import worktx
+        org=store.load_org(self.slug)
+        item=org.d['work_items'][0]
+        item.update(status='done',docket_at='2020-01-01T00:00:00+00:00',scope=[])
+        store.save_org(org)
+        store.load_runtime_org(self.slug)
+        lazy=store.load_runtime_org(self.slug)
+        self.assertTrue(worktx.due(lazy))
+        self.assertFalse(lazy.d['work_items'][0]._loaded)
+        org=store.load_org(self.slug)
+        org.d['asks']=[{'id':'q','node':'a','status':'open','questions':[{'work_item':'one'}]}]
+        store.save_org(org)
+        store.load_runtime_org(self.slug)
+        self.assertFalse(worktx.due(store.load_runtime_org(self.slug)))
+        org=store.load_org(self.slug)
+        org.d['asks']=[]
+        org.d['work_items'][0]['status']='in_progress'
+        store.save_org(org)
+        store.load_runtime_org(self.slug)
+        self.assertFalse(worktx.due(store.load_runtime_org(self.slug)))
+
+    def test_sweep_metadata_rechecks_reopen_under_transaction(self):
+        from orgtree import worktx
+        org=store.load_org(self.slug)
+        org.d['work_items'][0].update(status='done',docket_at='2020-01-01T00:00:00+00:00')
+        store.save_org(org)
+        store.load_runtime_org(self.slug)
+        old=store.load_runtime_org(self.slug)
+        self.assertTrue(worktx.due(old))
+        org=store.load_org(self.slug)
+        org.d['work_items'][0]['status']='in_progress'
+        store.save_org(org)
+        self.assertEqual(worktx.sweep(self.slug,snapshot=old),[])
+        self.assertEqual(self.row()['status'],'in_progress')
+
+    def test_argument_only_specs_skip_snapshot_and_default_specs_keep_it(self):
+        from orgtree import pgdoor
+        seen=[]
+        def spec(snapshot,call,args):
+            seen.append(snapshot)
+            return pgdoor.TxSpec(nodes=(args['node'],))
+        names=('lazy-args-only','lazy-needs-snapshot')
+        try:
+            pgdoor.declare(names[0],spec,needs_snapshot=False)
+            pgdoor.declare(names[1],spec)
+            sentinel=object()
+            with patch.object(pgdoor,'_snapshot',return_value=sentinel) as read:
+                self.assertEqual(pgdoor._resolve(names[0],self.slug,None,{'node':'a'}).nodes,('a',))
+                read.assert_not_called()
+                pgdoor._resolve(names[1],self.slug,None,{'node':'a'})
+                read.assert_called_once_with(self.slug)
+            self.assertIsNone(seen[0]);self.assertIs(seen[1],sentinel)
+        finally:
+            for name in names:
+                pgdoor.LOCKS.pop(name,None);pgdoor.SNAPSHOT_FREE.discard(name)
+
 if __name__=='__main__': unittest.main()

@@ -2322,8 +2322,9 @@ class _NodeDict(dict):
 
 # Small metadata only: no evidence/body cache and no connection retained by an Org.
 # Version keys include the data root, database/schema and PostgreSQL tuple identity.
-_WORK_ITEM_META: dict[tuple[Any, ...], str] = {}
-_WORK_ATTENTION_FIELDS = ("id", "slug", "manual_attention", "notification_attention_active", "notification_attention_epoch")
+_WORK_ITEM_META: dict[tuple[Any, ...], tuple[str, tuple[int, bool]]] = {}
+_WORK_ATTENTION_FIELDS = ("id", "slug", "manual_attention", "notification_attention_active", "notification_attention_epoch",
+                          "status", "docket_at", "updated_at")
 
 
 def _work_raw(raw: Any) -> Any:
@@ -2332,14 +2333,16 @@ def _work_raw(raw: Any) -> Any:
 
 class _WorkRowRef(str):
     """An unread row's MVCC identity; never a value allowed in a SQL write."""
-    def __new__(cls, slug: str, key: str, version: tuple[str, ...], metadata: str):
+    def __new__(cls, slug: str, key: str, version: tuple[str, ...], metadata: str,
+                scope_summary: tuple[int, bool] | None = None):
         obj = super().__new__(cls, "!unread-work-row:" + repr((slug, key, version)))
         obj.slug, obj.key, obj.version, obj.metadata = slug, key, version, metadata
         obj.raw = None
+        obj.scope_summary = scope_summary
         return obj
 
     def __getnewargs__(self):
-        return self.slug, self.key, self.version, self.metadata
+        return self.slug, self.key, self.version, self.metadata, self.scope_summary
 
     def resolve(self) -> str:
         if self.raw is None:
@@ -2384,7 +2387,7 @@ def _load_work_refs(conn: Any, slug: str, rows: dict[str, str]) -> None:
         if metadata is None:
             unknown.append(key)
         else:
-            rows[key] = _WorkRowRef(slug, key, tuple(version), metadata)
+            rows[key] = _WorkRowRef(slug, key, tuple(version), *metadata)
     if unknown:
         fetched_rows = conn.execute(
             "SELECT key, val, xmin::text, ctid::text, tableoid::text FROM doc WHERE key = ANY(?)",
@@ -2407,7 +2410,8 @@ def _load_work_refs(conn: Any, slug: str, rows: dict[str, str]) -> None:
             elif len(metadata) <= 2048:
                 if len(_WORK_ITEM_META) >= 2048:
                     _WORK_ITEM_META.clear()
-                _WORK_ITEM_META[identities[key]] = metadata
+                _WORK_ITEM_META[identities[key]] = (metadata,
+                    (len(value.get("scope") or []), bool(value.get("scope_archive"))))
             rows[key] = raw
         if not ready:
             # Legacy attention initialization retains the full coherent load.
@@ -2445,6 +2449,14 @@ class _LazyWorkItem(_WorkItem):
             dict.update(self, json.loads(raw))
             self._work_raw = raw
             self._loaded = True
+
+    def scope_needs_heal(self, inline: int) -> bool:
+        # Exact-version scalar summary, never a substitute scope list exposed
+        # through the mapping. Once materialized, read its actual local edits.
+        if not self._loaded and self._work_ref.scope_summary is not None:
+            count, archived = self._work_ref.scope_summary
+            return archived or count > inline
+        return bool(self.get("scope_archive")) or len(self.get("scope") or []) > inline
 
     def __getitem__(self, key):
         # Mutable metadata must never escape without the real row/dirty owner.
@@ -5392,6 +5404,24 @@ def log_append(d: dict[str, Any], sect: str, row: Any) -> None:
         d.setdefault(sect, []).append(row)
         return
     appender(sect, row)
+
+
+def load_runtime_org(slug: str, sections: Iterable[str] = ()) -> Org:
+    """Explicit read-only runtime view with version-checked deferred work rows.
+
+    Nodes, eager sections and named logs share one short snapshot. Work bodies
+    are fetched on access and MUST still match that snapshot's row version,
+    otherwise StaleWrite is raised. This is not a replacement for an ordinary
+    coherent snapshot, cache or export. Unknown versions are validated once;
+    only bounded metadata is cached. No connection survives this call.
+    Non-PG and the rescope escape hatch retain normal eager snapshot behavior.
+    """
+    if isinstance(sections, str):
+        raise TypeError("sections must be an iterable of section names")
+    selected = tuple(sections)
+    if STORE_BACKEND == "postgres" and ORGTX_RESCOPE:
+        return _load_sqlite_org(slug, selected, lazy_work=True)
+    return load_org_snapshot(slug, selected)
 
 
 def load_org_snapshot(slug: str, sections: Iterable[str]) -> Org:

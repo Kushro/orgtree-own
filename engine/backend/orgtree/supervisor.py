@@ -3421,7 +3421,7 @@ def scratch_dir(slug: str, nid: str) -> str:
         # root; the CLI runs as agent) — hand a NEW node dir over immediately,
         # or its first turn cannot write its own cwd (live bug 2026-08-04)
         try:
-            org = store.load_org(slug)
+            org = store.load_runtime_org(slug)
             sbx.chown_agent(org, nid)
         except Exception:                                    # noqa: BLE001
             pass          # container down → ensure_container's heal covers it
@@ -11074,7 +11074,7 @@ def scan_manual_records(slug: str, nid: str) -> dict[str, int]:
     try:
         # PG-3d: a lock-free read; the confirmation below is its own
         # row transaction (_confirm_delivered)
-        org = orgtx.org_read(slug)
+        org = store.load_runtime_org(slug)
         found = _manual_candidates(org, nid)
         if not found:
             return counts
@@ -11415,7 +11415,7 @@ def _has_deliverable(slug: str, nid: str, mail_ids=None) -> bool:
     whether the envelope will have a body. A boxed notice does render, so it
     counts."""
     try:
-        org = store.load_org(slug)
+        org = store.load_runtime_org(slug, ("mail", "notices"))
     except Exception:                                        # noqa: BLE001
         return True     # can't tell — deliver rather than silently swallow
     if nid not in org.nodes:
@@ -20488,7 +20488,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
         # register only read it). A stale read was already tolerated: a
         # reclaim it cannot prove stays pending, an unproven identity is
         # protection (the comment above).
-        admission_org = store.cached_org(slug)
+        admission_org = store.load_runtime_org(slug)
     except Exception:                                    # noqa: BLE001
         admission_org = None
     with _state_lock:
@@ -32700,7 +32700,7 @@ def scan_steer_records(slug: str, nid: str) -> dict[str, int]:
         return out
     try:
         try:
-            org = orgtx.org_read(slug)          # lock-free snapshot
+            org = store.load_runtime_org(slug)  # explicit runtime projection
         except LedgerError:
             return out
         if nid not in org.nodes:
