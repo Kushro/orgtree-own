@@ -5389,7 +5389,8 @@ def read_mail_tails(slug: str, nid: str, keep: int, slack: int = 40
             sent_rows = conn.execute(
                 "WITH tail AS MATERIALIZED (SELECT seq,sent_at,owner_pos FROM mail_sent "
                 "WHERE sender=? ORDER BY sent_at DESC,owner_pos DESC,seq DESC LIMIT ?) "
-                "SELECT l.owner,l.val FROM tail JOIN log_d l ON l.seq=tail.seq "
+                "SELECT l.owner,l.val FROM tail CROSS JOIN LATERAL "
+                "(SELECT owner,val FROM log_d WHERE seq=tail.seq LIMIT 1) l "
                 "ORDER BY tail.sent_at DESC,tail.owner_pos DESC,tail.seq DESC",
                 (nid, cap)).fetchall()
         else:

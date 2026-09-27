@@ -80,12 +80,18 @@ class MailSentIndex(unittest.TestCase):
         self.assert_projection()
 
     def test_sender_index_bounds_equal_timestamp_history(self):
+        self.check_bounded_plan(1000)
+
+    def test_sender_index_bounds_tenfold_equal_timestamp_history(self):
+        self.check_bounded_plan(10000)
+
+    def check_bounded_plan(self, history):
         # A large same-time group is the adversarial case for a partial index
         # followed by owner-tie sorting. The complete projection key avoids it.
         with store._POOL.acquire(self.slug) as conn:
             conn.execute('BEGIN')
             conn.execute("INSERT INTO log_d(sect,owner,val) SELECT 'mail_log','history',? "
-                         "FROM generate_series(1,1000)", (json.dumps({'from': 'sender', 'at': 'same'}),))
+                         "FROM generate_series(1,?)", (json.dumps({'from': 'sender', 'at': 'same'}), history))
             conn.execute('ANALYZE mail_sent')
             conn.execute('COMMIT')
         statements = []
