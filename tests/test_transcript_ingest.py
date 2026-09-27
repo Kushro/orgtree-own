@@ -194,6 +194,54 @@ class CaptureTests(unittest.TestCase):
             rows=conn.execute('SELECT body FROM transcript_records WHERE source=?',(source,)).fetchall()
         self.assertEqual([json.loads(row[0])['text'] for row in rows],['recover me'])
 
+    def test_source_projection_uses_existing_identity_without_whole_org(self):
+        self.write(0, 4)
+        slug = self.org.d['slug']
+        expected = source_key(store.load_org(slug), 'agent')
+        with patch.object(store, 'cached_org', side_effect=AssertionError('whole Org')):
+            view = ingest._source_view(slug, 'agent')
+            self.assertEqual(source_key(view, 'agent'), expected)
+            self.assertEqual(sup.transcript_path_for_node(view, 'agent'), str(self.path))
+            self.assertTrue(ingest.capture(slug, 'agent', backfill=True))
+        self.assertEqual(len(self.rows()), 4)
+
+    def test_source_projection_excludes_unrelated_payloads(self):
+        slug = self.org.d['slug']
+        org = store.load_org(slug)
+        org.node('agent')['charter'] = 'unrelated' * 10000
+        store.save_org(org)
+        doc = store.read_transcript_source(slug, 'agent')
+        self.assertNotIn('charter', doc['nodes']['agent'])
+        self.assertNotIn('work_items', doc)
+        self.assertLess(len(json.dumps(doc)), 2000)
+
+    def test_source_projection_missing_identity_uses_legacy_resolution(self):
+        slug = self.org.d['slug']
+        doc = store.read_transcript_source(slug, 'agent')
+        doc['nodes']['agent'].pop('transcript_incarnation', None)
+        original = store.cached_org
+        calls = []
+        def legacy(value):
+            calls.append(value)
+            return original(value)
+        with patch.object(store, 'read_transcript_source', return_value=doc), \
+             patch.object(store, 'cached_org', side_effect=legacy):
+            self.assertEqual(ingest._source_view(slug, 'agent').node('agent')['session_id'],
+                             self.org.node('agent')['session_id'])
+        self.assertEqual(calls, [slug])
+
+    def test_source_projection_preserves_sandbox_and_bound_account(self):
+        slug = self.org.d['slug']
+        org = store.load_org(slug)
+        org.d['sandbox'] = {'enabled': True, 'secret': 'test-only'}
+        org.node('agent')['account'] = 'missing-profile-test-only'
+        store.save_org(org)
+        with patch.object(store, 'cached_org', side_effect=AssertionError('whole Org')):
+            view = ingest._source_view(slug, 'agent')
+            self.assertEqual(sup._transcript_root(view, 'agent'),
+                             sup._transcript_root(org, 'agent'))
+            self.assertEqual(view.node('agent')['account'], 'missing-profile-test-only')
+
     def test_unread_suffix_retries_without_another_file_change(self):
         import builtins
         self.write(0,3);self.backfill();self.assertFalse(self.backfill())

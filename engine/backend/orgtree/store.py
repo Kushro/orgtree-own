@@ -5432,6 +5432,42 @@ def read_runtime_node(slug: str, nid: str, sections: Iterable[str] = ()) -> dict
     return cast("dict[str, Any] | None", _bounded_read(slug, body))
 
 
+
+_TRANSCRIPT_NODE_FIELDS = (
+    "state", "session_id", "model", "account", "desktop_import",
+    "or_harness", "transcript_incarnation", "reply_incarnation", "generation",
+)
+
+
+def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
+    """Coherent source-resolution inputs, without charter, docket or mail.
+
+    This is deliberately NOT an Org. Its consumer preserves the legacy mint
+    path when required identities are absent. A single statement captures
+    node identity and org path settings together on READ COMMITTED PG.
+    """
+    def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+        paths = ",".join("'$." + field + "'" for field in _TRANSCRIPT_NODE_FIELDS)
+        rows = dict(conn.execute(
+            "SELECT '__source_node', json_extract(val," + paths + ") "
+            "FROM nodes WHERE id=? UNION ALL SELECT key,val FROM doc "
+            "WHERE key IN ('nodes','reply_incarnation','sandbox','kiosk')",
+            (nid,)).fetchall())
+        if "nodes" in rows:
+            return None
+        raw = rows.pop("__source_node", None)
+        if raw is None:
+            return None
+        node = dict(zip(_TRANSCRIPT_NODE_FIELDS, json.loads(raw)))
+        # SQL null for an absent optional field must remain an absent key:
+        # existing path resolvers use .get(..., {}) for nested metadata.
+        node = {key: value for key, value in node.items() if value is not None}
+        result = {key: json.loads(value) for key, value in rows.items()}
+        result.update(slug=slug, nodes={nid: node})
+        return result
+    return cast("dict[str, Any] | None", _bounded_read(slug, body))
+
+
 def load_runtime_org(slug: str, sections: Iterable[str] = ()) -> Org:
     """Explicit read-only runtime view with version-checked deferred work rows.
 

@@ -68,6 +68,33 @@ def _is_settled(sources, views, fingerprint) -> bool:
     return True
 
 
+
+class _SourceView:
+    """Private read-only resolver input; never stored or normalized as Org."""
+    _shared_snapshot = True
+
+    def __init__(self, doc):
+        self.d = doc
+        self.nodes = doc['nodes']
+
+    def node(self, nid):
+        return self.nodes[nid]
+
+
+def _source_view(slug, nid):
+    from . import store
+    doc = store.read_transcript_source(slug, nid)
+    if doc is not None:
+        node = doc['nodes'][nid]
+        # Source naming and legacy identity initialization remain owned by
+        # their existing routines. Never let a partial view enter a mint.
+        if (doc.get('reply_incarnation') and node.get('transcript_incarnation')
+                and node.get('reply_incarnation') and node.get('model')
+                and node.get('session_id') and 'generation' in node):
+            return _SourceView(doc)
+    return store.cached_org(slug)
+
+
 def capture(slug, nid, *, beginning=False, backfill=False):
     """Capture one node's transcript sources. Returns False only for a
     backfill slice skipped because the node is settled (see module doc)."""
@@ -80,7 +107,7 @@ def capture(slug, nid, *, beginning=False, backfill=False):
     # read-only resolution (session id, transcript paths) off the shared
     # snapshot: this runs every second for every busy node plus 8 backfill
     # slices, and each call re-parsed the whole document (REPORT.md #7)
-    org = store.cached_org(slug)
+    org = _source_view(slug, nid)
     node = org.node(nid)
     if not node.get('session_id'):
         return False
