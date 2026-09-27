@@ -216,3 +216,7 @@ class Counts(unittest.TestCase):
         self.assertEqual(self.counts()['active'],1)
         with patch.object(workread,'reconcile',side_effect=AssertionError('repeated raw scan')):
             workread.bootstrap(self.c)
+
+
+if __name__ == '__main__':
+    unittest.main()
