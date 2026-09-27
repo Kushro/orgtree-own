@@ -71,6 +71,28 @@ class PolicyReads(unittest.TestCase):
             self.assertEqual(policy_reads.storage_org(self.slug).nodes, {})
         self.assertEqual(len(roles), 2)
 
+    def test_file_roots_lineage_sandbox_and_bound_account_match_full_org(self):
+        org = self.configure()
+        org.d['workspace'] = root.name
+        org.node('worker')['scope']['add_dirs'] = [{'path': root.name, 'mode': 'ro'}]
+        org.node('worker')['account'] = 'missing:test-lane'
+        store.save_org(org)
+        full = store.load_org(self.slug)
+        got = policy_reads.watchdog_org(self.slug)
+        with patch.object(store, 'load_org', side_effect=AssertionError('full read')), \
+                patch.object(store, 'load_runtime_org', side_effect=AssertionError('full read')), \
+                patch.object(sup.sbx, 'on_disk', side_effect=AssertionError('disk full read')):
+            self.assertEqual(sup.wd_file_roots(got, 'worker'), sup.wd_file_roots(full, 'worker'))
+            self.assertEqual(sup.scratch_dir(self.slug, 'worker@2', policy_org=got),
+                             sup.scratch_dir(self.slug, 'worker', policy_org=got))
+            with self.assertRaisesRegex(RuntimeError, 'bound to no account'):
+                sup.spawn_env(got, bind_node='worker')
+        org.d['sandbox'] = {'enabled': True}
+        store.save_org(org)
+        got = policy_reads.watchdog_org(self.slug)
+        dog = dict(got.d['watchdogs'][0], kind='file', target=root.name)
+        self.assertIn('now runs sandboxed', sup._wd_owner_lost(got, dog))
+
     def test_owner_and_watchdog_use_one_statement_snapshot(self):
         self.configure()
         real = pgstore.PgConn.execute
