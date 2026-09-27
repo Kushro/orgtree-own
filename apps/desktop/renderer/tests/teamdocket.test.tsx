@@ -37,6 +37,7 @@ import { OrgCanvas } from '../src/canvas/OrgCanvas'
 import { resetConvos } from '../src/convo'
 import { forgetPins } from '../src/canvas/pins'
 import { setCrowdPilesOn } from '../src/canvas/shared'
+import { treeSelections } from '../src/treeselection'
 import type { TreeNode, TreePayload, WorkItem } from '../src/types'
 
 const noop = () => {}
@@ -289,7 +290,7 @@ test('§6 the viewer\'s own tree is the boundary — an invisible agent contribu
 
 // ============================================================ the surface
 async function mountPanel(t: TestContext, roots: TreeNode[], nid: string,
-  payload: Record<string, unknown>) {
+  payload: Record<string, unknown>, foreground?: TreePayload['foreground']) {
   const had = (globalThis as { fetch?: typeof fetch }).fetch;
   (globalThis as unknown as { fetch: typeof fetch }).fetch = compatibilityWorkFixture(((url: string) => {
     const headers = new Headers()
@@ -299,7 +300,7 @@ async function mountPanel(t: TestContext, roots: TreeNode[], nid: string,
   t.after(() => { (globalThis as { fetch?: typeof fetch }).fetch = had })
   let closed = 0
   const v = await mountView(
-    <TeamDocketModal slug="mine" nid={nid} tree={tree(roots)} toast={noop}
+    <TeamDocketModal slug="mine" nid={nid} tree={{ ...tree(roots), ...(foreground ? { foreground } : {}) }} toast={noop}
       close={() => { closed++ }} refs={{ world: { org: 'mine' }, onOpen: noop }} />,
     (h) => h)
   t.after(() => v.unmount())
@@ -356,6 +357,28 @@ panelTest('§9 an EMPTY team says so, and never falls back to the full docket', 
     'the empty state names the TEAM rule, not the single-agent one')
   assert.doesNotMatch(text, /lead-task|deep-task|outsider-task/,
     'and shows none of the work it filtered out')
+})
+
+panelTest('§9c a selected tree that omits a retired owner asks for it and never shows a shorter team as final', async (t) => {
+  const view = (present: string[], missing: string[] = []) => ({ catalog_revision: 'c1',
+    present, missing, hidden_retired_roots: 0, retired_total: 1 })
+  const all = ['lead', 'mid', 'deep', 'deeper', 'sib', 'outsider', 'outkid']
+  const work = { items: [owned('mid-task', 'mid'), owned('ghost-task', 'ghost')] }
+  const pending = await mountPanel(t, ORG, 'lead', work, view(all))
+  assert.deepEqual(rowNames(pending.el), ['mid-task'])
+  assert.match(pending.el.textContent ?? '', /Checking team membership for 1 retired owner/)
+  const fallback = { include: [], hideRetired: false, fronts: {} }
+  assert.deepEqual(treeSelections.read('mine', fallback).selection.include, ['ghost'],
+    'the mounted panel asks the selected tree for exactly the omitted owner')
+  const placed = ORG.map(root => root.id !== 'lead' ? root : { ...root, children: [...root.children,
+    mkNode('ghost', { parent: 'lead', state: 'archived' })] })
+  const found = await mountPanel(t, placed, 'lead', work, view([...all, 'ghost']))
+  assert.deepEqual(rowNames(found.el), ['ghost-task', 'mid-task'], 'once placed, the retiree's work is the team's')
+  assert.doesNotMatch(found.el.textContent ?? '', /Checking team membership/)
+  const absent = await mountPanel(t, ORG, 'sib', { items: [owned('ghost-task', 'ghost')] }, view(all, ['ghost']))
+  assert.deepEqual(rowNames(absent.el), [])
+  assert.match(absent.el.textContent ?? '', /no docket items are assigned to sib/,
+    'explicit absence is final: the ordinary empty state returns')
 })
 
 panelTest('§9b a team of one with work still shows it', async (t) => {

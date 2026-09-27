@@ -22,7 +22,8 @@
 // can only ever show a subset of what the full docket would have shown them.
 // See `teamNodeIds` in docket.tsx for why an unknown root is a team of one.
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { treeSelections } from '../treeselection'
 import { useWorkItems } from './useworkitems'
 import type { ToastFn, TreePayload } from '../types'
 import { DocketIcon } from '../icons'
@@ -52,18 +53,39 @@ export function TeamDocketModal({ slug, nid, tree, toast, close, refs }: {
     [work, nid, tree.roots, showArchived])
   const actorIds = useMemo(() => itemActorIds(team), [team])
   const facts = useNodeFacts(slug, tree, actorIds)
+  // A SELECTED tree may omit retired owners, and membership needs their
+  // ancestry. This mounted panel asks the tree selection for exactly those
+  // owners; until the tree carries them or reports them missing, the panel
+  // says it is still checking rather than presenting a shorter team.
+  const unplaced = useMemo(() => {
+    const view = tree.foreground
+    if (!view || !work) return []
+    const known = new Set([...view.present, ...view.missing])
+    const owners = [...(work.items ?? []), ...(work.backlogged ?? []),
+      ...(showArchived ? (work.archived ?? []) : [])].map(it => it.owner?.node)
+    return [...new Set(owners)].filter((id): id is string => !!id && !known.has(id)).sort()
+  }, [tree.foreground, work, showArchived])
+  const unplacedKey = JSON.stringify(unplaced)
+  useEffect(() => {
+    if (!unplaced.length) return
+    const owner = {}
+    treeSelections.set(slug, owner, { include: unplaced })
+    return () => treeSelections.release(slug, owner)
+  }, [slug, unplacedKey])   // eslint-disable-line react-hooks/exhaustive-deps
   const routes: RefRoutes = { world: refs.world, onOpen: r => {
     closeIfCentred('team-docket', close, slug)
     refs.onOpen(r)
   } }
   return <PinFrame kind="team-docket" restore={{ agent: nid, generation: flatten(withDraftTree(tree, null), tree.tiers).get(nid)?.generation }} title={`${nid} · Team docket`} panel="settings wide" close={close}>
     <h3 data-copy-agent-name={nid}><DocketIcon fontSize="inherit" /> {nid} <span className="dim">· Team docket</span></h3>
+    {unplaced.length > 0 && <div role="status" className="hint">
+      Checking team membership for {unplaced.length} retired {unplaced.length === 1 ? 'owner' : 'owners'}…</div>}
     <AgentDocketView slug={slug} nid={nid} mine={team} facts={facts} toast={toast}
       showArchived={showArchived} onShowArchived={setShowArchived}
       onShowBacklog={setShowBacklog}
       references={work?.references} boundedReferences workRevision={work?.revision}
       onChanged={() => setBump(n => n + 1)} refs={routes}
-      emptyText={<>
+      emptyText={unplaced.length ? <>checking whether retired owners belong to this team…</> : <>
         no docket items are assigned to {nid} or to any agent below it —
         this team has nothing on the docket
       </>}
