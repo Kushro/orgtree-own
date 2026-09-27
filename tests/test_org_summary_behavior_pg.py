@@ -52,10 +52,13 @@ class SummaryBehavior(unittest.TestCase):
 
     def test_public_row_excludes_every_admin_only_field(self):
         self.seed()
+        self.setting('net_identity', {'slug': 'public-name', 'secret': 'NETWORK-PRIVATE'})
         row = self.row(public=True)
         self.assertEqual(set(row), {'slug', 'name', 'nodes', 'live', 'kiosk', 'net_slug', 'created'})
         self.assertEqual((row['nodes'], row['live'], row['kiosk']), (3, 1, True))
         self.assertNotIn('KIOSK-PRIVATE', json.dumps(row))
+        self.assertEqual(row['net_slug'], 'public-name')
+        self.assertNotIn('NETWORK-PRIVATE', json.dumps(row))
 
     def test_empty_kiosk_has_presence_and_admin_normalization_but_public_stays_small(self):
         self.setting('kiosk', {})
