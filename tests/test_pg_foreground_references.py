@@ -67,6 +67,10 @@ class ForegroundReferencesPG(unittest.TestCase):
             self.assertEqual(row['tier'], 'luna')
         self.assertEqual(payload['references']['bearer']['axis'], 'lineage')
         self.assertEqual(payload['references']['revived']['axis'], 'org')
+        # A plain retiree (archived, no successor) stays on the org axis.
+        self.assertEqual(payload['references']['old']['state'], 'archived')
+        self.assertIsNone(payload['references']['old']['successor'])
+        self.assertEqual(payload['references']['old']['axis'], 'org')
         self.assertNotIn('PRIVATE', response.text)
         self.assertEqual(self.get([]).json()['references'], {})
         self.assertEqual(self.get(['old'] * 129).status_code, 400)
