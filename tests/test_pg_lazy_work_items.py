@@ -148,7 +148,8 @@ class LazyRows(unittest.TestCase):
                     other.execute(f'UPDATE org_{c.org_id}.doc SET val=%s WHERE key=%s',(store._dumps(value),workrows.PREFIX+'one'))
             return cur
         with patch.object(pgstore.PgConn,'execute',execute):
-            with self.assertRaises(store.StaleWrite): store._load_sqlite_org(self.slug,lazy_work=True)
+            with self.assertRaises(store.StaleWrite):
+                with orgtx.org_tx(self.slug,nodes=['a']): pass
         self.assertEqual(fired,[True]);self.assertEqual(self.row()['rev'],17)
 
     def test_delete_and_replace_unread_item_preserve_original_cas(self):
