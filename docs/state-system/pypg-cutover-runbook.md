@@ -219,7 +219,12 @@ It does these, in order:
    it.
 3. Creates the database tables.
 4. Copies each org in one transaction, reads it back, and compares it byte
-   for byte.
+   for byte. Then it collects that org's planner statistics (PostgreSQL's
+   `ANALYZE`: row counts and value summaries that PostgreSQL uses to choose
+   how to run each query), so they exist before Orgtree first uses the
+   database. Orgtree checks them again at every start, before it reports ready, and
+   collects them only for an org that has none for the current schema
+   version.
 5. Writes `DATA\orgs\<slug>.pg`.
 6. Writes the cutover record `DATA\store-backend.json`.
 7. Moves every other file in `DATA\orgs\` to `DATA\pre-postgres\orgs\`,
@@ -227,6 +232,24 @@ It does these, in order:
 8. Stops PostgreSQL.
 
 The first run can take several minutes.
+
+What was measured (2026-09-27, one run each, on a disposable copy of four
+orgs totalling 238 MB): the verified import took 32.7 s with the current
+schema (migrations 0001-0009), against 20.1 s with only 0001-0003. Running
+the same command again, with every org already imported, took about 16 s.
+Python and the private PostgreSQL together peaked at about 630 MiB of private
+memory (835 MiB summed working set, which can count shared pages twice).
+Collecting planner statistics on that copy took 0.7 s; when they are
+already present it takes about 3 ms. Upgrading an already-imported database
+to newer migrations took seconds per migration. These are single
+measurements, not upper bounds: a larger or slower install can take longer,
+so allow several minutes and do not skip the backup or the checks in
+section 10. Do not count on PostgreSQL's background autovacuum to collect
+the statistics in time. It is on, but it runs on its own schedule (every
+60 s, after 50 rows plus 10% of a table have changed), and in the measured
+run it had not run yet at first inspection. Full provenance and limits:
+`artifacts/migration-history-audit-20260927/REPORT.md` and
+`statistics-real-copy.json` (local measurement packet, not in the repo).
 
 Expected: `exit=0`, plus a line
 `pgimport import: {"orgs": N, "cutover": true}`.
