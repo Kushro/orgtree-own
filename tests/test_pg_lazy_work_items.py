@@ -190,7 +190,9 @@ class LazyRows(unittest.TestCase):
                 fresh=store.load_org(self.slug)
                 fresh.d['work_items'][0]['rev'] += 1
                 store.save_org(fresh)
+                store._load_sqlite_org(self.slug,lazy_work=True)  # validate the new version
                 left=store._load_sqlite_org(self.slug,lazy_work=True).d['work_items'][0]
+                self.assertFalse(left._loaded)
                 with self.assertRaises(store.StaleWrite):
                     if unequal: left != right
                     else: left == right
