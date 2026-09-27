@@ -5104,6 +5104,31 @@ def node_row_exists(slug: str, nid: str) -> bool | None:
     return _bounded_read(slug, body)
 
 
+def read_stream_identity(slug: str, nid: str) -> dict[str, Any] | None:
+    """One node's stream identity without joining the shared Org rebuild.
+
+    Org and node incarnations MUST come from the same SQL statement: PG's
+    READ COMMITTED transaction alone does not make two SELECTs coherent.
+    Only stored identity fields are read, with no Org normalization needed.
+    None preserves the existing load/mint path for JSON, legacy node blobs,
+    missing nodes and unminted identities (the caller checks its fields).
+    """
+    def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT (SELECT val FROM doc WHERE key='reply_incarnation'), "
+            "json_extract(val,'$.reply_incarnation','$.generation',"
+            "'$.transcript_incarnation','$.session_id'), "
+            "EXISTS(SELECT 1 FROM doc WHERE key='nodes') "
+            "FROM nodes WHERE id=?", (nid,)).fetchone()
+        if row is None or row[2]:
+            return None
+        reply, generation, transcript, session = json.loads(cast(str, row[1]))
+        return {"org_reply": json.loads(row[0]) if row[0] is not None else None,
+                "node_reply": reply, "generation": generation,
+                "transcript": transcript, "session": session}
+    return cast("dict[str, Any] | None", _bounded_read(slug, body))
+
+
 def read_node_credential(slug: str, nid: str) -> dict[str, Any] | None:
     """Committed credential fields for one node, independent of cache/feed lag.
 

@@ -109,6 +109,16 @@ def identity(slug, nid):
         hit = _ident_cache.get(key)
     if hit is not None and hit[0] == seq:
         return hit[1], hit[2]
+    # A save invalidates this cache even when it only changes mail/work.
+    # Do not wait for the whole shared Org to rebuild just to read identity.
+    fields = store.read_stream_identity(slug, nid)
+    if fields and fields['org_reply'] and fields['node_reply']:
+        scope = fields['org_reply'] + ':' + fields['node_reply']
+        generation = int(fields['generation'] or 0)
+        if store.org_seq(slug) == seq:
+            with _ident_lock:
+                _ident_cache[key] = (seq, scope, generation)
+        return scope, generation
     org = store.cached_org(slug)        # read-only: DOC_LOCK is for cycles
     if not (org.d.get('reply_incarnation')
             and org.node(nid).get('reply_incarnation')):

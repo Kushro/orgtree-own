@@ -70,6 +70,14 @@ def scope_ident(slug, nid):
         hit = _scope_cache.get(key)
     if hit is not None and hit[0] == seq:
         return hit[1]
+    # Keep stream cache misses independent of unrelated Org rebuilds.
+    fields = store.read_stream_identity(slug, nid)
+    if fields and fields['transcript']:
+        value = json.dumps([fields['transcript'], fields['session']], separators=(',', ':'))
+        if store.org_seq(slug) == seq:
+            with _scope_lock:
+                _scope_cache[key] = (seq, value)
+        return value
     org = store.cached_org(slug)        # shared read-only snapshot, see below
     if not org.node(nid).get('transcript_incarnation'):
         transcript_records.incarnation(org, nid)   # mints under DOC_LOCK, saves
