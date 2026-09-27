@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from . import pgdoor, worktx
+from . import pgdoor, store, worktx
 
 TOOL = "orgtree_work"
 
@@ -36,7 +36,10 @@ TOOL = "orgtree_work"
 def before(call: Any, _a: dict[str, Any]) -> None:
     """The archive move as its own transaction, before the call's — opened
     only when the door's own snapshot has something due (S-D)."""
-    worktx.sweep(call.org)
+    if store.STORE_BACKEND == 'postgres':
+        worktx.sweep(call.org)
+    else:
+        worktx.sweep(call.org, snapshot=pgdoor._snapshot(call.org))
 
 
 def spec(_snapshot: Any, call: Any, a: dict[str, Any]) -> pgdoor.TxSpec:
