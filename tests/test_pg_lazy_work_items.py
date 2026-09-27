@@ -306,6 +306,8 @@ class LazyRows(unittest.TestCase):
         from types import SimpleNamespace
         from orgtree import api
         from fastapi import HTTPException
+        with orgtx.org_tx(self.slug,nodes=['a']) as tx:
+            tx.org.nodes['a'].update(state='live',generation=0,seat_id='fixture-seat')
         body=SimpleNamespace(org=self.slug,node='a')
         state=SimpleNamespace(agent_identity=None,bridge_slug=None)
         request=SimpleNamespace(state=state)
