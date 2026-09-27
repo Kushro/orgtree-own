@@ -738,6 +738,8 @@ def on_save_commit(conn: PgConn, changed: bool, *, work_changed: bool = False) -
         return
     conn.use()
     try:
+        from . import workread
+        workread.refresh(conn.raw, conn.org_id)
         row = conn.raw.execute(
             "UPDATE public.orgs SET revision = revision + 1, "
             "work_revision = CASE WHEN %s THEN revision + 1 ELSE work_revision END "

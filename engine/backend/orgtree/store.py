@@ -815,6 +815,8 @@ def claim_data_root(root: str | None = None) -> None:
         _c = pgstore.connect()
         try:
             pgstore.migrate(_c)
+            from . import workread
+            workread.bootstrap(_c)
         finally:
             _c.close()
         # an orgs row with no marker is not an org anyone can see: retire it
