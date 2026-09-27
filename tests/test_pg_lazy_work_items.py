@@ -201,7 +201,7 @@ class LazyRows(unittest.TestCase):
     def test_runtime_projection_skips_bodies_but_rejects_later_version(self):
         seen,watch=self.watch()
         with watch:
-            old=store.load_runtime_org(self.slug,('mail','notices'))
+            old=store.load_runtime_org(self.slug)
         self.assertFalse(any('ANY' in sql or 'xmin' in sql for sql,_ in seen),seen)
         self.assertEqual(old.nodes['a']['id'],'a')
         fresh=store.load_org(self.slug)
@@ -210,16 +210,16 @@ class LazyRows(unittest.TestCase):
         with self.assertRaises(store.StaleWrite): old.d['work_items'][0]['rev']
         self.assertEqual(self.row()['rev'],19)
 
-    def test_runtime_preloaded_mail_stays_in_snapshot(self):
+    def test_runtime_eager_mail_stays_in_snapshot(self):
         fresh=store.load_org(self.slug)
         fresh.d['mail']={'a':[{'id':'before','body':'one'}]}
         store.save_org(fresh)
-        old=store.load_runtime_org(self.slug,('mail',))
+        old=store.load_runtime_org(self.slug)
         fresh=store.load_org(self.slug)
         fresh.d['mail']['a'].append({'id':'after','body':'two'})
         store.save_org(fresh)
         self.assertEqual([m['id'] for m in old.d['mail']['a']],['before'])
-        self.assertEqual([m['id'] for m in store.load_runtime_org(self.slug,('mail',)).d['mail']['a']],['before','after'])
+        self.assertEqual([m['id'] for m in store.load_runtime_org(self.slug).d['mail']['a']],['before','after'])
 
     def test_runtime_escape_hatch_retains_eager_snapshot(self):
         with patch.object(store,'ORGTX_RESCOPE',False):

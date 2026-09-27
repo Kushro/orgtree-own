@@ -11415,7 +11415,7 @@ def _has_deliverable(slug: str, nid: str, mail_ids=None) -> bool:
     whether the envelope will have a body. A boxed notice does render, so it
     counts."""
     try:
-        org = store.load_runtime_org(slug, ("mail", "notices"))
+        org = store.load_runtime_org(slug)
     except Exception:                                        # noqa: BLE001
         return True     # can't tell — deliver rather than silently swallow
     if nid not in org.nodes:
