@@ -14,6 +14,7 @@ import { WorkReferenceReader } from './workreferences'
 import type { WorkDelta } from './workdelta'
 import { decodeTree, type TreeWire } from './treedelta'
 import { ForegroundTreeReader } from './foregroundtree'
+import { AgentReferences } from './agentrefs'
 import { TreeViewReader } from './treeview'
 import type { TreeSelection } from './treeview'
 import type {
@@ -320,6 +321,8 @@ const foregroundTreeReader = new ForegroundTreeReader(async (path, etag) => {
   return response
 }, getCompleteTree)
 const foregroundTreeViews = new TreeViewReader(foregroundTreeReader, getCompleteTree)
+/** Identity facts for agents omitted from a selected tree, per catalog. */
+export const agentReferences = new AgentReferences((org, ids) => foregroundTreeReader.references(org, ids))
 /** Not activated in App until all consumers preserve partial-tree semantics. */
 export const getSelectedTree = async (slug: string, selection: TreeSelection): Promise<TreePayload> =>
   (await foregroundTreeViews.get(slug, selection)).tree

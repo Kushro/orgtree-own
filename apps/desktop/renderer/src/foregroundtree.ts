@@ -24,6 +24,11 @@ export type ForegroundPage = Boundary & { kind: 'page'; nodes: Record<string, Fl
   matches: string[]; next_cursor: string | null }
 export type ForegroundLookup = Boundary & { kind: 'lookup'; nodes: Record<string, FlatTreeNode>
   requested: string; found: boolean; path: string[] }
+export type AgentReference = { id: string; tier: string | null; state: string
+  generation: number | null; axis: 'org' | 'lineage'; successor: string | null }
+export type ForegroundReferences = Boundary & { kind: 'references'
+  references: Record<string, AgentReference>; missing: string[] }
+export const MAX_REFERENCES = 128
 export type ForegroundRead = { tree: TreePayload; snapshot: ForegroundSnapshot | null }
 type Read = (path: string, etag?: string) => Promise<Response>
 
@@ -222,6 +227,34 @@ export class ForegroundTreeReader {
         || !record(body.nodes) || !strings(body.path)
         || body.found !== Object.hasOwn(body.nodes, id)) throw new Error('Invalid foreground lookup')
     return body as ForegroundLookup
+  }
+
+  /** Exact identity facts for at most 128 IDs. Every requested ID must come
+   * back exactly once, found or missing; anything else is not an answer. */
+  async references(org: string, ids: readonly string[]): Promise<ForegroundReferences> {
+    const wanted = [...new Set(ids)]
+    if (!wanted.length || wanted.length > MAX_REFERENCES) throw new Error('References need 1-128 IDs')
+    const params = new URLSearchParams()
+    wanted.forEach(id => params.append('include', id))
+    const body = await answer(await this.read(`/api/orgs/${encodeURIComponent(org)}/foreground-tree/references?${params}`))
+    boundary(body)
+    if (body.kind !== 'references' || !record(body.references) || !strings(body.missing)) {
+      throw new Error('Invalid foreground references')
+    }
+    const refs = body.references as Record<string, unknown>
+    const answered = [...Object.keys(refs), ...body.missing]
+    if (answered.length !== wanted.length || new Set(answered).size !== wanted.length
+        || wanted.some(id => !answered.includes(id))) throw new Error('Foreground references do not match request')
+    for (const [id, ref] of Object.entries(refs)) {
+      if (!record(ref) || ref.id !== id || typeof ref.state !== 'string'
+          || !(ref.tier === null || typeof ref.tier === 'string')
+          || !(ref.generation === null || Number.isSafeInteger(ref.generation))
+          || !(ref.axis === 'org' || ref.axis === 'lineage')
+          || !(ref.successor === null || typeof ref.successor === 'string')) {
+        throw new Error('Invalid foreground reference')
+      }
+    }
+    return body as ForegroundReferences
   }
 
   async page(org: string, kind: 'children' | 'search', query: string,

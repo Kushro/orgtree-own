@@ -35,7 +35,7 @@ import {
   deleteWorkItemAttachment, dismissWorkItemAttention, getWorkReferences, getWorkItem,
   replyWorkItem, uploadWorkItemAttachment, workItemArtifactUrl,
   workItemAttachmentUrl,
-  req,
+  req, agentReferences,
 } from '../api'
 import { AttachIcon, CloseIcon, DocketIcon, DownloadIcon, TuneIcon } from '../icons'
 import { agentNavProps } from './agentnav'
@@ -232,9 +232,11 @@ export function sortItems(items: WorkItem[], mode: DocketSortMode): WorkItem[] {
  *  its identity across session generations: when the node is live, the
  *  docket's name resolves to that live successor and its current model. Only
  *  a node that is actually retired gets the historical treatment. */
-export type ActorFit = 'current' | 'retired' | 'gone'
+export type ActorFit = 'current' | 'retired' | 'gone' | 'unknown'
 
-export interface NodeFacts { tier: string; generation: number; live: boolean }
+/** `unresolved` marks an agent a partial tree omitted whose exact lookup has
+ *  not answered (or failed): not proven present and never proven gone. */
+export interface NodeFacts { tier: string; generation: number; live: boolean; unresolved?: boolean }
 
 export function buildNodeFacts(roots?: TreeNode[]): Map<string, NodeFacts> {
   const map = new Map<string, NodeFacts>()
@@ -254,12 +256,51 @@ export function buildNodeFacts(roots?: TreeNode[]): Map<string, NodeFacts> {
   return map
 }
 
+/** Every agent an item names. Only these are looked up when omitted. */
+export function itemActorIds(items: Iterable<WorkItem>): string[] {
+  const ids = new Set<string>()
+  const add = (a: unknown) => {
+    if (a && typeof a === 'object' && typeof (a as WorkActor).node === 'string') ids.add((a as WorkActor).node)
+  }
+  for (const it of items) { add(it.owner); add(it.reviewer); add(it.last_updater); add(it.created_by) }
+  return [...ids].sort()
+}
+
+/** Tree facts, completed for a SELECTED tree: an agent it does not carry is
+ *  resolved by exact lookup for that tree's catalog. Until the answer lands it
+ *  is `unresolved`; only the backend's `missing` makes it absent. A complete
+ *  legacy tree is authoritative as it stands and asks nothing. */
+export function useNodeFacts(slug: string, tree: TreePayload | null | undefined,
+                             ids: readonly string[]): Map<string, NodeFacts> {
+  const base = useMemo(() => buildNodeFacts(tree?.roots), [tree?.roots])
+  const catalog = tree?.foreground?.catalog_revision
+  const known = tree?.foreground?.missing
+  const wanted = useMemo(() => catalog === undefined ? []
+    : ids.filter(id => !base.has(id) && !known?.includes(id)), [catalog, base, known, ids])
+  const wantedKey = JSON.stringify(wanted)
+  const [, setAnswered] = useState(0)
+  useEffect(() => agentReferences.subscribe(() => setAnswered(n => n + 1)), [])
+  useEffect(() => {
+    if (catalog !== undefined && wanted.length) agentReferences.request(slug, catalog, wanted)
+  }, [slug, catalog, wantedKey])   // eslint-disable-line react-hooks/exhaustive-deps
+  if (catalog === undefined || !wanted.length) return base
+  const facts = new Map(base)
+  for (const id of wanted) {
+    const state = agentReferences.get(slug, catalog, id)
+    if (!state || 'error' in state) facts.set(id, { tier: '', generation: 0, live: false, unresolved: true })
+    else if (state.ref) facts.set(id, { tier: state.ref.tier ?? '', generation: state.ref.generation ?? 0,
+      live: state.ref.state === 'live' })
+  }
+  return facts
+}
+
 export function actorFit(actor: WorkActor | null | undefined,
                          facts: Map<string, NodeFacts>):
   { fit: ActorFit; tier?: string } {
   if (!actor?.node) return { fit: 'gone' }
   const n = facts.get(actor.node)
   if (!n) return { fit: 'gone' }
+  if (n.unresolved) return { fit: 'unknown' }
   // The actor's generation records who wrote the item, but it does not turn
   // the node id into a different identity. A live node is therefore the
   // current destination even when the item names an archived predecessor.
@@ -273,6 +314,7 @@ const FIT_WHY: Record<ActorFit, string | null> = {
   // explains itself
   retired: 'this agent has been retired',
   gone: 'this agent is no longer in the org',
+  unknown: "this agent's current status has not been confirmed yet",
 }
 
 /** An agent identity as it appears everywhere in this panel: the model chip
@@ -769,13 +811,14 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
   useEffect(() => () => { ++navigation.current.sequence }, [])
   const [located, setLocated] = useState<{ slug: string; item: WorkItem } | null>(null)
 
-  const facts = useMemo(() => buildNodeFacts(tree?.roots), [tree?.roots])
-
   const active = data?.items ?? EMPTY_ITEMS
   // while a toggle's first fetch is in flight the cached group keeps showing,
   // so the list grows once and never blinks
   const archived = showArchived ? (data?.archived ?? EMPTY_ITEMS) : EMPTY_ITEMS
   const backlog = showBacklog ? (data?.backlogged ?? EMPTY_ITEMS) : EMPTY_ITEMS
+  const actorIds = useMemo(() => itemActorIds([...active, ...archived, ...backlog]),
+    [active, archived, backlog])
+  const facts = useNodeFacts(slug, tree, actorIds)
   const archivedCount = data?.counts?.archived ?? 0
   const backlogCount = data?.counts?.backlogged ?? 0
 

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useWorkItems } from './useworkitems'
 import type { ToastFn, TreePayload } from '../types'
 import { DocketIcon } from '../icons'
-import { AgentDocketView, agentItems, buildNodeFacts } from './docket'
+import { AgentDocketView, agentItems, itemActorIds, useNodeFacts } from './docket'
 import { PinFrame, closeIfCentred } from './modalpin'
 import { flatten, withDraftTree } from './shared'
 import type { RefRoutes } from './reflinks'
@@ -18,7 +18,8 @@ export function AgentDocketModal({ slug, nid, tree, toast, close, refs }: {
   const [bump, setBump] = useState(0)
   const work = useWorkItems(slug, showArchived, showBacklog, 15000, bump).value
   const mine = useMemo(() => agentItems(work, nid, showArchived), [work, nid, showArchived])
-  const facts = useMemo(() => buildNodeFacts(tree.roots), [tree.roots])
+  const actorIds = useMemo(() => itemActorIds(mine), [mine])
+  const facts = useNodeFacts(slug, tree, actorIds)
   const routes: RefRoutes = { world: refs.world, onOpen: r => {
     closeIfCentred('agent-docket', close, slug)
     refs.onOpen(r)
