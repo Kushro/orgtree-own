@@ -309,6 +309,62 @@ class CaptureTests(unittest.TestCase):
         self.assertIn('desktop_import', doc['nodes']['agent'])
         self.assertIsNone(doc['nodes']['agent']['desktop_import'])
 
+    def test_archived_reconciliation_imports_new_records_without_ui_or_hot_queue(self):
+        slug = self.org.d['slug']
+        org = store.load_org(slug)
+        org.node('agent')['state'] = 'archived'
+        store.save_org(org)
+        self.write(0, 3)
+        state = ingest._SweepState()
+        with patch.object(store, 'org_slugs', return_value=[slug]), \
+             patch.object(store, 'cached_org', side_effect=AssertionError('whole Org')), \
+             patch.dict(sup._state, {}, clear=True):
+            ingest._sweep(state)
+            self.assertFalse(state.active)
+            self.assertFalse(state.hot)
+            with patch.object(records, 'ingest', side_effect=AssertionError('settled source reread')):
+                ingest._sweep(state)
+            self.write(3, 2, 'a')
+            ingest._sweep(state)
+        self.assertEqual(len(self.rows()), 5)
+        self.assertTrue(any('4' in row[2] for row in self.rows()))
+
+    def test_evicted_unchanged_source_does_not_count_lifetime_records(self):
+        import contextlib
+        self.write(0, 40)
+        self.backfill()
+        with ingest._lock:
+            ingest._settled.pop((self.org.d['slug'], 'agent'), None)
+        statements = []
+        original = records.database
+        class Proxy:
+            def __init__(self, conn): self.conn = conn
+            def execute(self, sql, *args):
+                statements.append(sql)
+                return self.conn.execute(sql, *args)
+            def __getattr__(self, name): return getattr(self.conn, name)
+        @contextlib.contextmanager
+        def observed():
+            with original() as conn:
+                yield Proxy(conn)
+        with patch.object(records, 'database', observed):
+            self.backfill()
+        self.assertTrue(statements, 'negative control must execute database reads')
+        self.assertFalse(any('COUNT(*) FROM transcript_records' in sql for sql in statements))
+        self.assertEqual(len(self.rows()), 40)
+
+    def test_source_projection_observes_new_committed_identity_despite_cached_org(self):
+        slug = self.org.d['slug']
+        old = store.cached_org(slug)
+        org = store.load_org(slug)
+        org.node('agent')['session_id'] = 'changed-session'
+        org.node('agent')['transcript_incarnation'] = 'changed-incarnation'
+        store.save_org(org)
+        with patch.object(store, 'cached_org', return_value=old):
+            view = ingest._source_view(slug, 'agent')
+        self.assertEqual(view.node('agent')['session_id'], 'changed-session')
+        self.assertEqual(records.incarnation(view, 'agent'), 'changed-incarnation')
+
     def test_unread_suffix_retries_without_another_file_change(self):
         import builtins
         self.write(0,3);self.backfill();self.assertFalse(self.backfill())
