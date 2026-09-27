@@ -2,6 +2,7 @@
 import json
 import os
 import tempfile
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -56,6 +57,20 @@ class PolicyReads(unittest.TestCase):
             self.assertIs(policy_reads.watchdog_org(self.slug), org)
         fallback.assert_called_once_with(self.slug)
 
+    def test_runtime_role_can_read_settings_and_owner_scope(self):
+        self.configure()
+        real = pgstore.PgConn.execute
+        roles = []
+        def runtime(conn, sql, params=()):
+            if sql.startswith('WITH settings'):
+                real(conn, 'SET LOCAL ROLE orgtree_runtime')
+                roles.append(True)
+            return real(conn, sql, params)
+        with patch.object(pgstore.PgConn, 'execute', runtime):
+            self.assertEqual(set(policy_reads.watchdog_org(self.slug).nodes), {'worker'})
+            self.assertEqual(policy_reads.storage_org(self.slug).nodes, {})
+        self.assertEqual(len(roles), 2)
+
     def test_owner_and_watchdog_use_one_statement_snapshot(self):
         self.configure()
         real = pgstore.PgConn.execute
@@ -105,6 +120,58 @@ class PolicyReads(unittest.TestCase):
                 self.assertIn('Index', node['Node Type'])
             for child in node.get('Plans', []): walk(child)
         for plan in plans: walk(plan[0]['Plan'])
+
+        # Read-volume evidence, not an idle latency benchmark. The old warm
+        # cache reads no node SQL but still walks all nodes for the summary.
+        costs = []
+        def volume(label, action):
+            count = dict(label=label, rows=0, value_utf8_bytes=0, statements=0,
+                         summary_nodes_visited=0)
+            class Cursor:
+                def __init__(self, cur): self.cur = cur
+                def __getattr__(self, name): return getattr(self.cur, name)
+                def record(self, row):
+                    if row is not None:
+                        count['rows'] += 1
+                        count['value_utf8_bytes'] += sum(
+                            len(str(value).encode('utf-8')) for value in row if value is not None)
+                    return row
+                def fetchone(self): return self.record(self.cur.fetchone())
+                def fetchall(self): return [self.record(row) for row in self.cur.fetchall()]
+                def __iter__(self):
+                    for row in self.cur: yield self.record(row)
+            def measured(conn, sql, params=()):
+                count['statements'] += 1
+                return Cursor(real(conn, sql, params))
+            summary = store._summary_row
+            def summary_count(slug, doc):
+                count['summary_nodes_visited'] += len(doc['nodes'])
+                return summary(slug, doc)
+            with patch.object(pgstore.PgConn, 'execute', measured), \
+                    patch.object(store, '_summary_row', summary_count):
+                action()
+            costs.append(count)
+        def old_tick_reads():
+            # Exactly the cached_list per-org summary and ensuing loop read.
+            store._summary_row(self.slug, store.cached_org(self.slug).d)
+            store.cached_org(self.slug)
+        for loop, reader in [('watchdog', policy_reads.watchdog_org),
+                             ('storage', policy_reads.storage_org)]:
+            with store._doc_cache_lock: store._doc_cache.pop(self.slug, None)
+            volume(loop + '-old-cold', old_tick_reads)
+            volume(loop + '-old-warm', old_tick_reads)
+            volume(loop + '-new', lambda: reader(self.slug))
+        for row in costs:
+            if row['label'].endswith('-new'):
+                self.assertLess(row['rows'], 20)
+                self.assertEqual(row['summary_nodes_visited'], 0)
+            else:
+                self.assertEqual(row['summary_nodes_visited'], 1184)
+        output = os.environ.get('POLICY_READ_COST_OUTPUT')
+        if output:
+            Path(output).write_text(json.dumps(dict(live=30, archived=1154,
+                metric='PgConn returned rows and UTF-8 scalar value bytes; excludes wire overhead, catalog and directory listing',
+                costs=costs), indent=2), encoding='utf-8')
 
 
 if __name__ == '__main__': unittest.main()
