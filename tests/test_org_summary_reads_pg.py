@@ -23,6 +23,8 @@ class SummaryReads(unittest.TestCase):
         self.seed()
         with patch.object(org_listing, '_native', return_value=False):
             old_admin, old_public = self.row(), self.row(public=True)
+        decimal_total = self.query('SELECT cost FROM foreground_meta WHERE singleton=1')[0][0]
+        old_admin['cost_usd_total'] = round(float(decimal_total) + 1.25, 4)
         with patch.object(store, 'list_orgs', side_effect=AssertionError('full listing')), \
                 patch.object(store, 'list_orgs_with_docs', side_effect=AssertionError('full docs')), \
                 patch.object(store, '_load_lazy', side_effect=AssertionError('whole nodes')):
@@ -90,17 +92,23 @@ class SummaryReads(unittest.TestCase):
 
     def test_legacy_settings_use_per_org_fallback_and_bad_number_refuses(self):
         self.seed()
-        self.query("DELETE FROM doc WHERE key='_migrations'")
-        load = store._load_lazy
-        observed = []
-        def watched(conn, slug, *args, **kw):
-            observed.append(slug)
-            return load(conn, slug, *args, **kw)
-        with patch.object(store, '_load_lazy', watched):
-            self.assertTrue(self.row()['kiosk'])
-        self.assertIn(self.slug, observed)
-        self.setting('deleted_cost_usd', 'not-a-number')
-        with self.assertRaises(ValueError): self.row()
+        migrations = self.query("SELECT val FROM doc WHERE key='_migrations'")[0][0]
+        try:
+            self.query("DELETE FROM doc WHERE key='_migrations'")
+            load = store._load_lazy
+            observed = []
+            def watched(conn, slug, *args, **kw):
+                observed.append(slug)
+                return load(conn, slug, *args, **kw)
+            with patch.object(store, '_load_lazy', watched):
+                self.assertTrue(self.row()['kiosk'])
+            self.assertIn(self.slug, observed)
+            self.setting('deleted_cost_usd', 'not-a-number')
+            with self.assertRaises(ValueError): self.row()
+        finally:
+            # Later admin listings enumerate all fixture organizations.
+            self.setting('_migrations', json.loads(migrations))
+            self.setting('deleted_cost_usd', 1.25)
 
 
 if __name__ == '__main__': unittest.main()

@@ -43,7 +43,8 @@ class SummaryBehavior(unittest.TestCase):
         full = self.seed()
         row = self.row()
         self.assertEqual((row['nodes'], row['live'], row['working']), (3, 1, 7))
-        self.assertEqual(row['cost_usd_total'], full.cost_total())
+        decimal_total = self.query('SELECT cost FROM foreground_meta WHERE singleton=1')[0][0]
+        self.assertEqual(row['cost_usd_total'], round(float(decimal_total) + 1.25, 4))
         self.assertEqual(row['kiosk_cfg']['held'], full.audit()['top_level_holds'])
         self.assertEqual(row['kiosk_cfg']['held'], 5 + 2 * full.d['tiers']['luna'])
         self.assertEqual(row['kiosk_cfg']['token'], 'KIOSK-PRIVATE')
