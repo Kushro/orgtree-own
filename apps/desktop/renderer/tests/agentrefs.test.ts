@@ -66,7 +66,8 @@ test('an answer read from a newer catalog is not served to an older tree', async
   const refs = new AgentReferences(async (_org, ids) => answer('org:2', [...ids], []))
   refs.request('org', 'org:1', ['a'])
   await settle()
-  assert.equal(refs.get('org', 'org:1', 'a'), undefined)
+  const older = refs.get('org', 'org:1', 'a')
+  assert.ok(older && 'stale' in older && !('ref' in older), 'the older tree gets no answer, only a do-not-re-ask marker')
   assert.ok(refs.get('org', 'org:2', 'a'))
 })
 
