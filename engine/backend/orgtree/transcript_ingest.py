@@ -165,9 +165,20 @@ def capture(slug, nid, *, beginning=False, backfill=False):
                                     (source,)).fetchone()
                 # A fully imported source needs signature/suffix checking,
                 # not COUNT(*) over all its lifetime records.
-                have = (conn.execute('SELECT COUNT(*) FROM transcript_records WHERE source=?',
-                                     (source,)).fetchone()[0] if not meta or meta[0] else None)
-            count = have + 64 if have is not None else 1
+                needs_history = not meta or bool(meta[0])
+            if not needs_history:
+                # A replacement may create a new epoch. Preserve the old
+                # backfill window for changed files rather than capturing
+                # only their last record after an in-memory cache eviction.
+                needs_history = records._ingest_needed(
+                    source, str(filename), 1, {'bytes_read': 0}, None)
+            if needs_history:
+                with records.database() as conn:
+                    have = conn.execute('SELECT COUNT(*) FROM transcript_records WHERE source=?',
+                                        (source,)).fetchone()[0]
+                count = have + 64
+            else:
+                count = 1
         records.ingest(source, str(filename), count, {'bytes_read': 0})
         with _lock:
             _fresh.discard(source)
