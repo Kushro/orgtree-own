@@ -1167,10 +1167,10 @@ def _split_rows(k: str, v: Any, *, reuse_work: bool = True) -> dict[str, str]:
 def _snap_rows(snap: Mapping[str, str], k: str) -> dict[str, str]:
     """`k`'s rows in a `doc` snapshot: its own and, for a split section,
     its owner rows."""
-    out = {k: snap[k]} if k in snap else {}
+    out = {k: _work_raw(snap[k])} if k in snap else {}
     if k in ROW_SECTIONS:
         pre = k + SPLIT_SEP
-        out.update((kk, vv) for kk, vv in snap.items() if kk.startswith(pre))
+        out.update((kk, _work_raw(vv)) for kk, vv in snap.items() if kk.startswith(pre))
     return out
 
 
@@ -1182,12 +1182,22 @@ def _assemble(k: str, rows: Mapping[str, str]) -> Any:
     if k == workrows.SECTION and isinstance(v, list) and len(rows) != 1:
         raise ValueError("mixed work-items blob and item rows")
     if k == workrows.SECTION and isinstance(v, dict):
-        values = workrows.assemble(rows)
+        ids = workrows.ids_from_header(rows[k])
+        if set(rows) != {k, *(workrows.PREFIX + slug for slug in ids)}:
+            raise ValueError("work-items header/row count or identity mismatch")
         result = []
-        for item in values:
-            tracked = _WorkItem(_NodeMutation())
-            dict.update(tracked, item)
-            tracked._work_raw = rows[workrows.PREFIX + item["slug"]]
+        for slug in ids:
+            raw = rows[workrows.PREFIX + slug]
+            if isinstance(raw, _WorkRowRef) and raw.raw is None:
+                tracked = _LazyWorkItem(raw)
+            else:
+                raw = _work_raw(raw)
+                item = json.loads(raw)
+                if workrows.slug_of(item) != slug:
+                    raise ValueError("work-item key disagrees with stored slug")
+                tracked = _WorkItem(_NodeMutation())
+                dict.update(tracked, item)
+                tracked._work_raw = raw
             result.append(tracked)
         return result
     if k in SPLIT_SECTIONS and isinstance(v, dict):
@@ -2310,6 +2320,100 @@ class _NodeDict(dict):
         return out
 
 
+# Small metadata only: no evidence/body cache and no connection retained by an Org.
+# Version keys include the data root, database/schema and PostgreSQL tuple identity.
+_WORK_ITEM_META: dict[tuple[Any, ...], str] = {}
+_WORK_ATTENTION_FIELDS = ("slug", "manual_attention", "notification_attention_active", "notification_attention_epoch")
+
+
+def _work_raw(raw: Any) -> Any:
+    return raw.raw if isinstance(raw, _WorkRowRef) and raw.raw is not None else raw
+
+
+class _WorkRowRef(str):
+    """An unread row's MVCC identity; never a value allowed in a SQL write."""
+    def __new__(cls, slug: str, key: str, version: tuple[str, ...], metadata: str):
+        obj = super().__new__(cls, "!unread-work-row:" + repr((slug, key, version)))
+        obj.slug, obj.key, obj.version, obj.metadata = slug, key, version, metadata
+        obj.raw = None
+        return obj
+
+    def __getnewargs__(self):
+        return self.slug, self.key, self.version, self.metadata
+
+    def resolve(self) -> str:
+        if self.raw is None:
+            def read(conn):
+                row = conn.execute(
+                    "SELECT val, xmin::text, ctid::text, tableoid::text FROM doc WHERE key=?",
+                    (self.key,)).fetchone()
+                if row is None or tuple(row[1:]) != self.version:
+                    raise StaleWrite(f"work item {self.key!r} changed before lazy access; reload and retry")
+                return row[0]
+            raw = _bounded_read(self.slug, read)
+            value = json.loads(raw)
+            if workrows.slug_of(value) != self.key[len(workrows.PREFIX):]:
+                raise ValueError("work-item key disagrees with stored slug")
+            self.raw = raw
+        return self.raw
+
+
+def _load_work_refs(conn: Any, slug: str, rows: dict[str, str]) -> None:
+    versions = conn.execute(
+        "SELECT key, xmin::text, ctid::text, tableoid::text FROM doc WHERE starts_with(key, ?)",
+        (workrows.PREFIX,)).fetchall()
+    if workrows.SECTION not in rows:
+        if versions:
+            raise ValueError("orphaned work-item rows")
+        return
+    header = json.loads(rows[workrows.SECTION])
+    if isinstance(header, list):
+        if versions:
+            raise ValueError("mixed work-items blob and item rows")
+        return
+    ids = workrows.ids_from_header(rows[workrows.SECTION])
+    if {v[0] for v in versions} != {workrows.PREFIX + x for x in ids}:
+        raise ValueError("work-items header/row count or identity mismatch")
+    namespace = (str(DATA_ROOT), conn.raw.info.host, conn.raw.info.port, conn.raw.info.dbname, conn.org_id)
+    unknown = []
+    identities = {}
+    for key, *version in versions:
+        identity = (*namespace, key, *version)
+        identities[key] = identity
+        metadata = _WORK_ITEM_META.get(identity)
+        if metadata is None:
+            unknown.append(key)
+        else:
+            rows[key] = _WorkRowRef(slug, key, tuple(version), metadata)
+    if unknown:
+        fetched_rows = conn.execute(
+            "SELECT key, val, xmin::text, ctid::text, tableoid::text FROM doc WHERE key = ANY(?)",
+            (unknown,)).fetchall()
+        fetched = {}
+        for key, raw, *version in fetched_rows:
+            if tuple(version) != tuple(identities[key][-3:]):
+                raise StaleWrite("work item changed during lazy baseline acquisition")
+            fetched[key] = raw
+        if set(fetched) != set(unknown):
+            raise StaleWrite("work items changed while reading transaction baselines")
+        ready = True
+        for key, raw in fetched.items():
+            value = json.loads(raw)
+            if workrows.slug_of(value) != key[len(workrows.PREFIX):]:
+                raise ValueError("work-item key disagrees with stored slug")
+            metadata = _dumps({k: value[k] for k in _WORK_ATTENTION_FIELDS if k in value})
+            if "notification_attention_active" not in value:
+                ready = False
+            elif len(metadata) <= 2048:
+                if len(_WORK_ITEM_META) >= 2048:
+                    _WORK_ITEM_META.clear()
+                _WORK_ITEM_META[identities[key]] = metadata
+            rows[key] = raw
+        if not ready:
+            # Legacy attention initialization retains the full coherent load.
+            rows.update(_read_doc_key(conn, workrows.SECTION))
+
+
 class _WorkItem(_NodeDict):
     """A loaded item with the same alias-safe tracking as nodes.
 
@@ -2323,6 +2427,59 @@ class _WorkItem(_NodeDict):
             if type(old) is type(value) and old == value:
                 return
         super().__setitem__(key, value)
+
+
+class _LazyWorkItem(_WorkItem):
+    """Attention metadata is cheap; every other access resolves the original row."""
+    def __init__(self, ref: _WorkRowRef):
+        super().__init__(_NodeMutation())
+        self._work_raw = ref
+        self._work_ref = ref
+        self._loaded = False
+        dict.update(self, json.loads(ref.metadata))
+
+    def _load(self):
+        if not self._loaded:
+            raw = self._work_ref.resolve()
+            dict.clear(self)
+            dict.update(self, json.loads(raw))
+            self._work_raw = raw
+            self._loaded = True
+
+    def __getitem__(self, key):
+        # Mutable metadata must never escape without the real row/dirty owner.
+        if not self._loaded and (key not in _WORK_ATTENTION_FIELDS or
+                isinstance(dict.get(self, key), (dict, list))):
+            self._load()
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        if key not in _WORK_ATTENTION_FIELDS:
+            self._load()
+        return dict.__contains__(self, key)
+
+    def __setitem__(self, key, value):
+        if not self._loaded and key in _WORK_ATTENTION_FIELDS and type(value) in (str,int,float,bool,type(None)):
+            old = dict.get(self, key)
+            if key in self and type(old) is type(value) and old == value:
+                return
+        self._load()
+        super().__setitem__(key, value)
+
+    def __delitem__(self, key): self._load(); super().__delitem__(key)
+    def __iter__(self): self._load(); return dict.__iter__(self)
+    def __len__(self): self._load(); return dict.__len__(self)
+    def keys(self): self._load(); return dict.keys(self)
+    def items(self): self._load(); return super().items()
+    def values(self): self._load(); return super().values()
+    def pop(self, key, *default): self._load(); return super().pop(key, *default)
+    def popitem(self): self._load(); return super().popitem()
+    def clear(self): self._load(); super().clear()
+    def __eq__(self, other): self._load(); return dict.__eq__(self, other)
+    def __ne__(self, other): return not self == other
+    def __repr__(self): self._load(); return dict.__repr__(self)
+    def __deepcopy__(self, memo): self._load(); return super().__deepcopy__(memo)
+    def __reduce_ex__(self, protocol): self._load(); return super().__reduce_ex__(protocol)
 
 
 class _NodeList(list):
@@ -2658,6 +2815,10 @@ class LazyDoc(dict[str, Any]):
         it before org_tx enters its body. There is no persistent schema change.
         """
         self._deferred_doc.pop(key, None)
+        if key == workrows.SECTION and any(isinstance(raw, _WorkRowRef) for raw in rows.values()):
+            dict.pop(self, key, None)
+            self._deferred_doc[key] = rows
+            return
         fingerprint = None
         if ORGTX_RESCOPE and key == "work_items":
             h = hashlib.sha256()
@@ -3185,7 +3346,8 @@ def _load_probes(conn: sqlite3.Connection) -> tuple[str | None, str | None, set[
 
 
 def _load_lazy(conn: sqlite3.Connection, slug: str,
-               preload: Iterable[str] = (), *, txn_open: bool = False) -> LazyDoc:
+               preload: Iterable[str] = (), *, txn_open: bool = False,
+               lazy_work: bool = False) -> LazyDoc:
     """Load eager rows plus an optional coherent set of lazy sections.
 
     Ordinary loads pass no ``preload`` and retain S1's owner-selective lazy
@@ -3214,8 +3376,13 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
         # row, and under concurrent Python-busy threads each yield costs a
         # full switch interval: 709 rows × ~5 ms stolen slices turned this
         # 100 ms load into 18-20 s (measured, 2026-09-19 incident).
-        raw_doc: dict[str, str] = {cast(str, k): cast(str, v) for k, v in
-                                   conn.execute("SELECT key, val FROM doc").fetchall()}
+        if lazy_work and ORGTX_RESCOPE and STORE_BACKEND == "postgres":
+            raw_doc = dict(conn.execute(
+                "SELECT key, val FROM doc WHERE NOT starts_with(key, ?)",
+                (workrows.PREFIX,)).fetchall())
+            _load_work_refs(conn, slug, raw_doc)
+        else:
+            raw_doc = dict(conn.execute("SELECT key, val FROM doc").fetchall())
         node_rows = [(cast(str, i), cast(str, v)) for i, v in
                      conn.execute("SELECT id, val FROM nodes ORDER BY ord").fetchall()]
         # PG-3d: a split section's owner rows travel with its container row
@@ -3706,10 +3873,15 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
             if changes is not None and not (k == workrows.SECTION
                     and snap_doc is not None and s is snap_doc.get(rk)):
                 changes.dumped_bytes += len(s)
-            if snap_doc is None or snap_doc.get(rk) != s:
+            baseline = _work_raw(snap_doc.get(rk)) if snap_doc is not None else None
+            if baseline != s:
+                if isinstance(baseline, _WorkRowRef):
+                    baseline = baseline.resolve()
+                if isinstance(s, _WorkRowRef):
+                    raise RuntimeError("unresolved work-item reference reached a write")
                 if _ROW_CAS and snap_doc is not None and rk in snap_doc:
                     _cas(conn, "UPDATE doc SET val=? WHERE key=? AND val=?",
-                         (s, rk, snap_doc[rk]), f"section {rk!r}")
+                         (s, rk, baseline), f"section {rk!r}")
                 elif _ROW_CAS and snap_doc is not None and (rk != k or k == workrows.SECTION):
                     # a NEW owner row: another writer may have created it
                     # since this save loaded (the whole-section CAS used to
@@ -3754,8 +3926,11 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
             new_doc[k] = default
     for k in known_doc - set(new_doc) - LAZY_SECTIONS - set(ROWED):
         if _ROW_CAS and snap_doc is not None and k in snap_doc:
+            baseline = snap_doc[k]
+            if isinstance(baseline, _WorkRowRef):
+                baseline = baseline.resolve()
             _cas(conn, "DELETE FROM doc WHERE key=? AND val=?",
-                 (k, snap_doc[k]), f"section {k!r}")
+                 (k, baseline), f"section {k!r}")
         else:
             conn.execute("DELETE FROM doc WHERE key=?", (k,))
         if changes is not None:
@@ -4682,7 +4857,8 @@ def list_orgs_with_docs() -> list[tuple[dict[str, Any], Org]]:
     return out
 
 
-def _load_sqlite_org(slug: str, preload: Iterable[str] = ()) -> Org:
+def _load_sqlite_org(slug: str, preload: Iterable[str] = (), *,
+                     lazy_work: bool = False) -> Org:
     """Shared SQLite half for ordinary and bounded-snapshot loads."""
     slug = _safe_slug(slug)
     _ensure_migrated(slug)
@@ -4692,7 +4868,7 @@ def _load_sqlite_org(slug: str, preload: Iterable[str] = ()) -> Org:
     try:
         t0 = time.perf_counter()
         with _POOL.acquire(slug) as conn:
-            doc = _load_lazy(conn, slug, preload)
+            doc = _load_lazy(conn, slug, preload, lazy_work=lazy_work)
         t1 = time.perf_counter()
         # Keep Org construction inside this error boundary. On an unmarked
         # document its mail-id backfill can read mail_log; snapshot loads add

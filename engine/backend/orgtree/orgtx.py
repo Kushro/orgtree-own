@@ -1012,7 +1012,7 @@ class PgBackend:
             try:
                 for tx in order:
                     with profiling.stage("org_load_ms"):     # as SeamBackend's
-                        tx.org = store._load_sqlite_org(tx.slug)   # pyright: ignore[reportPrivateUsage]
+                        tx.org = store._load_sqlite_org(tx.slug, lazy_work=True)   # pyright: ignore[reportPrivateUsage]
                     _check_heal(tx)
                 yield
                 if any(tx.replayed for tx in order):
