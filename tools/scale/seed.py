@@ -357,7 +357,7 @@ def child(args) -> int:
                     for k in range(quantile_draw(rng, PROFILE["mail_log_rows"])):
                         t = now - rng.random() * 86400 * 7
                         mid = uuid.UUID(int=rng.getrandbits(128)).hex[:12]
-                        v = json.dumps({"id": mid, "from": rng.choice(live), "kind": "message",
+                        v = store._dumps({"id": mid, "from": rng.choice(live), "kind": "message",
                                         "body": text(rng, quantile_draw(rng, PROFILE["mail_log_bytes"])),
                                         "at": iso(t), "relationship": "your peer",
                                         "message_id": mid, "operation_id": f"mail:{mid}"})
@@ -366,7 +366,7 @@ def child(args) -> int:
                         t = now - rng.random() * 86400 * 7
                         did = uuid.UUID(int=rng.getrandbits(128)).hex[:16]
                         body = text(rng, quantile_draw(rng, PROFILE["steered_log_bytes"]))
-                        v = json.dumps({"at": iso(t), "delivery_id": did, "level": "recorded",
+                        v = store._dumps({"at": iso(t), "delivery_id": did, "level": "recorded",
                                         "mail_ids": [did[:12]], "delivery_ids": [did],
                                         "acked_ids": [did], "recorded_ids": [did], "attempts": 1,
                                         "retried": False, "confirmed_duplicate": False,
@@ -379,7 +379,7 @@ def child(args) -> int:
                     for k in range(quantile_draw(rng, PROFILE["steer_attempts_rows"])):
                         t = now - rng.random() * 86400 * 7
                         did = uuid.UUID(int=rng.getrandbits(128)).hex[:16]
-                        v = json.dumps([did, {"at": iso(t), "resolved": "recorded",
+                        v = store._dumps([did, {"at": iso(t), "resolved": "recorded",
                                               "text": text(rng, quantile_draw(rng, PROFILE["steer_attempts_bytes"]))}])
                         cp.write_row(("steer_attempts", nid, iso(t), v)); rows_d += 1; bytes_d += len(v)
             with cur.copy(f'COPY "{schema}".log_l (sect, at, val) FROM STDIN') as cp:
@@ -395,12 +395,12 @@ def child(args) -> int:
                     target = quantile_draw(rng, PROFILE["archived_item_bytes"])
                     it["evidence"] = [{"at": iso(t), "by": nid, "op": "evidence",
                                        "note": text(rng, max(0, target - 3000))}]
-                    cp.write_row(("work_items_archive", iso(t), json.dumps(it))); rows_l += 1
+                    cp.write_row(("work_items_archive", iso(t), store._dumps(it))); rows_l += 1
                     archived_items += 1
                 for nid in live:
                     for k in range(PROFILE["events_per_live"]):
                         t = now - rng.random() * 86400 * 7
-                        v = json.dumps({"op": rng.choice(["status", "mail", "work", "turn"]),
+                        v = store._dumps({"op": rng.choice(["status", "mail", "work", "turn"]),
                                         "actor": nid, "at": iso(t), "detail": {"node": nid}, "warnings": []})
                         cp.write_row(("events", iso(t), v)); rows_l += 1
         conn.commit()

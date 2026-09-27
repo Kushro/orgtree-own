@@ -3326,6 +3326,16 @@ def _delete_log_seqs(conn: sqlite3.Connection, table: str,
     conn.execute(f"DELETE FROM {table} WHERE seq IN ({marks})", ids)
 
 
+def _same_log_text(old: str, new: str) -> bool:
+    """Ignore JSON whitespace left by an import, retaining the raw CAS token.
+
+    Compare serialized values, not Python equality (True == 1 == 1.0).
+    Normal store-written rows take the string-only fast path. A mismatch
+    pays one decode to distinguish formatting from a changed value.
+    """
+    return old == new or _dumps(json.loads(old)) == new
+
+
 def _write_log_rows(conn: sqlite3.Connection, table: str,
                     scope_sql: str, scope_args: tuple[Any, ...],
                     insert_sql: str, insert_prefix: tuple[Any, ...],
@@ -3376,7 +3386,11 @@ def _write_log_rows(conn: sqlite3.Connection, table: str,
                 cursor = conn.execute(insert_sql, (*insert_prefix, _at_of(entry), val))
                 result.append((cast(int, cursor.lastrowid), val))
             else:
-                if old_by_id[seq] != val:
+                if _same_log_text(old_by_id[seq], val):
+                    # No write: the adopted baseline must remain the exact
+                    # stored text, or a later real edit would fail its CAS.
+                    val = old_by_id[seq]
+                else:
                     if cas is not None:
                         _cas(conn, f"UPDATE {table} SET at=?, val=? WHERE seq=? AND val=?",
                              (_at_of(entry), val, seq, old_by_id[seq]),
@@ -3389,7 +3403,8 @@ def _write_log_rows(conn: sqlite3.Connection, table: str,
 
     # A plain list replacement, migration, reordering, or unprovable journal
     # falls back to an exact replacement of this bounded scope.
-    if snap is not None and [val for _, val in old] == strs:
+    if snap is not None and len(old) == len(strs) and all(
+            _same_log_text(oval, val) for (_, oval), val in zip(old, strs)):
         return old
     if cas is not None:
         # replace only what this save loaded, row by row, and refuse if the
