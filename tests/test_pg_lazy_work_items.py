@@ -159,4 +159,14 @@ class LazyRows(unittest.TestCase):
         rows=store.read_work_items_rows(self.slug,['one','two'])
         self.assertEqual(rows['ids'],['one']);self.assertEqual(rows['items']['one']['rev'],11)
 
+    def test_identity_check_does_not_fetch_evidence_from_other_items(self):
+        with orgtx.org_tx(self.slug,sections=['work_items','asks']) as tx:
+            rows=tx.d['work_items']
+            self.assertEqual(tx.org.work_identity_state(),tx.org.WORK_IDENTITY_SLUG)
+            self.assertTrue(all(not row._loaded for row in rows))
+            rows[0]['nested']['values'].append(13)
+            self.assertFalse(rows[1]._loaded)
+        self.assertEqual(self.row()['nested']['values'],[1,13])
+
+
 if __name__=='__main__': unittest.main()

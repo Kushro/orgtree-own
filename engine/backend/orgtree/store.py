@@ -2323,7 +2323,7 @@ class _NodeDict(dict):
 # Small metadata only: no evidence/body cache and no connection retained by an Org.
 # Version keys include the data root, database/schema and PostgreSQL tuple identity.
 _WORK_ITEM_META: dict[tuple[Any, ...], str] = {}
-_WORK_ATTENTION_FIELDS = ("slug", "manual_attention", "notification_attention_active", "notification_attention_epoch")
+_WORK_ATTENTION_FIELDS = ("id", "slug", "manual_attention", "notification_attention_active", "notification_attention_epoch")
 
 
 def _work_raw(raw: Any) -> Any:
