@@ -95,6 +95,8 @@ class ExternalRevocationTests(unittest.TestCase):
 def tearDownModule():
     fixture.tearDownModule()
     if ADMIN:
+        from orgtree import pgstore
+        pgstore.close_idle()
         with psycopg.connect(ADMIN, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE {DBNAME} WITH (FORCE)')
 

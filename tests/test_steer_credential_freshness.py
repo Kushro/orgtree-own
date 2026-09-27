@@ -37,8 +37,9 @@ class FeedLagTests(unittest.TestCase):
                 fixture.store, 'cached_org', side_effect=lambda slug: old if slug == self.slug else cached(slug)):
             response = self.poll(token)
         self.assertEqual(response.status_code, 403, response.text)
-        with patch.object(fixture.store, 'cached_org', return_value=old), \
-                patch.object(fixture.sup, 'ack_steer') as ack:
+        with patch.object(fixture.sup, 'STEER_CHEAP', cheap), \
+                patch.object(fixture.store, 'cached_org', return_value=old), \
+                patch.object(fixture.sup, 'ack_steer', return_value={}) as ack:
             response = self.client.post(
                 f'/api/orgs/{self.slug}/nodes/{fixture.W}/steer/ack',
                 headers={'x-orgtree-agent-token': token},
