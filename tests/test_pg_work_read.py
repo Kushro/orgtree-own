@@ -192,10 +192,11 @@ class Counts(unittest.TestCase):
         self.assertEqual(self.c.execute(f'SELECT xmin::text,revision FROM {self.s}.work_read_state').fetchone(),before)
 
     def test_concurrent_new_item_and_reparent_do_not_miss_dependency(self):
-        started=threading.Event(); errors=[]
+        started=threading.Event(); errors=[]; backend=[]
         def writer():
             try:
                 with pgstore.connect() as c,c.transaction():
+                    backend.append(c.execute('SELECT pg_backend_pid()').fetchone()[0])
                     started.set()
                     c.execute(f"UPDATE {self.s}.nodes SET val=(val::jsonb || '{{\"parent\":\"b\"}}')::text WHERE id='a'")
                     self.assertTrue(workread.refresh(c,self.oid))
@@ -203,7 +204,13 @@ class Counts(unittest.TestCase):
         with self.c.transaction():
             self.add(self.item())
             thread=threading.Thread(target=writer); thread.start(); self.assertTrue(started.wait(3))
-            # Hold state lock while the other writer has updated a node version.
+            deadline=time.monotonic()+3; blocked=False
+            with pgstore.connect() as observer:
+                while time.monotonic()<deadline:
+                    waiting=observer.execute('SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s',(backend[0],)).fetchone()
+                    if waiting and waiting[0]=='Lock': blocked=True; break
+                    time.sleep(.01)
+            self.assertTrue(blocked,'topology writer did not wait for dependency serialization')
             self.assertTrue(workread.refresh(self.c,self.oid))
         thread.join(10); self.assertFalse(thread.is_alive()); self.assertEqual(errors,[])
         self.assertEqual(self.counts('b')['active'],1)
@@ -216,6 +223,40 @@ class Counts(unittest.TestCase):
         self.assertEqual(self.counts()['active'],1)
         with patch.object(workread,'reconcile',side_effect=AssertionError('repeated raw scan')):
             workread.bootstrap(self.c)
+
+    def test_runtime_role_initializes_reads_and_updates_metadata(self):
+        self.assertTrue(self.c.execute("SELECT 1 FROM pg_roles WHERE rolname='orgtree_runtime'").fetchone())
+        with self.c.transaction():
+            self.c.execute('SET LOCAL ROLE orgtree_runtime')
+            oid=self.c.execute("INSERT INTO public.orgs(slug) VALUES('counts-runtime') RETURNING org_id").fetchone()[0]
+            schema=self.c.execute('SELECT public.orgtree_create_org_schema(%s)',(oid,)).fetchone()[0]
+            self.c.execute(f'INSERT INTO {schema}.doc VALUES(%s,%s)',('work_items',workrows.header(['one'])))
+            self.c.execute(f'INSERT INTO {schema}.doc VALUES(%s,%s)',(workrows.PREFIX+'one',json.dumps(self.item())))
+            self.assertTrue(workread.refresh(self.c,oid))
+            self.assertEqual(workread.counts_raw(self.c,oid,viewer='a',now_ts=self.now)['active'],1)
+
+    def test_real_import_replacement_refreshes_counts_without_losing_raw(self):
+        import importlib.util
+        import os
+        import sys
+        from pathlib import Path
+        path=Path(__file__).resolve().parents[1]/'tools/pypg/pgimport.py'
+        spec=importlib.util.spec_from_file_location('count_importer',path)
+        module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; spec.loader.exec_module(module)
+        sink=module.PgSink(os.environ['ORGTREE_PG_URL'],f.data/'orgs')
+        body=json.dumps(dict(self.item(),future={'untouched':[1,True,None]}))
+        rows={name:[] for name in module.TABLES}
+        rows['doc']=[('work_items',workrows.header(['one'])),(workrows.PREFIX+'one',body)]
+        try:
+            sink.replace_org('counts-import',rows,{'source_fingerprint':'test'})
+            oid=sink._org_id('counts-import')
+            self.assertEqual(workread.counts_raw(sink.conn,oid,viewer='a',now_ts=self.now)['active'],1)
+            self.assertEqual(dict(sink.read_org('counts-import')['doc'])[workrows.PREFIX+'one'],body)
+            rows['doc']=[('work_items',workrows.header([]))]
+            rows['log_l']=[(1,'work_items_archive',body)]
+            sink.replace_org('counts-import',rows,{'source_fingerprint':'replacement'})
+            self.assertEqual(workread.counts_raw(sink.conn,oid,viewer='a',now_ts=self.now),dict(active=0,attention=0,archived=1,backlogged=0))
+        finally: sink.close()
 
 
 if __name__ == '__main__':

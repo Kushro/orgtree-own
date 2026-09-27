@@ -188,9 +188,16 @@ def refresh(raw, org_id: int) -> bool:
 def reconcile(raw, org_id: int) -> bool:
     """Explicit migration/test control. Recompute from raw bodies, not index.
 
-    Caller owns the write transaction and source-table locks. A mismatch emits
+    Nested callers retain source-table locks until their transaction ends. A mismatch emits
     ERROR and keeps readiness false; no read performs this full-history scan.
     """
+    schema=f'org_{int(org_id)}'
+    with raw.transaction():
+        raw.execute(f'LOCK TABLE {schema}.doc,{schema}.nodes,{schema}.log_l IN SHARE MODE')
+        return _reconcile_locked(raw,org_id)
+
+
+def _reconcile_locked(raw,org_id):
     schema=f'org_{int(org_id)}'; policy=_Policy(_Parents(raw,schema)); totals=Counter()
     valid=bool(raw.execute('SELECT public.orgtree_check_work_index(%s)',(org_id,)).fetchone()[0])
     # One streaming join; no per-body network read or whole-history Python list.
@@ -202,10 +209,12 @@ def reconcile(raw, org_id: int) -> bool:
         ARRAY(SELECT node_id FROM {schema}.work_read_dependency d WHERE d.slug=source.val::json->>'slug' ORDER BY node_id)
       FROM source LEFT JOIN {schema}.work_read_policy p ON p.slug=source.val::json->>'slug'"""
     count=0; dependency_count=0
-    for location,body,stored_location,deadline,manual,access,deps in raw.execute(query):
-        item=json.loads(body); expected,allowed,parents=_expected(policy,item,location)
-        valid &= expected==(stored_location,deadline,manual) and allowed==set(access) and parents==set(deps)
-        totals.update(allowed); count+=1; dependency_count+=len(parents)
+    with raw.cursor(name=f'work_access_reconcile_{org_id}') as cursor:
+        cursor.execute(query)
+        for location,body,stored_location,deadline,manual,access,deps in cursor:
+            item=json.loads(body); expected,allowed,parents=_expected(policy,item,location)
+            valid &= expected==(stored_location,deadline,manual) and allowed==set(access) and parents==set(deps)
+            totals.update(allowed); count+=1; dependency_count+=len(parents)
     actual=dict(raw.execute(f'SELECT viewer,total FROM {schema}.work_read_totals WHERE total<>0').fetchall())
     questions=_questions(raw,schema)
     actual_questions=dict(raw.execute(f'SELECT slug,questions FROM {schema}.work_read_questions').fetchall())
