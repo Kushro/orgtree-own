@@ -17,9 +17,12 @@ transaction's life — so no phantom can appear under the sweep.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import os
+import sqlite3
 from typing import TypeVar
 
-from . import orgtx
+from . import orgtx, store
+from .ledger import LedgerError
 
 T = TypeVar("T")
 
@@ -54,6 +57,41 @@ HEAL_SECTIONS = ("_migrations", "permission_mode")
 #: what POST /defaults writes (Org.set_hire_defaults)
 DEFAULTS_SECTIONS = ("default_tools", "default_visibility", "permission_mode",
                      "default_account")
+
+def _plan_stamp_heal_completed(slug: str) -> bool:
+    """Inspect only a persisted completion marker, never a partial Org.
+
+    The marker is written atomically with the heal and is never cleared by
+    this path. An absent/unsupported marker keeps the existing locked heal,
+    which checks again under its locks when two startups race.
+    """
+    if store.STORE_BACKEND != "postgres":
+        return False
+    if not os.path.exists(store._db_path(store._safe_slug(slug))):
+        return False  # let the original transaction handle pending imports
+
+    def read(conn):
+        row = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM doc WHERE key='nodes'),"
+            "coalesce(jsonb_typeof(val::jsonb)='object' AND "
+            "jsonb_typeof(val::jsonb->'pm_plan_stamp_heal')='object' AND "
+            "jsonb_typeof(val::jsonb->'pm_plan_stamp_heal'->'at')='string' AND "
+            "jsonb_typeof(val::jsonb->'pm_plan_stamp_heal'->'healed')='array',false) "
+            "FROM doc WHERE key='_migrations'").fetchone()
+        return bool(row and not row[0] and row[1])
+
+    try:
+        return bool(store._bounded_read(slug, read))
+    except (LedgerError, sqlite3.Error, OSError, ValueError):
+        return False  # retain the original reader's result/error semantics
+
+
+def heal_plan_stamps(slug: str) -> list[str] | None:
+    if _plan_stamp_heal_completed(slug):
+        return None
+    return whole_org_tx(slug, lambda tx: tx.org.heal_plan_stamps(),
+                        sections=HEAL_SECTIONS, logs=SETTINGS_LOGS)
+
 
 def whole_org_tx(slug: str, fn: Callable[[orgtx.OrgTx], T], *,
                  sections: Iterable[str] = (),
