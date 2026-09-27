@@ -304,6 +304,14 @@ def child(args) -> int:
     desc = json.loads((root / "scale-descriptor.json").read_text(encoding="utf-8"))
     slug = desc["org"]
 
+    if os.environ.get("ORGTREE_SCALE_CACHE_TRACE") == "1":
+        from cached_org_trace import install as install_cache_trace
+        cache_trace = install_cache_trace(store)
+
+        @api.app.get("/scale/cache-trace")
+        def _cache_trace():
+            return cache_trace.snapshot()
+
     feed_trace = None
     if os.environ.get("ORGTREE_SCALE_FEED_TRACE") == "1":
         from feed_trace import install
