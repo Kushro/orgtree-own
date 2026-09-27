@@ -57,6 +57,10 @@ class PostgresTranscriptCapture(fixture.CaptureTests):
         slug=self.org.d['slug'];fired=[];original=pgstore.PgConn.execute
         with store._transcript_source_cache_lock:store._transcript_source_cache.clear()
         def between(conn,sql,*a,**kw):
+            if sql == 'BEGIN':
+                result=original(conn,sql,*a,**kw)
+                conn.raw.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+                return result
             if '__source_node' in sql and not fired:
                 fired.append(True)
                 with psycopg.connect(os.environ['ORGTREE_PG_URL']) as writer:
