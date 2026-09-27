@@ -112,9 +112,9 @@ class CaptureTests(unittest.TestCase):
         calls=[]
         def fake(slug,nid,**kw):
             calls.append((nid,bool(kw.get('backfill'))));return False
-        queue=collections.deque()
-        with patch.object(store,'cached_list',return_value=[{'slug':'x'}]), \
-             patch.object(store,'cached_org',return_value=SimpleNamespace(nodes=['a','b','c'])), \
+        queue=ingest._SweepState()
+        with patch.object(store,'org_slugs',return_value=['x']), \
+             patch.object(store,'read_transcript_nodes_page',return_value={'rows': [('a','live'),('b','live'),('c','live')], 'more': False}), \
              patch.dict(sup._state,{('x','busy'):{'busy':True}},clear=True), \
              patch.object(ingest,'capture_safely',side_effect=fake):
             ingest._sweep(queue)
@@ -127,9 +127,9 @@ class CaptureTests(unittest.TestCase):
         calls=[]
         def fake(slug,nid,**kw):
             calls.append(nid);return nid=='b'
-        queue=collections.deque()
-        with patch.object(store,'cached_list',return_value=[{'slug':'x'}]), \
-             patch.object(store,'cached_org',return_value=SimpleNamespace(nodes=['a','b','c'])), \
+        queue=ingest._SweepState()
+        with patch.object(store,'org_slugs',return_value=['x']), \
+             patch.object(store,'read_transcript_nodes_page',return_value={'rows': [('a','live'),('b','live'),('c','live')], 'more': False}), \
              patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
             ingest._sweep(queue);ingest._sweep(queue)
         self.assertEqual(calls,['a','b','c','a','b','c'])
@@ -241,6 +241,65 @@ class CaptureTests(unittest.TestCase):
             self.assertEqual(sup._transcript_root(view, 'agent'),
                              sup._transcript_root(org, 'agent'))
             self.assertEqual(view.node('agent')['account'], 'missing-profile-test-only')
+
+    def test_archived_discovery_is_bounded_and_not_in_hot_queue(self):
+        rows = [(f'old{i:04d}', 'archived') for i in range(80)]
+        rows.append(('zlive', 'live'))
+        selected = []
+        def page(slug, after='', limit=8):
+            tail = [row for row in rows if row[0] > after]
+            selected.append(tail[:limit])
+            return {'rows': tail[:limit], 'more': len(tail) > limit}
+        state = ingest._SweepState()
+        calls = []
+        with patch.object(store, 'org_slugs', return_value=['x']), \
+             patch.object(store, 'read_transcript_nodes_page', side_effect=page), \
+             patch.dict(sup._state, {('x','busy'): {'busy': True}}, clear=True), \
+             patch.object(ingest, 'capture_safely', side_effect=lambda s,n,**k: calls.append((n,k))):
+            for _ in range(11):
+                ingest._sweep(state)
+        self.assertEqual(sum(len(batch) for batch in selected), 81)
+        self.assertTrue(all(len(batch) <= 8 for batch in selected))
+        self.assertEqual(list(state.active), [('x', 'zlive')])
+        self.assertFalse(any(n.startswith('old') for _,n in state.hot))
+        self.assertEqual(sum(n=='busy' for n,k in calls), 11)
+        self.assertEqual(sum(n.startswith('old') for n,k in calls), 80)
+
+    def test_discovery_exact_page_wrap_and_deleted_org_prunes_active(self):
+        state = ingest._SweepState()
+        rows = [(str(i), 'live') for i in range(8)]
+        with patch.object(store, 'org_slugs', return_value=['x']), \
+             patch.object(store, 'read_transcript_nodes_page', return_value={'rows': rows, 'more': False}):
+            state.discover()
+            self.assertFalse(state.orgs, 'exact page must not cost an empty tick')
+        with patch.object(store, 'org_slugs', return_value=[]):
+            state.discover()
+        self.assertEqual(len(state.active), 0)
+
+    def test_settled_cache_is_bounded_and_evicted_source_still_detects_replacement(self):
+        self.write(0, 3)
+        self.backfill()
+        with ingest._lock:
+            for i in range(ingest._SETTLED_LIMIT + 3):
+                ingest._remember_settled(('other',str(i)), ((),()))
+            self.assertEqual(len(ingest._settled), ingest._SETTLED_LIMIT)
+            self.assertNotIn((self.org.d['slug'],'agent'), ingest._settled)
+        original = self.path.stat()
+        replacement = self.path.with_suffix('.changed')
+        replacement.write_bytes(self.path.read_bytes().replace(b'"0"', b'"X"'))
+        os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+        replacement.replace(self.path)
+        self.assertTrue(self.backfill())
+        self.assertTrue(any('X' in row[2] for row in self.rows()))
+
+    def test_projection_keeps_explicit_null_metadata_distinct_from_absent(self):
+        slug = self.org.d['slug']
+        org = store.load_org(slug)
+        org.node('agent')['desktop_import'] = None
+        store.save_org(org)
+        doc = store.read_transcript_source(slug, 'agent')
+        self.assertIn('desktop_import', doc['nodes']['agent'])
+        self.assertIsNone(doc['nodes']['agent']['desktop_import'])
 
     def test_unread_suffix_retries_without_another_file_change(self):
         import builtins

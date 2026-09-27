@@ -5439,6 +5439,26 @@ _TRANSCRIPT_NODE_FIELDS = (
 )
 
 
+
+def read_transcript_nodes_page(slug: str, after: str = "", limit: int = 8):
+    """Bounded primary-key discovery: never enumerate the whole node table.
+
+    The cursor includes inactive rows so historical changes remain eligible.
+    Scanning is separate from the hot queue; no archive filter can turn this
+    into a scan through every retired row to find the next live node.
+    None means JSON/legacy blob representation, requiring compatibility read.
+    """
+    cap = max(1, min(int(limit), 64))
+    def body(conn):
+        if conn.execute("SELECT 1 FROM doc WHERE key='nodes'").fetchone():
+            return None
+        rows = [(str(row[0]), row[1]) for row in conn.execute(
+            "SELECT id,json_extract(val,'$.state') FROM nodes "
+            "WHERE id>? ORDER BY id LIMIT ?", (after, cap + 1)).fetchall()]
+        return {"rows": rows[:cap], "more": len(rows) > cap}
+    return _bounded_read(slug, body)
+
+
 def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
     """Coherent source-resolution inputs, without charter, docket or mail.
 
@@ -5450,11 +5470,16 @@ def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
         paths = ",".join("'$." + field + "'" for field in _TRANSCRIPT_NODE_FIELDS)
         rows = dict(conn.execute(
             "SELECT '__source_node', json_extract(val," + paths + ") "
-            "FROM nodes WHERE id=? UNION ALL SELECT key,val FROM doc "
+            "FROM nodes WHERE id=? UNION ALL SELECT '__desktop_present', "
+            + ("CASE WHEN jsonb_exists(val::jsonb, 'desktop_import') THEN '1' ELSE '0' END "
+               if STORE_BACKEND == 'postgres' else
+               "CASE WHEN json_type(val,'$.desktop_import') IS NOT NULL THEN '1' ELSE '0' END ")
+            + "FROM nodes WHERE id=? UNION ALL SELECT key,val FROM doc "
             "WHERE key IN ('nodes','reply_incarnation','sandbox','kiosk')",
-            (nid,)).fetchall())
+            (nid, nid)).fetchall())
         if "nodes" in rows:
             return None
+        desktop_present = rows.pop("__desktop_present", "0") == "1"
         raw = rows.pop("__source_node", None)
         if raw is None:
             return None
@@ -5462,6 +5487,8 @@ def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
         # SQL null for an absent optional field must remain an absent key:
         # existing path resolvers use .get(..., {}) for nested metadata.
         node = {key: value for key, value in node.items() if value is not None}
+        if desktop_present and "desktop_import" not in node:
+            node["desktop_import"] = None
         result = {key: json.loads(value) for key, value in rows.items()}
         result.update(slug=slug, nodes={nid: node})
         return result

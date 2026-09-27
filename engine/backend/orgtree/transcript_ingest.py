@@ -27,8 +27,18 @@ _log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _started = False
 _fresh: set[str] = set()
-#: (slug, nid) -> (settled input fingerprint, source keys). Pruned every sweep.
-_settled: dict[tuple[str, str], tuple] = {}
+#: Bounded (slug, nid) -> (settled fingerprint, source keys); durable data is untouched.
+_SETTLED_LIMIT = 512
+_settled: dict[tuple[str, str], tuple] = collections.OrderedDict()
+
+
+def _remember_settled(key, value):
+    # The source database remains authoritative. Eviction only causes another
+    # bounded signature/offset check; it never discards transcript records.
+    _settled.pop(key, None)
+    _settled[key] = value
+    while len(_settled) > _SETTLED_LIMIT:
+        _settled.pop(next(iter(_settled)))
 
 
 def _stat(path):
@@ -104,9 +114,8 @@ def capture(slug, nid, *, beginning=False, backfill=False):
     # A database outage can leave durable output in the recovery spool without
     # changing any provider file. Settled-file skips must not starve its replay.
     records._drain_spool()
-    # read-only resolution (session id, transcript paths) off the shared
-    # snapshot: this runs every second for every busy node plus 8 backfill
-    # slices, and each call re-parsed the whole document (REPORT.md #7)
+    # Resolve only source identity/path inputs. Legacy documents still use
+    # their existing normalized Org and locked identity initialization.
     org = _source_view(slug, nid)
     node = org.node(nid)
     if not node.get('session_id'):
@@ -150,8 +159,13 @@ def capture(slug, nid, *, beginning=False, backfill=False):
             count = 1 << 50
         elif backfill:
             with records.database() as conn:
-                have = conn.execute('SELECT COUNT(*) FROM transcript_records WHERE source=?', (source,)).fetchone()[0]
-            count = have + 64
+                meta = conn.execute('SELECT lower_byte FROM transcript_sources WHERE source=?',
+                                    (source,)).fetchone()
+                # A fully imported source needs signature/suffix checking,
+                # not COUNT(*) over all its lifetime records.
+                have = (conn.execute('SELECT COUNT(*) FROM transcript_records WHERE source=?',
+                                     (source,)).fetchone()[0] if not meta or meta[0] else None)
+            count = have + 64 if have is not None else 1
         records.ingest(source, str(filename), count, {'bytes_read': 0})
         with _lock:
             _fresh.discard(source)
@@ -162,7 +176,7 @@ def capture(slug, nid, *, beginning=False, backfill=False):
         settled = _is_settled(sources, vsource, fingerprint)
         with _lock:
             if settled:
-                _settled[(slug, nid)] = (fingerprint, tuple(s for s, _ in sources))
+                _remember_settled((slug, nid), (fingerprint, tuple(s for s, _ in sources)))
             else:
                 _settled.pop((slug, nid), None)
     return True
@@ -180,29 +194,80 @@ def capture_safely(slug, nid, **kwargs):
         return True
 
 
-def _sweep(queue):
-    """Busy nodes, then eight fair slices (stat-only for settled nodes)."""
-    from . import store, supervisor as sup
-    if not queue:
-        # queue rebuild used to be a full root parse each time it
-        # drained (~once a minute at 449 nodes, every few seconds
-        # on small fleets) — the shared snapshot answers it free
-        for row in store.cached_list():
-            org = store.cached_org(row['slug'])
-            queue.extend((row['slug'], nid) for nid in org.nodes)
-        live = set(queue)
-        with _lock:
-            for k in [k for k in _settled if k not in live]:
-                del _settled[k]
+class _SweepState:
+    """Active queue plus a bounded, independent historical discovery cursor."""
+    def __init__(self):
+        self.root = None
+        self.orgs = collections.deque()
+        self.cursor = ''
+        self.round = 0
+        self.active = collections.OrderedDict()
+        self.hot = collections.deque()
+
+    def discover(self):
+        from . import store
+        root = str(store.DATA_ROOT)
+        if self.root != root:
+            self.__init__()
+            self.root = root
+        if not self.orgs:
+            self.round += 1
+            self.orgs.extend(store.org_slugs())
+        archived = []
+        budget = 8
+        while self.orgs and budget:
+            slug = self.orgs[0]
+            page = store.read_transcript_nodes_page(slug, self.cursor, budget)
+            if page is None:
+                # JSON/old blob compatibility keeps existing normalization.
+                org = store.cached_org(slug)
+                rows = [(nid, org.node(nid).get('state'))
+                        for nid in sorted(org.nodes) if nid > self.cursor][:budget + 1]
+                page = {'rows': rows[:budget], 'more': len(rows) > budget}
+            rows = page['rows']
+            for nid, state in rows:
+                key = (slug, nid)
+                if state == 'archived':
+                    self.active.pop(key, None)
+                    archived.append(key)
+                else:
+                    self.active[key] = self.round
+            budget -= len(rows)
+            if rows:
+                self.cursor = rows[-1][0]
+            if not page['more']:
+                self.orgs.popleft()
+                self.cursor = ''
+            elif not rows:
+                raise RuntimeError('transcript discovery cursor made no progress')
+        if not self.orgs:
+            for key in [key for key, seen in self.active.items() if seen != self.round]:
+                del self.active[key]
+        return archived
+
+
+def _sweep(state):
+    """Busy capture, active backfill, then bounded historical reconciliation.
+
+    At most eight historical node rows are discovered per tick. Settled
+    archived sources never enter the active queue, but retain stat/signature
+    checks and re-enter ingestion immediately when their slice finds change.
+    """
+    from . import supervisor as sup, transcript_records as records
+    records._drain_spool()
     with sup._state_lock:
-        active = [key for key, s in sup._state.items() if s.get('busy')]
-    for slug, nid in active:
+        busy = [key for key, value in sup._state.items() if value.get('busy')]
+    for slug, nid in busy:
         capture_safely(slug, nid)
-    # Round-robin older ranges so one long transcript cannot starve
-    # another. No complete projection/parser or UI mounting occurs.
-    for _ in range(min(8, len(queue))):
-        slug, nid = queue.popleft()
-        capture_safely(slug, nid, backfill=True)
+    archived = state.discover()
+    if not state.hot:
+        state.hot.extend(state.active)
+    for _ in range(min(8, len(state.hot))):
+        key = state.hot.popleft()
+        if key in state.active:
+            capture_safely(*key, backfill=True)
+    for key in archived:
+        capture_safely(*key, backfill=True)
 
 
 def start():
@@ -214,7 +279,7 @@ def start():
 
     def run():
         from . import transcript_records as records
-        queue = collections.deque()
+        queue = _SweepState()
         with records.reuse_database():
             while True:
                 try:
