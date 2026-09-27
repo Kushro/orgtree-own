@@ -53,7 +53,6 @@ class Detail(unittest.TestCase):
             history=[{'op':'move','from':'secret','to':'public'}],
             artifacts=[{'id':'artifact-1','name':'secret.txt','scope':'named','grants':[]}]))
         self.refresh()
-        expected=store.load_org(self.slug).work_get('b','one',now_ts=self.now) if False else None
         for viewer in (USER,'a'):
             expected=store.load_org(self.slug).work_get(viewer,'one',now_ts=self.now)
             result=self.get(viewer)
@@ -140,3 +139,7 @@ class Detail(unittest.TestCase):
         with patch.object(workdetail,'get',return_value=None), patch.object(store,'load_org',wraps=store.load_org) as legacy:
             fallback=api.work_item_get(self.slug,'one')
             self.assertEqual(fallback,desktop); self.assertEqual(legacy.call_count,1)
+
+
+if __name__ == '__main__':
+    unittest.main()
