@@ -9,7 +9,7 @@ DECLARE
   count_before bigint; count_after bigint; affected bigint; rev bigint;
   before_sha text; after_sha text;
 BEGIN
-  FOR org IN SELECT org_id, slug FROM public.orgs ORDER BY org_id LOOP
+  FOR org IN SELECT o.org_id, o.slug FROM public.orgs o ORDER BY o.org_id LOOP
     s := 'org_' || org.org_id;
     EXECUTE format('LOCK TABLE %I.doc IN ACCESS EXCLUSIVE MODE', s);
     EXECUTE format('SELECT val FROM %I.doc WHERE key=$1', s)
