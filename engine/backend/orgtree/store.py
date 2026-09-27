@@ -3703,7 +3703,8 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
         # missing here is deleted by the loop below
         for rk, s in _split_rows(k, v).items():
             new_doc[rk] = s
-            if changes is not None:
+            if changes is not None and not (k == workrows.SECTION
+                    and snap_doc is not None and s is snap_doc.get(rk)):
                 changes.dumped_bytes += len(s)
             if snap_doc is None or snap_doc.get(rk) != s:
                 if _ROW_CAS and snap_doc is not None and rk in snap_doc:
@@ -3965,7 +3966,9 @@ def _save_sqlite(org: Org) -> None:
                 # revision bump + NOTIFY org_rev, in this same transaction
                 from . import pgstore
                 pgstore.on_save_commit(cast("pgstore.PgConn", conn),
-                                       not changes.is_empty())
+                                       not changes.is_empty(), work_changed=bool(
+                                           changes.changed_keys() & {"work_items",
+                                               "work_items_archive", "work_scope_log"}))
             # {COMMIT, publish, seq bump} are one atom with respect to
             # snapshot rebuilds — see the invariant note on `_changed_lock`.
             # A commit outside the gate opens the exact window this closes: a
@@ -4834,7 +4837,11 @@ def read_work_items_rows(slug: str, item_slugs: Iterable[str]) -> dict[str, Any]
                 found[item] = value
         if len(found) != len(keys):
             raise LedgerError("work-items header names missing rows")
-        return {"revision": pgstore.revision(conn), "ids": ids, "items": found}
+        revisions = conn.raw.execute(
+            "SELECT revision,work_revision FROM public.orgs WHERE org_id=%s",
+            (conn.org_id,)).fetchone()
+        return {"revision": int(revisions[0]), "work_revision": int(revisions[1]),
+                "ids": ids, "items": found}
     return _bounded_read(slug, body)
 
 

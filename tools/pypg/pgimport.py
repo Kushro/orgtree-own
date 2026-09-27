@@ -5,7 +5,7 @@ THE PROBLEM. The alpha switches org storage to PostgreSQL (user decision 31).
 Nothing may be lost or silently altered on the way, and the old files must
 stay exactly as they were so the switch back is a real rollback.
 
-THE SHAPE. The seam's row layout moves as it is (PYPG-PLAN §1): per org the
+THE SHAPE. Except for the verified per-item work_items transform, the seam's row layout moves as it is (PYPG-PLAN §1): per org the
 five SQLite tables ``doc``, ``nodes``, ``log_d``, ``log_l`` and ``meta``
 (``store.py`` §3.1). This module
 
@@ -21,7 +21,8 @@ five SQLite tables ``doc``, ``nodes``, ``log_d``, ``log_l`` and ``meta``
    keys, so a store that normalises key order, like ``jsonb``, still matches);
 4. IMPORTS through a :class:`Sink` (the PostgreSQL side), one transaction per
    org, and reads the org back: the manifests AND the raw rows must match
-   (PG-0 stores ``val`` as text, so a faithful import is byte-identical). An
+   (PG-0 stores ``val`` as text: exact target rows must match, and all sections
+   except the versioned work_items transform retain their source bytes). An
    org whose recorded import already matches its source is skipped, so a
    crashed run is simply run again (RT10). The real sink is :class:`PgSink`
    (PG-0's layout); the import holds the root's owner lock, so it refuses
@@ -652,7 +653,7 @@ class PgSink:
                 "ON CONFLICT (org_id, op_key) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, "
                 "result = EXCLUDED.result, at = now()",
                 (org_id, self.OP_KEY, str(receipt.get("source_fingerprint", "")), json.dumps(dict(receipt), sort_keys=True)))
-            rev = self.conn.execute("UPDATE public.orgs SET revision = revision + 1 WHERE org_id = %s RETURNING revision",
+            rev = self.conn.execute("UPDATE public.orgs SET revision = revision + 1, work_revision = revision + 1 WHERE org_id = %s RETURNING revision",
                                     (org_id,)).fetchone()[0]
             self.conn.execute("SELECT pg_notify('org_rev', %s)", (f"{slug}:{rev}",))
 

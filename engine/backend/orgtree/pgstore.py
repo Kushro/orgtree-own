@@ -731,7 +731,7 @@ def open_conn(slug: str, marker: str, *, create: bool = False) -> PgConn:
         raise
 
 
-def on_save_commit(conn: PgConn, changed: bool) -> None:
+def on_save_commit(conn: PgConn, changed: bool, *, work_changed: bool = False) -> None:
     """Just before a save's COMMIT: bump the org revision and NOTIFY, in the
     same transaction, when the save changed anything."""
     if not changed:
@@ -739,8 +739,9 @@ def on_save_commit(conn: PgConn, changed: bool) -> None:
     conn.use()
     try:
         row = conn.raw.execute(
-            "UPDATE public.orgs SET revision = revision + 1 WHERE org_id = %s "
-            "RETURNING revision", (conn.org_id,)).fetchone()
+            "UPDATE public.orgs SET revision = revision + 1, "
+            "work_revision = CASE WHEN %s THEN revision + 1 ELSE work_revision END "
+            "WHERE org_id = %s RETURNING revision", (work_changed, conn.org_id,)).fetchone()
         rev = int(row[0])
         conn.raw.execute("SELECT pg_notify('org_rev', %s)", (f"{conn.slug}:{rev}",))
     except Exception as e:

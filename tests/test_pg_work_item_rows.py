@@ -41,6 +41,39 @@ class LiveRows(unittest.TestCase):
         self.assertEqual(result['revision'],rev+1)
         self.assertEqual(result['ids'],['one','two'])
 
+    def test_work_stamp_stable_for_unrelated_saves_and_tracks_logs(self):
+        def stamp(): return store.read_work_items_rows(self.slug,[])['work_revision']
+        initial=stamp(); self.assertGreater(initial,0)
+        org=store.load_org(self.slug); org.d['nodes']['a']['last_status']={'summary':'changed'}
+        store.save_org(org); self.assertEqual(stamp(),initial)
+        org=store.load_org(self.slug); org.d['work_items_archive'].append({'slug':'arch','value':1})
+        store.save_org(org); archived=stamp(); self.assertGreater(archived,initial)
+        org=store.load_org(self.slug); org.d['work_scope_log'].setdefault('arch',[]).append({'seq':1,'text':'scope'})
+        store.save_org(org); self.assertGreater(stamp(),archived)
+        a=store.load_org(self.slug); b=store.load_org(self.slug)
+        a.d['work_items'][0]['rev']=2; store.save_org(a); before=stamp()
+        b.d['work_items'][0]['rev']=3
+        with self.assertRaises(store.StaleWrite): store.save_org(b)
+        self.assertEqual(stamp(),before)
+
+    def test_assignment_and_archive_reopen_keep_stored_rows(self):
+        from orgtree import worktx
+        from orgtree.ledger import USER
+        org=store.create_org('actual-assignment-archive')
+        org.hire(USER,None,'haiku',0,'own'); org.hire(USER,'own','haiku',0,'sub')
+        org.work_create('own','Durable work row',objective='Keep assignment and archived body atomic.')
+        store.save_org(org); slug=org.d['slug']; item=org.d['work_items'][-1]['slug']
+        worktx.run(slug,lambda o:o.work_assign('own',item,'sub'))
+        fresh=store.load_org(slug); self.assertEqual(fresh.d['work_items'][-1]['owner']['node'],'sub')
+        with orgtx.org_tx(slug,sections=['work_items','work_items_archive','asks']) as tx:
+            row=tx.d['work_items'].pop(); tx.d['work_items_archive'].append(row)
+        self.assertEqual(store.read_work_items_rows(slug,[item])['ids'],[])
+        fresh=store.load_org(slug); self.assertEqual(fresh.d['work_items_archive'][-1]['slug'],item)
+        with orgtx.org_tx(slug,sections=['work_items','work_items_archive','asks']) as tx:
+            tx.d['work_items'].append(tx.d['work_items_archive'].pop())
+        restored=store.read_work_items_rows(slug,[item])['items'][item]
+        self.assertEqual(restored['owner']['node'],'sub')
+
     def test_old_nested_reference_after_save_and_external_alias(self):
         org=store.load_org(self.slug); row=org.d['work_items'][0]; values=row['nested']['values']
         store.save_org(org); values.append(7); store.save_org(org)

@@ -2,6 +2,8 @@
 -- Keep all fields as JSON TEXT: json (not jsonb) preserves numeric spellings,
 -- key order and unknown fields. Each organization is additionally locked
 -- against writers; the migration and its version receipt commit atomically.
+ALTER TABLE public.orgs ADD COLUMN work_revision bigint NOT NULL DEFAULT 0;
+
 DO $migration$
 DECLARE
   org record; s text; original text; item json; item_text text; slug text;
@@ -63,5 +65,7 @@ BEGIN
     UPDATE public.orgs SET revision=revision+1 WHERE org_id=org.org_id RETURNING revision INTO rev;
     PERFORM pg_notify('org_rev',org.slug || ':' || rev);
   END LOOP;
+  -- Archive-only orgs also receive an initial committed content stamp.
+  UPDATE public.orgs SET work_revision=revision;
 END
 $migration$;
