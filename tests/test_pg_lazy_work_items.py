@@ -313,7 +313,7 @@ class LazyRows(unittest.TestCase):
         request=SimpleNamespace(state=state)
         seen,watch=self.watch()
         with watch, patch.object(store,'cached_org',side_effect=AssertionError('eager identity')), \
-+                patch.object(store,'load_runtime_org',side_effect=AssertionError('full identity')):
+                patch.object(store,'load_runtime_org',side_effect=AssertionError('full identity')):
             caller=api._agent_identity(body,request)
         self.assertEqual(caller['id'],'a')
         self.assertFalse(any('ANY' in sql or 'xmin' in sql for sql,_ in seen),seen)
