@@ -5983,9 +5983,9 @@ def write_org(slug: str) -> Generator[Org]:
         yield load_org(slug)
 
 
-#: (E) default off until explicitly approved. Constructor node reads use
-#: mutation-tracked containers; unchanged work_items blobs can stay encoded.
-ORGTX_RESCOPE = os.environ.get("ORGTREE_ORGTX_RESCOPE", "").strip() == "1"
+#: Constructor node reads use mutation-tracked containers; unchanged
+#: work_items blobs can stay encoded. Set ORGTREE_ORGTX_RESCOPE=0 to disable.
+ORGTX_RESCOPE = os.environ.get("ORGTREE_ORGTX_RESCOPE", "1").strip() == "1"
 _READY_WORK_ITEMS: set[bytes] = set()
 
 

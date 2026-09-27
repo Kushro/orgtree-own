@@ -235,15 +235,15 @@ class SteerPollCostTests(unittest.TestCase):
 
 
 class SwitchOffTests(SteerPollCostTests):
-    """The switch is OFF by default, and off is exactly the old behaviour:
+    """Explicitly switching OFF retains the old behaviour:
     every meaning test above runs again here (inherited), while the two cost
     tests are replaced by their opposites."""
     CHEAP = False
 
-    def test_switch_is_off_by_default(self):
+    def test_switch_is_on_by_default(self):
         self.assertIsNone(_ENV_SWITCH, "the test environment set the switch")
         # the value the module computed at import, not the patched one
-        self.assertFalse(type(self)._imported, "STEER_CHEAP defaulted on")
+        self.assertTrue(type(self)._imported, "STEER_CHEAP defaulted off")
 
     def test_idle_poll_through_the_door_reads_no_org(self):
         # OFF: the door's credential check still does its private org_read

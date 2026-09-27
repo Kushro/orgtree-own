@@ -201,7 +201,7 @@ class ConstructionRows(unittest.TestCase):
         self.assertIn('n0', nodes._changed())
         self.assertEqual(node['payload']['items'], [1, 3])
 
-    def test_default_off_uses_original_node_dicts(self):
+    def test_switch_off_uses_original_node_dicts(self):
         with patch.object(store, 'ORGTX_RESCOPE', False):
             org = store.load_org(self.slug)
             self.assertIs(type(org.node('n0')), dict)
@@ -320,7 +320,7 @@ class ConstructionRows(unittest.TestCase):
 class SwitchDelivery(unittest.TestCase):
     def test_runner_delivers_controls(self):
         self.assertEqual(store.ORGTX_RESCOPE,
-                         os.environ.get('ORGTREE_ORGTX_RESCOPE', '').strip() == '1')
+                         os.environ.get('ORGTREE_ORGTX_RESCOPE', '1').strip() == '1')
         self.assertEqual(store._SCOPED_VERIFY,
                          os.environ.get('ORGTREE_SCOPED_SAVE_VERIFY', '').strip() == '1')
 

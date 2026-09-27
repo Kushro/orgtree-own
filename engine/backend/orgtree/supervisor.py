@@ -32169,15 +32169,13 @@ def pop_steer(slug: str, nid: str, *, return_carriers: bool = False,
 # record, not consumption. Design + model: scratch/mail-ack-contract/contract.md.
 
 #: THE CHEAP STEER POLL SWITCH (v3 scale, item b-cheap-steer-polls-answer-
-#: a-no-mail-poll-withou). DEFAULT OFF by coordinator condition 2026-09-26:
-#: turning it on by default is a separate, explicit step once proven. On:
-#: the /steer door checks the credential against the shared snapshot
-#: (`store.cached_org`) instead of a private `org_read`, `claim_steer` skips
+#: a-no-mail-poll-withou). On by default; ORGTREE_STEER_CHEAP=0 disables it.
+#: The /steer door checks the credential against committed node fields
+#: instead of a private whole-org read. `claim_steer` skips
 #: the halt-gated claim transaction when there is no RAM carrier (it could
 #: only choose nothing), and the storage pre-check reads the snapshot. Off:
-#: exactly the behaviour before. `ORGTREE_STEER_CHEAP=1` turns it on; tests
-#: flip this module attribute.
-STEER_CHEAP = os.environ.get("ORGTREE_STEER_CHEAP", "") == "1"
+#: exactly the behaviour before. Tests can flip this module attribute.
+STEER_CHEAP = os.environ.get("ORGTREE_STEER_CHEAP", "1") == "1"
 
 #: seconds a hook's unacked claim owns a batch before another hook may take
 #: it. PROPOSED, NOT MEASURED against the live root (the hook client gives up
