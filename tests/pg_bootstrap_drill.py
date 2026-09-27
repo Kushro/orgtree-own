@@ -121,7 +121,7 @@ class Drills(unittest.TestCase):
             self.assertTrue(owned.product)
             self.assertEqual(owned.database["action"], "initialized+started")
             self.assertEqual(env[bracket.STORE_ENV], "postgres")
-            self.assertEqual(sorted(owned.migration["checksums"]), ["0001_base.sql", "0002_runtime_grants.sql"])
+            self.assertEqual(sorted(owned.migration["checksums"]), ["0001_base.sql", "0002_runtime_grants.sql", "0003_work_item_rows.sql"])
             made = self.engine_store(root, env, "Fresh Drill")
             self.assertEqual(made["backend"], "postgres")
             self.assertTrue(Path(made["store_file"]).resolve().is_relative_to(REPO), made["store_file"])

@@ -72,7 +72,7 @@ if str(_REPO / "engine" / "backend") not in sys.path:
 # The tool READS SQLite/JSON sources through the store's SQLite code; an
 # operator shell that already says postgres must not change how it reads.
 os.environ["ORGTREE_STORE"] = "sqlite"
-from orgtree import ledger, store  # noqa: E402  (after the backend is on the path)
+from orgtree import ledger, store, workrows  # noqa: E402  (after the backend is on the path)
 
 SCHEMA = "orgtree.pgimport/v1"
 TABLES: tuple[str, ...] = ("doc", "nodes", "log_d", "log_l", "meta")
@@ -329,7 +329,19 @@ def problems(org: OrgRows) -> list[str]:
             why = _json_problem(row[vcol], is_json=table != "meta" or _meta_is_json(row[0]))
             if why:
                 out.append(f"{table} row {row[0]!r}: value {why}")
+    try:
+        workrows.transform(dict(org.rows["doc"]))
+    except (ValueError, TypeError) as exc:
+        out.append(f"work_items: {exc}")
     return out
+
+
+def target_rows(rows: Mapping[str, list[tuple[Any, ...]]]) -> tuple[dict[str, list[tuple[Any, ...]]], Any]:
+    try:
+        doc, items = workrows.transform(dict(rows["doc"]))
+    except (ValueError, TypeError) as exc:
+        raise ImportRefused(f"work_items: {exc}") from exc
+    return {**rows, "doc": list(doc.items())}, items
 
 
 # ---------------------------------------------------------------- the manifest
@@ -472,9 +484,13 @@ def dry_run(root: Path) -> dict[str, Any]:
             report["refused"].append(f"{slug}: {exc}")
             continue
         found = problems(org)
-        m = manifest(org.rows)
+        source_m = manifest(org.rows)
+        target, item_check = target_rows(org.rows) if not found else (org.rows, None)
+        m = manifest(target)
         report["orgs"][slug] = {"source": org.source, "source_fingerprint": org.source_fingerprint,
-                                "manifest": m, "manifest_sha256": manifest_digest(m), "problems": found}
+                                "manifest": m, "manifest_sha256": manifest_digest(m), "problems": found,
+                                "source_manifest": source_m, "source_manifest_sha256": manifest_digest(source_m),
+                                "work_items": item_check}
         report["refused"] += [f"{slug}: {p}" for p in found]
     report["side_stores"] = sorted(p.name for p in root.iterdir()
                                    if p.is_file() and p.suffix == ".db" and any(s in p.name for s in SIDE_STORES)) \
@@ -531,10 +547,13 @@ def import_root(root: Path, sink: Sink, *, only: Iterable[str] | None = None) ->
         found = problems(org)
         if found:
             raise ImportRefused(f"{slug}: {found[0]}")
-        m = manifest(org.rows)
+        source_m = manifest(org.rows)
+        target, item_check = target_rows(org.rows)
+        m = manifest(target)
         digest = manifest_digest(m)
         receipt = {"schema": SCHEMA, "source": org.source, "source_fingerprint": org.source_fingerprint,
-                   "manifest_sha256": digest}
+                   "manifest_sha256": digest, "source_manifest_sha256": manifest_digest(source_m),
+                   "work_items": item_check, "layout": workrows.FORMAT}
         before = sink.recorded(slug)
         if before and before.get("source_fingerprint") == org.source_fingerprint \
                 and before.get("manifest_sha256") == digest \
@@ -542,20 +561,25 @@ def import_root(root: Path, sink: Sink, *, only: Iterable[str] | None = None) ->
             sink.finish_org(slug)
             result["orgs"][slug] = {"action": "already_imported", "manifest_sha256": digest}
             continue
-        sink.replace_org(slug, org.rows, receipt)
+        sink.replace_org(slug, target, receipt)
         read = sink.read_org(slug)
         back = manifest(read)
         if back != m:
             bad = sorted(k for k in set(m["sections"]) | set(back["sections"])
                          if m["sections"].get(k) != back["sections"].get(k))
             raise ImportRefused(f"{slug}: read-back does not match the source in {bad[:10] or list(m['tables'])}")
-        exact_src, exact_back = _ordered(org.rows), _ordered(read)
+        exact_src, exact_back = _ordered(target), _ordered(read)
         if exact_src != exact_back:
             bad_tables = [t for t in TABLES if exact_src[t] != exact_back[t]]
             raise ImportRefused(f"{slug}: read-back is not byte-identical to the source in {bad_tables}")
+        if item_check is not None:
+            rows = {k: v for k, v in read["doc"] if k == workrows.SECTION or k.startswith(workrows.PREFIX)}
+            if workrows.checksum(workrows.assemble(rows)) != item_check:
+                raise ImportRefused(f"{slug}: work-items count/checksum mismatch after read-back")
         sink.finish_org(slug)
         result["orgs"][slug] = {"action": "imported", "manifest_sha256": digest,
-                                "tables": {t: v["count"] for t, v in m["tables"].items()}}
+                                "tables": {t: v["count"] for t, v in m["tables"].items()}, "work_items": item_check,
+                                "source_manifest_sha256": manifest_digest(source_m)}
     return result
 
 

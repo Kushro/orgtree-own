@@ -1125,15 +1125,36 @@ LAZY_SECTIONS: frozenset[str] = frozenset(DICT_LOGS) | frozenset(LIST_LOGS)
 SPLIT_SECTIONS: frozenset[str] = frozenset({"mail", "delivering", "notices"})
 SPLIT_SEP = "\x1f"
 
+# PG work lists use the same physical namespace, but not owner-lock API.
+from . import workrows
+ROW_SECTIONS = SPLIT_SECTIONS | {workrows.SECTION}
+
 
 def split_section_of(key: str) -> str | None:
     """The split section an owner row's `doc` key belongs to, else None."""
     sect, sep, _ = key.partition(SPLIT_SEP)
-    return sect if sep and sect in SPLIT_SECTIONS else None
+    return sect if sep and sect in ROW_SECTIONS else None
 
 
-def _split_rows(k: str, v: Any) -> dict[str, str]:
+def _split_rows(k: str, v: Any, *, reuse_work: bool = True) -> dict[str, str]:
     """The `doc` rows that store top-level key `k` holding `v`."""
+    if k == workrows.SECTION and STORE_BACKEND == "postgres":
+        if not isinstance(v, list):
+            raise ValueError("work_items must be a list")
+        rows = {}
+        ids = []
+        for item in v:
+            slug = workrows.slug_of(item)
+            if slug in rows:
+                raise ValueError("duplicate work-item slug")
+            ids.append(slug)
+            mark = item._mutation if isinstance(item, _NodeDict) else None
+            raw = getattr(item, "_work_raw", None) if mark is not None else None
+            # Loaded wrappers own every nested mutable reference. Assigned
+            # aliases remain conservative and are serialized on every save.
+            rows[slug] = (raw if reuse_work and raw is not None and not mark.dirty and not mark.aliased
+                          else _dumps(item))
+        return {k: workrows.header(ids), **{workrows.PREFIX + slug: raw for slug, raw in rows.items()}}
     if k in SPLIT_SECTIONS and isinstance(v, dict) \
             and all(isinstance(lst, list) for lst in dict.values(v)):
         rows = {k: "{}"}
@@ -1147,7 +1168,7 @@ def _snap_rows(snap: Mapping[str, str], k: str) -> dict[str, str]:
     """`k`'s rows in a `doc` snapshot: its own and, for a split section,
     its owner rows."""
     out = {k: snap[k]} if k in snap else {}
-    if k in SPLIT_SECTIONS:
+    if k in ROW_SECTIONS:
         pre = k + SPLIT_SEP
         out.update((kk, vv) for kk, vv in snap.items() if kk.startswith(pre))
     return out
@@ -1158,6 +1179,15 @@ def _assemble(k: str, rows: Mapping[str, str]) -> Any:
     exist): a split section's owner rows merge into its container, in key
     order."""
     v = json.loads(rows[k])
+    if k == workrows.SECTION and isinstance(v, dict):
+        values = workrows.assemble(rows)
+        result = []
+        for item in values:
+            tracked = _WorkItem(_NodeMutation())
+            dict.update(tracked, item)
+            tracked._work_raw = rows[workrows.PREFIX + item["slug"]]
+            result.append(tracked)
+        return result
     if k in SPLIT_SECTIONS and isinstance(v, dict):
         pre = k + SPLIT_SEP
         for kk in sorted(rows):
@@ -1176,6 +1206,8 @@ def _group_doc_rows(doc_rows: dict[str, str]) -> dict[str, dict[str, str]]:
             out.setdefault(kk, {})[kk] = vv
     for kk, vv in doc_rows.items():
         sect = split_section_of(kk)
+        if sect == workrows.SECTION and sect not in out:
+            raise ValueError("orphaned work-item rows")
         if sect is not None and sect in out:
             out[sect][kk] = vv
     return out
@@ -1187,7 +1219,7 @@ def _read_doc_key(conn: Any, k: str) -> dict[str, str]:
     if row is None:
         return {}
     rows = {k: cast(str, row[0])}
-    if k in SPLIT_SECTIONS:
+    if k in ROW_SECTIONS:
         # a prefix match, not a range: PostgreSQL's collation need not order
         # the separator the way SQLite's byte order does
         pre = k + SPLIT_SEP
@@ -2276,6 +2308,21 @@ class _NodeDict(dict):
         return out
 
 
+class _WorkItem(_NodeDict):
+    """A loaded item with the same alias-safe tracking as nodes.
+
+    Attention reconciliation assigns an unchanged bool to every item. Do
+    not turn that scalar no-op into serialization of the entire docket.
+    Mutable assignments always preserve the caller's alias and mark dirty.
+    """
+    def __setitem__(self, key: Any, value: Any) -> None:
+        if type(value) in (str, int, float, bool, type(None)) and key in self:
+            old = dict.__getitem__(self, key)
+            if type(old) is type(value) and old == value:
+                return
+        super().__setitem__(key, value)
+
+
 class _NodeList(list):
     def __getattr__(self, name: str) -> Any:
         # Pickle restores container entries before instance state.
@@ -2611,7 +2658,10 @@ class LazyDoc(dict[str, Any]):
         self._deferred_doc.pop(key, None)
         fingerprint = None
         if ORGTX_RESCOPE and key == "work_items":
-            fingerprint = hashlib.sha256(rows[key].encode("utf-8")).digest()
+            h = hashlib.sha256()
+            for rk, raw in sorted(rows.items()):
+                h.update(rk.encode("utf-8")); h.update(b"\0"); h.update(raw.encode("utf-8")); h.update(b"\0")
+            fingerprint = h.digest()
             if fingerprint in _READY_WORK_ITEMS:
                 dict.pop(self, key, None)
                 self._deferred_doc[key] = rows
@@ -3657,7 +3707,7 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
                 if _ROW_CAS and snap_doc is not None and rk in snap_doc:
                     _cas(conn, "UPDATE doc SET val=? WHERE key=? AND val=?",
                          (s, rk, snap_doc[rk]), f"section {rk!r}")
-                elif _ROW_CAS and snap_doc is not None and rk != k:
+                elif _ROW_CAS and snap_doc is not None and (rk != k or k == workrows.SECTION):
                     # a NEW owner row: another writer may have created it
                     # since this save loaded (the whole-section CAS used to
                     # catch that), so an insert that finds it is stale
@@ -3870,7 +3920,7 @@ def _verify_scoped_save(d: dict[str, Any], lazy: LazyDoc) -> None:
     for k in list(dict.keys(d)):
         if k in ROWED or k in LAZY_SECTIONS:
             continue
-        if _split_rows(k, dict.__getitem__(d, k)) != _snap_rows(lazy._snap_doc, k):
+        if _split_rows(k, dict.__getitem__(d, k), reuse_work=False) != _snap_rows(lazy._snap_doc, k):
             raise RuntimeError(
                 f"scoped save verification failed: doc key {k!r} differs "
                 "from its adopted baseline — a mutation escaped the read "
@@ -3992,6 +4042,14 @@ def _save_sqlite(org: Org) -> None:
                 value._replaced.clear()
             elif isinstance(value, AppendLog) and isinstance(committed, list):
                 value._adopt(committed)
+        current_work = dict.get(d, workrows.SECTION)
+        if STORE_BACKEND == "postgres" and isinstance(current_work, list):
+            for item in current_work:
+                if isinstance(item, _NodeDict):
+                    raw = new_doc.get(workrows.PREFIX + workrows.slug_of(item))
+                    if raw is not None:
+                        item._work_raw = raw
+                        item._mutation.dirty = False
         lazy._snap_doc = new_doc
         lazy._snap_nodes = new_nodes
         lazy._snap_logs = {k: v for k, v in new_logs.items() if v is not None}
@@ -4739,6 +4797,39 @@ def read_user_inbox(slug: str) -> dict[str, Any]:
         raise LedgerError(f"cannot open org {slug!r}: {e}") from e
 
 
+def read_work_items_rows(slug: str, item_slugs: Iterable[str]) -> dict[str, Any] | None:
+    """Storage-only PG item read in one snapshot; caller enforces permissions.
+
+    No Org construction, nodes or histories. None asks a non-PG caller to
+    use its ordinary ledger path. An absent requested item is omitted, but
+    a header naming a missing/corrupt requested row is an error.
+    """
+    if STORE_BACKEND != "postgres":
+        return None
+    wanted = tuple(dict.fromkeys(item_slugs))
+    for item in wanted:
+        workrows.slug_of({"slug": item})
+
+    def body(conn: Any) -> dict[str, Any]:
+        from . import pgstore
+        row = conn.execute("SELECT val FROM doc WHERE key=?", (workrows.SECTION,)).fetchone()
+        ids = workrows.ids_from_header(row[0]) if row is not None else []
+        keys = [workrows.PREFIX + item for item in wanted if item in ids]
+        found = {}
+        if keys:
+            marks = ",".join("?" for _ in keys)
+            for key, raw in conn.execute(f"SELECT key,val FROM doc WHERE key IN ({marks})", keys).fetchall():
+                value = json.loads(raw)
+                item = key[len(workrows.PREFIX):]
+                if workrows.slug_of(value) != item:
+                    raise LedgerError("work-item key disagrees with stored slug")
+                found[item] = value
+        if len(found) != len(keys):
+            raise LedgerError("work-items header names missing rows")
+        return {"revision": pgstore.revision(conn), "ids": ids, "items": found}
+    return _bounded_read(slug, body)
+
+
 def read_doc_sections(slug: str, keys: Iterable[str]) -> dict[str, Any] | None:
     """Named SMALL top-level sections (plain `doc` rows) as STORED, in one
     short read — no node table, no logs, no Org. For a hot reader that needs
@@ -4752,7 +4843,7 @@ def read_doc_sections(slug: str, keys: Iterable[str]) -> dict[str, Any] | None:
     Refuses node, log and split sections (they are not single `doc` rows)."""
     wanted = tuple(dict.fromkeys(keys))
     bad = [k for k in wanted
-           if k in ROWED or k in LAZY_SECTIONS or k in SPLIT_SECTIONS]
+           if k in ROWED or k in LAZY_SECTIONS or k in ROW_SECTIONS]
     if bad:
         raise ValueError(f"not plain doc sections: {bad!r}")
     if not wanted:
