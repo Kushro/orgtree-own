@@ -28,7 +28,7 @@ class RestartArchiveTrim(unittest.TestCase):
     def test_restart_deposit_retains_exact_tail_with_one_owner_repair(self):
         self.install_counter()
         # The growth assertion counts real derived-row writes, not elapsed time.
-        for extra in (30, 300):
+        for extra in (130, 300):
             with self.subTest(extra=extra):
                 with store._POOL.acquire(self.slug) as conn:
                     conn.execute('BEGIN')
@@ -40,17 +40,17 @@ class RestartArchiveTrim(unittest.TestCase):
                 old = self.query("SELECT seq,val FROM log_d WHERE sect='mail_log' AND owner='worker' ORDER BY seq")
                 with orgtx.org_tx(self.slug, **restart_wake._notice_rows(['worker'])) as tx:
                     row = dict(tx.org.deposit_mail('worker', {'id': 'restart-'+str(extra), 'from': 'orgtree',
-                        'kind': 'notice', 'body': 'restart'}, archive_keep=10,
+                        'kind': 'notice', 'body': 'restart'}, archive_keep=100,
                         supersede=lambda m: m.get('kind') == 'notice'))
                 after = self.query("SELECT seq,val FROM log_d WHERE sect='mail_log' AND owner='worker' ORDER BY seq")
-                self.assertEqual(after[:-1], old[-9:])
+                self.assertEqual(after[:-1], old[-99:])
                 self.assertEqual(json.loads(after[-1][1]), row)
                 self.assertGreater(row['recv_seq'], 9)
-                self.assertEqual(self.query('SELECT count(*) FROM trim_updates')[0][0], 9)
+                self.assertEqual(self.query('SELECT count(*) FROM trim_updates')[0][0], 99)
                 self.assertEqual(self.query('SELECT seq,owner_pos FROM mail_sent ORDER BY seq'),
                                  [(seq, after[0][0]) for seq, _ in after])
                 self.assertEqual(self.query("SELECT nrows,assigned_max,unknown_rows FROM mail_archive_bounds "
-                                            "WHERE owner='worker'")[0], (10, row['recv_seq'], 0))
+                                            "WHERE owner='worker'")[0], (100, row['recv_seq'], 0))
                 pending = store.load_org(self.slug).d['mail']['worker']
                 self.assertEqual([m['id'] for m in pending], [row['id']])
 
