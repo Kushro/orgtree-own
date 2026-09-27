@@ -8,6 +8,8 @@ import type { NodeDetail } from './archived'
 import { bumpLive } from './livebus'
 import { backendRestart } from './windowlife'
 import { desktop } from './desktop'
+import { applyWorkDelta } from './workdelta'
+import type { WorkDelta } from './workdelta'
 import type {
   AudiencesPayload, CharterTemplateDirsPayload, ChartersPayload, ChatPayload, DefaultsPayload,
   DiskDeleteResult, DiskDirPayload, DiskPayload, EventsPayload, FsPayload,
@@ -547,10 +549,11 @@ export const dismissDocument = (slug: string, did: string):
 // answered by a request that started before it.
 const workCache = new Map<string, { etag: string; body: WorkItemsPayload }>()
 const workInflight = new Map<string, Promise<WorkItemsPayload>>()
-export const forgetWorkInflight = (): void => { workInflight.clear() }
+let workGeneration = 0
+export const forgetWorkInflight = (): void => { ++workGeneration; workInflight.clear() }
 export const getWorkItems = (slug: string, archived = false,
                              backlogged = false): Promise<WorkItemsPayload> => {
-  const path = `/api/orgs/${slug}/work-items`
+  const path = `/api/orgs/${slug}/work-items-view`
     + (archived || backlogged
       ? '?' + [archived ? 'archived=1' : '', backlogged ? 'backlogged=1' : '']
         .filter(Boolean).join('&')
@@ -558,6 +561,7 @@ export const getWorkItems = (slug: string, archived = false,
   const pending = workInflight.get(path)
   if (pending) return pending
   const hit = workCache.get(path)
+  const generation = workGeneration
   const p: Promise<WorkItemsPayload> = fetch(u(path), {
     signal: timeoutSignal(DEFAULT_TIMEOUT_MS),
     ...(hit ? { headers: { 'If-None-Match': hit.etag } } : {}),
@@ -566,9 +570,15 @@ export const getWorkItems = (slug: string, archived = false,
     if (r.status === 304 && hit) return hit.body
     if (!r.ok) return failure(r).then((e) => { throw e })
     const etag = r.headers.get('ETag')
-    return (r.json() as Promise<WorkItemsPayload>).then((body) => {
-      if (etag) workCache.set(path, { etag, body })
-      else workCache.delete(path)
+    return (r.json() as Promise<WorkItemsPayload | WorkDelta>).then((incoming) => {
+      const body = applyWorkDelta(hit?.body, incoming)
+      // A response which predates a mutation may finish after its replacement.
+      // It can answer its original caller, but must never roll the cache back.
+      if (generation === workGeneration && workInflight.get(path) === p) {
+        if (etag) workCache.set(path, { etag, body })
+        else workCache.delete(path)
+        while (workCache.size > 24) workCache.delete(workCache.keys().next().value!)
+      }
       return body
     })
   }).finally(() => {

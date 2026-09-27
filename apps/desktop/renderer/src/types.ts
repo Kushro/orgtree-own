@@ -2715,6 +2715,11 @@ export interface WorkItem {
 
 // GET /api/orgs/{slug}/work-items[?archived=1][&backlogged=1]
 export interface WorkItemsPayload {
+  /** Desktop list transport: heavy authored records are fetched on open. */
+  revision?: string
+  references?: Pick<WorkItem, 'slug' | 'title' | 'parent' | 'archived' | 'status' | 'rev' | 'view_revision'>[]
+  /** Manual flags across every group, including a closed backlog toggle. */
+  attention?: WorkItem[]
   items: WorkItem[]
   /** present only when asked for; each is APPENDED below `items`, never
    *  merged into it — revealing a group must not re-sort the main list */

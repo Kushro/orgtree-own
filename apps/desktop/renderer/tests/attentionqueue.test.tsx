@@ -86,7 +86,7 @@ function installServer(initial: Partial<Server> = {}) {
       server.posts.push({ path, body: init.body ? JSON.parse(init.body) : null })
     }
     const body =
-      /\/work-items$/.test(path)
+      /\/work-items(?:-view)?$/.test(path)
         ? { items: server.items, archived: [], backlogged: [],
             counts: { attention: 0, active: server.items.length, archived: 0, backlogged: 0 } }
         : /\/inbox$/.test(path)
@@ -360,7 +360,7 @@ const failOnly = (which: 'work-items' | 'inbox') => {
   const good = (globalThis as unknown as { fetch: (u: string, i?: unknown) => unknown }).fetch
   ;(globalThis as unknown as { fetch: unknown }).fetch = (url: string, init?: unknown) => {
     const path = new URL(String(url), 'http://localhost').pathname
-    const hit = which === 'work-items' ? /\/work-items$/.test(path) : /\/inbox$/.test(path)
+    const hit = which === 'work-items' ? /\/work-items(?:-view)?$/.test(path) : /\/inbox$/.test(path)
     if (!hit) return good(url, init)
     return Promise.resolve({
       ok: false, status: 503, statusText: 'HTTP 503', headers: new Headers(),
@@ -429,7 +429,7 @@ const hangOnly = (which: 'work-items' | 'inbox') => {
   const good = (globalThis as unknown as { fetch: (u: string, i?: unknown) => unknown }).fetch
   ;(globalThis as unknown as { fetch: unknown }).fetch = (url: string, init?: unknown) => {
     const path = new URL(String(url), 'http://localhost').pathname
-    const hit = which === 'work-items' ? /\/work-items$/.test(path) : /\/inbox$/.test(path)
+    const hit = which === 'work-items' ? /\/work-items(?:-view)?$/.test(path) : /\/inbox$/.test(path)
     return hit ? new Promise(() => {}) : good(url, init)
   }
 }

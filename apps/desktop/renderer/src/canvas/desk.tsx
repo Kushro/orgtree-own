@@ -2158,8 +2158,10 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage, onConf
   // panel uses, at a slower interval — this is a summary, not the panel.
   const [workBump, setWorkBump] = useState(0)
   const [showArchivedDocket, setShowArchivedDocket] = useState(false)
-  const work = usePolled(() => getWorkItems(slug, true, true),
-                         [slug], 15000, `${workBump}`)
+  const [showBacklogDocket, setShowBacklogDocket] = useState(false)
+  const work = usePolled(() => getWorkItems(slug, view === 'docket' && showArchivedDocket,
+                                            view === 'docket' && showBacklogDocket),
+    [slug], 15000, `${workBump}-${view}-${showArchivedDocket}-${showBacklogDocket}`)
   const myWork = useMemo(() => agentItems(work, node.id, showArchivedDocket),
     [work, node.id, showArchivedDocket])
   const docketCount = useMemo(() => actionableAssignedCount(work, node.id),
@@ -3726,6 +3728,8 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage, onConf
           mine={myWork} facts={workFacts} toast={toast} onFocusAgent={onJump}
           showArchived={showArchivedDocket}
           onShowArchived={setShowArchivedDocket}
+          onShowBacklog={setShowBacklogDocket}
+          references={work?.references}
           refs={deskRefs}
           onChanged={() => setWorkBump((n) => n + 1)} />
       </div>}

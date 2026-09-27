@@ -54,7 +54,7 @@ const toast = () => {}
 function installQuietServer() {
   ;(globalThis as unknown as { fetch: unknown }).fetch = (url: string) => {
     const path = new URL(String(url), 'http://localhost').pathname
-    const body = /\/work-items$/.test(path)
+    const body = /\/work-items(?:-view)?$/.test(path)
       ? { items: [], archived: [], backlogged: [],
           counts: { attention: 0, active: 0, archived: 0, backlogged: 0 } }
       : /\/inbox$/.test(path)

@@ -328,9 +328,17 @@ export function installFetch(server: FakeServer): Transport {
         : /\/history$/.test(u.pathname) ? { items: [] }
           : /\/documents$/.test(u.pathname)
             ? { documents: server.documents, total: server.documents.length, next_offset: null }
-          : /\/work-items$/.test(u.pathname)
+          : /\/work-items\/[^/]+$/.test(u.pathname)
+            ? { item: [...server.workItems, ...server.workArchived, ...server.workBacklogged]
+                .find((item: any) => item.slug === u.pathname.split('/').pop()) }
+          : /\/work-items(?:-view)?$/.test(u.pathname)
             ? {
               items: server.workItems,
+              references: [...server.workItems, ...server.workArchived, ...server.workBacklogged]
+                .map(({ slug, title, parent, archived, status, rev }: any) =>
+                  ({ slug, title, parent, archived, status, rev })),
+              attention: [...server.workItems, ...server.workArchived, ...server.workBacklogged]
+                .filter((item: any) => item.manual_attention),
               // the two groups are served only when their flag is set, the
               // same contract the real endpoint keeps
               ...(u.searchParams.get('archived') ? { archived: server.workArchived } : {}),

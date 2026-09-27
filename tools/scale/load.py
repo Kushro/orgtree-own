@@ -49,6 +49,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from serve import share_dir, update_descriptor  # noqa: E402
 from control import BoundedPool, Workload, Feed, free_commit_gb, memory_breach
+from ui_mix import WINDOWS, polls as ui_polls
 
 MARK = re.compile(r"\[\[m(\d+)\]\]")
 
@@ -220,6 +221,10 @@ def main(argv=None) -> int:
         raise SystemExit(f"free commit {fc0:.2f} GiB below floor; not starting load")
     config = {"label": label, "agents": N, "active_callers": len(live), "caller_ids": live, "rate_calls_s": rate, "steer_polls_s": steer_rate,
               "windows": args.windows,
+              "ui_mix": {"windows": [WINDOWS[w % len(WINDOWS)] for w in range(args.windows)],
+                         "groups": "archive/backlog closed; full details only on user open",
+                         "chat_window": 8, "changed_events": "120ms coalesced refresh",
+                         "limits": "Visible idle views; no clicks, scrolling or hidden-window simulation"},
               "stream_nodes": len(stream_nodes), "stream_hz": args.stream_hz,
               "duration_s": args.duration, "workers": args.workers,
               "derivation": {"turn_rate_per_agent": args.turn_rate_per_agent,
@@ -374,24 +379,31 @@ def main(argv=None) -> int:
     feed_tracker = Feed(0 if args.no_ui else args.windows)
     ws_ready = {w: threading.Event() for w in range(0 if args.no_ui else args.windows)}
     ws_state = {w: {"connects": 0, "closes": 0, "frames": 0, "bytes": 0} for w in range(args.windows)}
+    ui_changed = {w: threading.Event() for w in range(args.windows)}
 
     def ui_window(w: int):
         c = httpx.Client(base_url=origin, headers=H, timeout=30)
         etags: dict[str, str] = {}
         watch = stream_nodes[w % len(stream_nodes)] if stream_nodes else live[0]
-        polls = [("org_tree", f"/api/orgs/{slug}", 6.0, True),
-                 ("org_list", "/api/orgs", 3.0, False),
-                 ("work_items", f"/api/orgs/{slug}/work-items?archived=1&backlogged=1", 5.0, True),
-                 ("chat", f"/api/orgs/{slug}/nodes/{watch}/chat?last=300", 2.5, False)]
+        polls = ui_polls(slug, watch, w, bool(stream_nodes))
         ui_rng = random.Random(args.seed + 100 + w)
         due = {name: t0 + ui_rng.random() * period for name, _, period, _ in polls}
         while not stop.is_set() and time.time() - t0 < args.duration:
+            if ui_changed[w].is_set():
+                ui_changed[w].clear()
+                when = time.time() + 0.120
+                for name, _, _, _ in polls:
+                    if name != "org_list":
+                        due[name] = min(due[name], when)
             name, url, period, cond = min(polls, key=lambda x: due[x[0]])
             d = due[name] - time.time()
             if d > 0:
-                stop.wait(d)
+                if ui_changed[w].wait(min(d, 0.5)):
+                    continue
                 if stop.is_set():
                     break
+                if time.time() < due[name]:
+                    continue
             begun = time.time()
             hdr = {"If-None-Match": etags[name]} if cond and name in etags else {}
             status, size, err = None, 0, None
@@ -427,6 +439,12 @@ def main(argv=None) -> int:
                         now = time.time()
                         ws_state[w]["frames"] += 1
                         ws_state[w]["bytes"] += len(raw)
+                        try:
+                            frame = json.loads(raw)
+                            if frame.get("type") == "changed":
+                                ui_changed[w].set()
+                        except (ValueError, AttributeError):
+                            pass
                         if "[[m" in raw:
                             for m in MARK.finditer(raw):
                                 feed_tracker.receive(w, int(m.group(1)), now)

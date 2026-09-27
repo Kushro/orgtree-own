@@ -8,6 +8,8 @@ import './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { getWorkItems, req } from '../src/api'
+import { applyWorkDelta } from '../src/workdelta'
+import type { WorkItem, WorkItemsPayload } from '../src/types'
 
 const pending: Array<{ url: string; resolve: (r: unknown) => void
                        headers?: Record<string, string> }> = []
@@ -29,7 +31,7 @@ const respond = (status: number, body?: unknown, etag: string | null = null): vo
 test('a 304 returns the cached body; the next poll revalidates with its ETag', async () => {
   const first = getWorkItems('org-a', true, true)
   assert.equal(pending[0]?.headers, undefined, 'the first poll has nothing to revalidate')
-  assert.match(pending[0]!.url, /work-items\?archived=1&backlogged=1$/)
+  assert.match(pending[0]!.url, /work-items-view\?archived=1&backlogged=1$/)
   const body = { items: [{ slug: 'x' }] }
   respond(200, body, '"w1"')
   const got = await first
@@ -68,4 +70,37 @@ test('a completed mutation drops the shared in-flight poll', async () => {
   respond(200, { items: ['new'] }, '"c2"')
   assert.deepEqual(await before, { items: ['old'] })
   assert.deepEqual(await after, { items: ['new'] })
+})
+
+test('delta retains unchanged identities, deletes missing rows and moves groups', () => {
+  const a = { slug: 'a', title: 'A' } as WorkItem
+  const b = { slug: 'b', title: 'B' } as WorkItem
+  const old = { revision: 'r1', items: [a, b], backlogged: [],
+    counts: { active: 2, attention: 0, archived: 0, backlogged: 0 }, now: '' } as WorkItemsPayload
+  const moved = { ...b, status: 'backlogged' }
+  const after = applyWorkDelta(old, { base: 'r1', revision: 'r2', counts: old.counts, now: '',
+    delta: { items: { order: ['a'], upsert: [] }, backlogged: { order: ['b'], upsert: [moved] } } })
+  assert.equal(after.items[0], a)
+  assert.deepEqual(after.items.map(r => r.slug), ['a'])
+  assert.equal(after.backlogged?.[0], moved)
+  assert.throws(() => applyWorkDelta(old, { base: 'wrong', revision: 'r2',
+    counts: old.counts, now: '', delta: {} }), /base changed/)
+})
+
+test('a late pre-mutation body cannot replace the newer cache used by a delta', async () => {
+  const before = getWorkItems('late-org')
+  const write = req('/api/orgs/late-org/work-items/x/reply', { method: 'POST' })
+  pending.splice(1, 1)[0]!.resolve({ status: 200, ok: true, headers: { get: () => null }, json: async () => ({ ok: true }) })
+  await write
+  const after = getWorkItems('late-org')
+  const newer = pending.splice(1, 1)[0]!
+  newer.resolve({ status: 200, ok: true, headers: { get: () => '"new"' },
+    json: async () => ({ revision: 'new', items: [{ slug: 'x', title: 'New' }] }) })
+  await after
+  respond(200, { revision: 'old', items: [] }, '"old"')
+  await before
+  const third = getWorkItems('late-org')
+  assert.equal(pending[0]?.headers?.['If-None-Match'], '"new"')
+  respond(200, { base: 'new', revision: 'next', delta: { items: { order: ['x'], upsert: [] } } }, '"next"')
+  assert.equal((await third).items[0]!.title, 'New')
 })

@@ -50,7 +50,7 @@ export type MentionIndex = RefIndex<MentionRef>
  *  absent from `agents` gets no entry, and an agent whose tier is unknown gets
  *  an entry with no tier — neither is filled in with a plausible answer. */
 export function buildMentionIndex(
-  items: Iterable<WorkItem>,
+  items: Iterable<Pick<WorkItem, 'slug' | 'title'>>,
   agents?: Iterable<readonly [string, string | null | undefined]>,
 ): MentionIndex {
   const out: MentionIndex = new Map()

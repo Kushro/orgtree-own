@@ -41,12 +41,14 @@ export function TeamDocketModal({ slug, nid, tree, toast, close, refs }: {
   close: () => void; refs: RefRoutes
 }) {
   const [showArchived, setShowArchived] = useState(false)
+  const [showBacklog, setShowBacklog] = useState(false)
   const [bump, setBump] = useState(0)
   // the same poll the single-agent docket runs — MEMBERSHIP IS RECOMPUTED ON
   // EVERY RENDER from the current items and the current tree, so a
   // reassignment, a hire, a retirement or a reparent lands in this view at the
   // next refresh without any cache to invalidate
-  const work = usePolled(() => getWorkItems(slug, true, true), [slug], 15000, bump)
+  const work = usePolled(() => getWorkItems(slug, showArchived, showBacklog),
+    [slug], 15000, `${bump}-${showArchived}-${showBacklog}`)
   const team = useMemo(() => teamItems(work, nid, tree.roots, showArchived),
     [work, nid, tree.roots, showArchived])
   const facts = useMemo(() => buildNodeFacts(tree.roots), [tree.roots])
@@ -58,6 +60,8 @@ export function TeamDocketModal({ slug, nid, tree, toast, close, refs }: {
     <h3 data-copy-agent-name={nid}><DocketIcon fontSize="inherit" /> {nid} <span className="dim">· Team docket</span></h3>
     <AgentDocketView slug={slug} nid={nid} mine={team} facts={facts} toast={toast}
       showArchived={showArchived} onShowArchived={setShowArchived}
+      onShowBacklog={setShowBacklog}
+      references={work?.references}
       onChanged={() => setBump(n => n + 1)} refs={routes}
       emptyText={<>
         no docket items are assigned to {nid} or to any agent below it —

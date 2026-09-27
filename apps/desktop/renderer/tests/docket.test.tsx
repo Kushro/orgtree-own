@@ -67,12 +67,18 @@ function mockWorkItems(activeItems: WorkItem[], archivedItems: WorkItem[] = [],
         return ok({ accepted: true, to: found?.owner?.node ?? 'agent',
           deferred: isDeferred, notice: asNotice })
       }
+      if (method === 'GET' && /\/work-items\/[^/]+$/.test(path)) {
+        const id = path.split('/').pop()
+        return ok({ item: [...activeItems, ...archivedItems, ...backlogItems].find(x => x.slug === id) })
+      }
       if (method === 'GET' && path.includes('/work-items')) {
         // the two filters are INDEPENDENT query flags, and a group is served
         // only when its flag is set — the same contract ledger.work_list keeps
         const wantArch = path.includes('archived=1')
         const wantBack = path.includes('backlogged=1')
         return ok({
+          references: [...activeItems, ...archivedItems, ...backlogItems].map(
+            ({ slug, title, parent, archived, status, rev }) => ({ slug, title, parent, archived, status, rev })),
           items: activeItems,
           ...(wantArch ? { archived: archivedItems } : {}),
           ...(wantBack ? { backlogged: backlogItems } : {}),

@@ -25,14 +25,14 @@
 import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useDocketWindow } from './docketwindow'
 import { usePendingAttention } from '../pending-attention'
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import type { ComponentProps, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import Select from '@mui/material/Select'
 import MenuItem from '@mui/material/MenuItem'
 import type {
-  AskInfo, ToastFn, TreeNode, TreePayload, WorkActor, WorkItem, WorkReceipt,
+  AskInfo, ToastFn, TreeNode, TreePayload, WorkActor, WorkItem, WorkItemsPayload, WorkReceipt,
 } from '../types'
 import {
-  deleteWorkItemAttachment, dismissWorkItemAttention, getWorkItems,
+  deleteWorkItemAttachment, dismissWorkItemAttention, getWorkItems, getWorkItem,
   replyWorkItem, uploadWorkItemAttachment, workItemArtifactUrl,
   workItemAttachmentUrl,
   req,
@@ -766,25 +766,10 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
   const archivedCache = cache.slug === slug ? cache.archived : []
   const backlogCache = cache.slug === slug ? cache.backlog : []
 
-  // ⚠ BOTH GROUPS ARE ALWAYS FETCHED, AND THE CHECKBOXES ONLY DECIDE WHAT IS
-  // SHOWN. A slug link must work when it points at a backlogged or archived
-  // item — "reveal the row" is impossible if the row was never loaded, and a
-  // mention that silently refuses to link because a checkbox is off would be
-  // the worst of both worlds. `ledger.work_list` builds all three groups on
-  // every call regardless of the flags (they gate the RESPONSE, not the work),
-  // so this costs payload, not server time.
-  //
-  // deps is [slug] so ticking a filter does not clear data to null (which
-  // would unmount the pane and wipe the user's in-flight reply draft).
-  //
-  // ⚠ THE TOGGLES STAY IN THE REFRESH KEY even though they no longer change the
-  // REQUEST. They are what makes a tick refetch immediately instead of waiting
-  // out the five-second poll, and that is load-bearing: the panel keeps a copy
-  // of each group, and unticking is how a row that has just left the archive
-  // gets replaced by its current self rather than by the copy we cached. Drop
-  // them from the key and the stale copy survives on screen until the next
-  // poll (caught by §31 of docket.test.tsx).
-  const data = usePolled(() => getWorkItems(slug, true, true),
+  // Groups load on demand. The small all-group reference index lets a link
+  // reveal a hidden row. Keep slug as the only reset dependency so toggling
+  // groups never unmounts the selected detail pane or discards a reply draft.
+  const data = usePolled(() => getWorkItems(slug, showArchived, showBacklog),
     [slug], 5000, `${bump}-${showArchived}-${showBacklog}`)
 
   useEffect(() => {
@@ -870,13 +855,18 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
   // 2026-09-05).
   const allKnown = useMemo(() => {
     const map = new Map<string, WorkItem>()
-    for (const item of archivedCache) map.set(item.slug, item)
-    for (const item of backlogCache) map.set(item.slug, item)
+    // References carry identity/group membership only. They make hidden-group
+    // links resolvable without fetching those groups' descriptions or records.
+    for (const item of data?.references ?? []) map.set(item.slug, { ...item, view: 'list' } as WorkItem)
+    if (!data?.references) {
+      for (const item of archivedCache) map.set(item.slug, item)
+      for (const item of backlogCache) map.set(item.slug, item)
+    }
     for (const item of (data?.archived ?? [])) map.set(item.slug, item)
     for (const item of (data?.backlogged ?? [])) map.set(item.slug, item)
     for (const item of active) map.set(item.slug, item)
     return map
-  }, [active, data?.archived, data?.backlogged, archivedCache, backlogCache])
+  }, [active, data?.references, data?.archived, data?.backlogged, archivedCache, backlogCache])
   const cur = allKnown.get(selId ?? '')
   const asksById = new Map<string, AskInfo>((tree.asks ?? []).map((a) => [a.id, a]))
 
@@ -1513,7 +1503,7 @@ export function actionableAssignedCount(data: {
  *  the work is yours. */
 export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
   onChanged, showArchived = false, onShowArchived = () => {}, refs,
-  emptyText }: {
+  emptyText, onShowBacklog, references }: {
   slug: string
   nid: string
   /** this agent's items, already selected by `agentItems` — null while the
@@ -1527,6 +1517,8 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
   onChanged?: () => void
   showArchived?: boolean
   onShowArchived?: (show: boolean) => void
+  onShowBacklog?: (show: boolean) => void
+  references?: WorkItemsPayload['references']
   /** THE DESK'S OWN REFERENCE WIRING, passed down whole rather than rebuilt.
    *  Required, not optional: a fallback world here would be a second answer to
    *  the same question on the same desk, and the two would drift. */
@@ -1542,6 +1534,7 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
 }) {
   const controlsId = useId()
   const [showBacklog, setShowBacklog] = useState(false)
+  useEffect(() => { onShowBacklog?.(showBacklog) }, [showBacklog, onShowBacklog])
   const [sortMode, setSortMode] = useState<DocketSortMode>(readSortMode)
   const [groupMode, setGroupMode] = useState<DocketGroupMode>(readGroupMode)
   const [selId, setSelId] = useState<string | null>(null)
@@ -1558,9 +1551,9 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
   const byName = useMemo(
     () => new Map(rows.map((it) => [it.slug, it])), [rows])
   const refIndex = useMemo(
-    () => buildMentionIndex(byName.values(),
+    () => buildMentionIndex([...(references ?? []), ...byName.values()],
                             [...facts].map(([id, f]) => [id, f.tier] as const)),
-    [byName, facts])
+    [byName, facts, references])
   const cur = byName.get(selId ?? '')
   /** THE DESK'S WORLD, WITH EXACTLY ONE ROUTE TAKEN OVER.
    *
@@ -1584,11 +1577,13 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
    *  anything else through the desk's work route. */
   const refWorld = useMemo<RefWorld>(() => ({
     ...refs.world,
-    itemTitles: new Map([...(refs.world.itemTitles ?? []), ...rows.map(it => [it.slug, it.title] as const)]),
+    itemTitles: new Map([...(refs.world.itemTitles ?? []),
+      ...(references ?? []).map(it => [it.slug, it.title] as const),
+      ...rows.map(it => [it.slug, it.title] as const)]),
     handles: refs.world.handles
       ? new Set<RefKind>([...refs.world.handles, 'item'])
       : undefined,
-  }), [refs.world, mine])
+  }), [refs.world, mine, references])
   /** An item this tab HOLDS selects in place — the row is right there, and
    *  navigating the whole canvas to the Work panel to show a row already on
    *  screen is the surprising behaviour. Anything else is the desk's, which is
@@ -2426,7 +2421,33 @@ function DocketAttachments({ slug, item, toast, refresh }: {
   )
 }
 
-function DocketPane({ slug, item, toast, asksById, onDismiss, close, onFocusAgent,
+function DocketPane(props: ComponentProps<typeof FullDocketPane>) {
+  const { slug, item } = props
+  const [loaded, setLoaded] = useState<{ slug: string; id: string; item: WorkItem } | null>(null)
+  const [error, setError] = useState('')
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    if (item.view !== 'list') return
+    let current = true
+    setError('')
+    getWorkItem(slug, item.slug).then(({ item: full }) => {
+      if (current) setLoaded({ slug, id: item.slug, item: full })
+    }).catch((e: Error) => { if (current) setError(e.message) })
+    return () => { current = false }
+  }, [slug, item.slug, item.rev, item.view, item.view_revision, retry])
+  const full = item.view !== 'list' ? item
+    : loaded?.slug === slug && loaded.id === item.slug ? loaded.item : null
+  // Keep the inner pane mounted through refreshes: its reply draft belongs to
+  // the selected item, not the newest HTTP request. Never reuse it across orgs.
+  return <>
+    {error && <div role="alert">Could not refresh this item: {error}{' '}
+      <button onClick={() => setRetry(n => n + 1)}>Retry</button></div>}
+    {full ? <FullDocketPane key={`${slug}/${item.slug}`} {...props} item={full} />
+      : <div className="dim pad" role="status">Loading item details…</div>}
+  </>
+}
+
+function FullDocketPane({ slug, item, toast, asksById, onDismiss, close, onFocusAgent,
   facts, refIndex, onGoToItem, refWorld, onOpenRef, refresh }: {
   slug: string
   item: WorkItem

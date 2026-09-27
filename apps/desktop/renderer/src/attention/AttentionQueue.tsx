@@ -118,7 +118,7 @@ export function AttentionQueue({
   // other exists. `usePolled` also wakes on the livebus, so a mutation made
   // HERE lands in well under a poll interval.
   const [bump, setBump] = useState(0)
-  const workFeed = usePolledStatus(() => getWorkItems(slug, true, true), [slug], 5000, bump)
+  const workFeed = usePolledStatus(() => getWorkItems(slug), [slug], 5000, bump)
   const boxFeed = usePolledStatus(() => getInbox(slug), [slug], 5000, bump)
   const work = workFeed.value
   const box = boxFeed.value
@@ -198,7 +198,7 @@ export function AttentionQueue({
     () => new Map(nodes.map((n) => [n.id, n])), [nodes])
 
   const live = useMemo(() => buildAttentionRows({
-    items: work?.items, archived: work?.archived, backlogged: work?.backlogged,
+    items: work?.attention ?? work?.items, archived: work?.archived, backlogged: work?.backlogged,
     pending: box?.pending, nodes,
   }), [work, box, nodes])
 

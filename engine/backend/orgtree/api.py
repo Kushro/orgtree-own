@@ -7611,6 +7611,26 @@ def work_items_list(slug: str, archived: int = 0,
 # Polled about once a second by the desktop's Developer › engine debug view,
 # and only while that toggle is on. Everything here is a read of counters the
 # engine already keeps: no org is loaded, nothing is encoded per frame.
+@app.get("/api/orgs/{slug}/work-items-view")
+async def _work_items_view_route(slug: str, archived: int = 0, backlogged: int = 0,
+                                 request: Request = cast(Request, None)) -> Any:
+    return await _run_ui_read(work_items_view, slug, archived, backlogged, request)
+
+
+def work_items_view(slug: str, archived: int = 0, backlogged: int = 0,
+                    request: Request = cast(Request, None)) -> Any:
+    from . import work_ui
+    since = request.headers.get("if-none-match", "").strip('"') if request else ""
+    try:
+        revision, body = work_ui.read(slug, bool(archived), bool(backlogged), since)
+    except LedgerError as e:
+        raise HTTPException(404, str(e))
+    headers = {"ETag": '"' + revision + '"', "Cache-Control": "private, no-cache"}
+    if body is None:
+        return Response(status_code=304, headers=headers)
+    return Response(content=_dump_tree(body), media_type="application/json", headers=headers)
+
+
 _engine_proc: Any = None
 
 
