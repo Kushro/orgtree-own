@@ -52,4 +52,35 @@ class WorkImport(f.Base):
         self.assertEqual(fired,['acme']); self.assertEqual(sink.finished,[])
 
 
+class RealWorkImport(f.Base):
+    @unittest.skipUnless(__import__('os').environ.get('ORGTREE_TEST_PG_ADMIN_URL'), 'disposable PG required: NOT RUN')
+    def test_real_copy_both_sources_checksums_stamp_and_resume(self):
+        import os
+        import psycopg
+        from urllib.parse import urlsplit,urlunsplit
+        admin=os.environ['ORGTREE_TEST_PG_ADMIN_URL']; name='work_import_'+str(os.getpid())
+        url=urlsplit(admin); target=urlunsplit((url.scheme,url.netloc,'/'+name,url.query,url.fragment))
+        with psycopg.connect(admin,autocommit=True) as c: c.execute('CREATE DATABASE '+name)
+        sink=None
+        try:
+            doc=f.sample_doc();doc['work_items']=items();f.write_db(self.orgs()/'acme.db',doc)
+            doc=f.sample_doc('Beta');doc['work_items']=items();(self.orgs()/'beta.json').write_text(json.dumps(doc))
+            before={p.name:p.read_bytes() for p in self.orgs().iterdir()}
+            sink=f.pgimport.PgSink(target,self.orgs())
+            result=f.pgimport.import_root(self.root,sink)
+            for slug in ('acme','beta'):
+                self.assertEqual(result['orgs'][slug]['work_items'],workrows.checksum(items()))
+                rows=dict(sink.read_org(slug)['doc'])
+                self.assertEqual(workrows.assemble({k:v for k,v in rows.items() if k=='work_items' or k.startswith(workrows.PREFIX)}),items())
+                rev,stamp=sink.conn.execute('SELECT revision,work_revision FROM public.orgs WHERE slug=%s',(slug,)).fetchone()
+                self.assertGreater(rev,0);self.assertEqual(stamp,rev)
+                self.assertTrue((self.orgs()/(slug+'.pg')).exists())
+            again=f.pgimport.import_root(self.root,sink)
+            self.assertTrue(all(v['action']=='already_imported' for v in again['orgs'].values()))
+            for name_,raw in before.items(): self.assertEqual((self.orgs()/name_).read_bytes(),raw)
+        finally:
+            if sink: sink.close()
+            with psycopg.connect(admin,autocommit=True) as c: c.execute('DROP DATABASE '+name+' WITH (FORCE)')
+
+
 if __name__=='__main__': unittest.main()

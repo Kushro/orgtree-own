@@ -74,6 +74,24 @@ class LiveRows(unittest.TestCase):
         restored=store.read_work_items_rows(slug,[item])['items'][item]
         self.assertEqual(restored['owner']['node'],'sub')
 
+    def test_bounded_reader_stamp_and_body_share_one_snapshot(self):
+        import psycopg
+        before=store.read_work_items_rows(self.slug,['one']); original=pgstore.PgConn.execute; fired=[]
+        def execute(conn,sql,params=()):
+            cur=original(conn,sql,params)
+            if sql == 'SELECT val FROM doc WHERE key=?' and params == ('work_items',) and not fired:
+                fired.append(True)
+                with psycopg.connect(os.environ['ORGTREE_PG_URL'],autocommit=True) as other:
+                    with other.transaction():
+                        raw=json.dumps({**before['items']['one'],'rev':77})
+                        other.execute(f'UPDATE org_{conn.org_id}.doc SET val=%s WHERE key=%s',(raw,workrows.PREFIX+'one'))
+                        other.execute('UPDATE public.orgs SET revision=revision+1,work_revision=revision+1 WHERE org_id=%s',(conn.org_id,))
+            return cur
+        with patch.object(pgstore.PgConn,'execute',execute): read=store.read_work_items_rows(self.slug,['one'])
+        self.assertEqual(fired,[True]);self.assertEqual(read,before)
+        after=store.read_work_items_rows(self.slug,['one'])
+        self.assertEqual(after['items']['one']['rev'],77);self.assertGreater(after['work_revision'],before['work_revision'])
+
     def test_old_nested_reference_after_save_and_external_alias(self):
         org=store.load_org(self.slug); row=org.d['work_items'][0]; values=row['nested']['values']
         store.save_org(org); values.append(7); store.save_org(org)
