@@ -58,11 +58,14 @@ def _read(slug, public):
             raise CompatibilityRequired('legacy node blob')
         if public:
             fields = dict(raw.execute(
-                "SELECT key,CASE key "
+                "SELECT CASE WHEN key='net_identity' AND jsonb_typeof(val::jsonb) NOT IN ('object','null') "
+                "THEN '_unsupported_net_identity' ELSE key END,CASE key "
                 "WHEN 'kiosk' THEN CASE WHEN val::jsonb='null'::jsonb THEN 'false' ELSE 'true' END "
                 "WHEN 'net_identity' THEN coalesce((val::jsonb->'slug')::text,'null') "
                 "ELSE val END FROM doc "
                 "WHERE key IN ('slug','name','kiosk','net_identity','created')").fetchall())
+            if '_unsupported_net_identity' in fields:
+                raise CompatibilityRequired('legacy network identity shape')
             fields = {key: json.loads(val) for key, val in fields.items()}
             if fields.get('slug', slug) != slug:
                 raise CompatibilityRequired('organization identity changed')

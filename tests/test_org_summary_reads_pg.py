@@ -19,6 +19,22 @@ class SummaryReads(unittest.TestCase):
     seed = behavior.SummaryBehavior.seed
     row = behavior.SummaryBehavior.row
 
+    def test_public_network_identity_shapes_preserve_legacy_parity(self):
+        try:
+            for identity in ('broken', 42, ['wrong'], True, '', 0, [], False, None, {}):
+                with self.subTest(identity=identity):
+                    self.setting('net_identity', identity)
+                    if identity:
+                        with patch.object(org_listing, '_native', return_value=False):
+                            with self.assertRaises(AttributeError): self.row(public=True)
+                        with self.assertRaises(AttributeError): self.row(public=True)
+                    else:
+                        with patch.object(org_listing, '_native', return_value=False):
+                            expected = self.row(public=True)
+                        self.assertEqual(self.row(public=True), expected)
+        finally:
+            self.setting('net_identity', None)
+
     def test_missing_org_and_disappeared_marker_are_omitted(self):
         self.assertEqual(org_summary.public_rows('no-such-summary-org'), [])
         marker = store._db_path(self.slug)
