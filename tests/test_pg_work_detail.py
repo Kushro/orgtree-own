@@ -130,6 +130,35 @@ class Detail(unittest.TestCase):
         self.c.execute(f"UPDATE {self.s}.nodes SET val=(val::jsonb-'seat_id')::text WHERE id='a'")
         self.refresh(); self.assertIsNone(self.get())
 
+    def test_nodes_and_questions_share_body_snapshot_during_commit(self):
+        self.add(self.item('archive',status='done'),True); self.asks(); self.refresh()
+        with pgstore.connect() as raw,raw.transaction():
+            raw.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+            ctx=workdetail.Context(workquery.Snapshot(raw,self.oid,viewer=USER,now_ts=self.now))
+            before=ctx.work_get(USER,'archive',now_ts=self.now)
+            # No node cache can manufacture coherence: change the independent
+            # writer after the index snapshot is pinned but before new reads.
+            with self.c.transaction():
+                self.c.execute(f"UPDATE {self.s}.nodes SET val=jsonb_set(val::jsonb,'{{generation}}','5')::text WHERE id='a'")
+                self.asks(False); workread.refresh(self.c,self.oid)
+            ctx.nodes.cache.clear()
+            self.assertEqual(ctx.work_get(USER,'archive',now_ts=self.now),before)
+        after=self.get(wid='archive')
+        self.assertEqual(after['owner']['generation'],5); self.assertFalse(after['questions'])
+        self.assertTrue(after['archived'])
+
+    def test_projection_errors_and_legacy_identity_http_guard_unchanged(self):
+        from orgtree import api
+        self.add(self.item()); self.refresh()
+        for kw in ({'projection':'bogus'},{'fields':['not_a_field']},{'fields':17}):
+            with self.assertRaises(LedgerError) as old:
+                store.load_org(self.slug).work_get(USER,'one',now_ts=self.now,**kw)
+            with self.assertRaises(LedgerError) as new: self.get(**kw)
+            self.assertEqual(str(new.exception),str(old.exception))
+        self.add(self.item('legacy',id='w12345678')); self.refresh()
+        with self.assertRaises(api.HTTPException) as error: api.work_item_get(self.slug,'one')
+        self.assertEqual(error.exception.status_code,409)
+
     def test_routes_use_indexed_view_and_preserve_legacy_fallback(self):
         from orgtree import api
         self.add(self.item()); self.refresh()
