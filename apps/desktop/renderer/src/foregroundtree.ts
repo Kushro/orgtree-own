@@ -133,11 +133,16 @@ export function decodeForeground(wire: ForegroundSnapshot | ForegroundDelta,
 }
 
 async function answer(response: Response): Promise<unknown> {
+  // A server without the selected-tree routes (an older or non-PostgreSQL
+  // engine, or a catch-all answering any path) is a compatibility answer:
+  // the full tree remains correct there, a hard failure would not be.
+  if (response.status === 404) throw new ForegroundControl('compatibility')
   const body = await response.json()
   if (response.status === 409 && (body.kind === 'reset' || body.kind === 'compatibility')) {
     throw new ForegroundControl(body.kind)
   }
   if (!response.ok) throw new Error(body.detail || `Foreground request failed (${response.status})`)
+  if (!record(body) || !('format' in body)) throw new ForegroundControl('compatibility')
   return body
 }
 

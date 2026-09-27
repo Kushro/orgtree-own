@@ -148,3 +148,17 @@ test('lookup and page use exact landed routes and keep explicit absence/reset di
   assert.equal(paths[1], '/api/orgs/org/foreground-tree/children?parent=p%2Fx&limit=100')
   assert.equal(paths[2], '/api/orgs/org/foreground-tree/search?q=a&limit=100&cursor=cursor&state=archived')
 })
+
+test('a server without the selected-tree route is a compatibility answer, never a failed tree', async () => {
+  for (const reply of [response({ detail: 'Not Found' }, 404), response({})]) {
+    const full = { slug: 'org', roots: [{ id: 'whole' }] } as unknown as TreePayload
+    const reader = new ForegroundTreeReader(async () => reply, async () => full)
+    const got = await reader.get('org')
+    assert.equal(got.snapshot, null)
+    assert.equal(got.tree, full)
+    assert.ok(reader.unavailable.has('org'), 'later reads may keep the conditional full read')
+  }
+  const reader = new ForegroundTreeReader(async () => response({ detail: 'inconsistent' }, 503), legacy)
+  await assert.rejects(reader.get('org'), /inconsistent/)
+  assert.equal(reader.unavailable.has('org'), false, 'a server error is not compatibility')
+})
