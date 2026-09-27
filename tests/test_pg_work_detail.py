@@ -15,7 +15,6 @@ def tearDownModule():
 
 @unittest.skipUnless(f.ADMIN, 'disposable PG not configured: NOT RUN')
 class Detail(unittest.TestCase):
-    setUp = fixture.Counts.setUp
     tearDown = fixture.Counts.tearDown
     add = fixture.Counts.add
     refresh = fixture.Counts.refresh
@@ -24,6 +23,10 @@ class Detail(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         store.claim_data_root()
+
+    def setUp(self):
+        fixture.Counts.setUp(self)
+        self.c.execute(f"UPDATE {self.s}.nodes SET val=jsonb_set(val::jsonb,'{{state}}','\"live\"')::text")
 
     def item(self, slug='one', **kw):
         org = store.load_org(self.slug)
@@ -47,7 +50,7 @@ class Detail(unittest.TestCase):
                     self.assertEqual(self.get(viewer,**kw),expected)
 
     def test_pointers_and_artifacts_preserve_non_disclosure(self):
-        self.add(self.item('secret',owner={'node':'c','generation':0}),True)
+        self.add(self.item('secret',owner={'node':'c','generation':0},created_by={'node':'c'}),True)
         self.add(self.item('public',participants=['b']),True)
         self.add(self.item(dependencies=['secret','public'],parent='secret',superseded_by='secret',
             history=[{'op':'move','from':'secret','to':'public'}],
@@ -62,7 +65,7 @@ class Detail(unittest.TestCase):
                 self.assertIsNone(result['history'][0]['from'])
 
     def test_missing_hidden_and_old_id_refusals_equal_ledger(self):
-        self.add(self.item('hidden',owner={'node':'c'}),True); self.refresh()
+        self.add(self.item('hidden',owner={'node':'c'},created_by={'node':'c'}),True); self.refresh()
         for slug in ('hidden','missing','w12345678'):
             with self.assertRaises(LedgerError) as old:
                 store.load_org(self.slug).work_get('a',slug,now_ts=self.now)
