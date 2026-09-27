@@ -373,7 +373,7 @@ panelTest('§9c a selected tree that omits a retired owner asks for it and never
   const placed = ORG.map(root => root.id !== 'lead' ? root : { ...root, children: [...root.children,
     mkNode('ghost', { parent: 'lead', state: 'archived' })] })
   const found = await mountPanel(t, placed, 'lead', work, view([...all, 'ghost']))
-  assert.deepEqual(rowNames(found.el), ['ghost-task', 'mid-task'], 'once placed, the retiree's work is the team's')
+  assert.deepEqual(rowNames(found.el), ['ghost-task', 'mid-task'], 'once placed, the retired owner work belongs to the team')
   assert.doesNotMatch(found.el.textContent ?? '', /Checking team membership/)
   const absent = await mountPanel(t, ORG, 'sib', { items: [owned('ghost-task', 'ghost')] }, view(all, ['ghost']))
   assert.deepEqual(rowNames(absent.el), [])
