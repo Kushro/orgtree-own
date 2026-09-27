@@ -5,6 +5,7 @@ test_steer_credential_pg module covers a real second-process PG commit.
 """
 import json
 import sqlite3
+from contextlib import closing
 import unittest
 from unittest.mock import patch
 import test_steer_poll_cost as fixture
@@ -36,6 +37,14 @@ class FeedLagTests(unittest.TestCase):
                 fixture.store, 'cached_org', side_effect=lambda slug: old if slug == self.slug else cached(slug)):
             response = self.poll(token)
         self.assertEqual(response.status_code, 403, response.text)
+        with patch.object(fixture.store, 'cached_org', return_value=old), \
+                patch.object(fixture.sup, 'ack_steer') as ack:
+            response = self.client.post(
+                f'/api/orgs/{self.slug}/nodes/{fixture.W}/steer/ack',
+                headers={'x-orgtree-agent-token': token},
+                json={'delivery_id': 'revoked-delivery', 'tool_use_id': 'revoked-tool'})
+            self.assertEqual(response.status_code, 403, response.text)
+            ack.assert_not_called()
 
     def test_off_rejects_revoked_token_before_feed_notification(self):
         self._revoked(False)
@@ -66,7 +75,7 @@ class FeedLagTests(unittest.TestCase):
         old = fixture.store.cached_org(self.slug)
         # Simulate a stored pre-seat-id row; Org supplies its deterministic
         # legacy seat, which differs from the stale cached seat.
-        with sqlite3.connect(fixture.store._db_path(self.slug)) as conn:
+        with closing(sqlite3.connect(fixture.store._db_path(self.slug))) as conn, conn:
             row = json.loads(conn.execute('SELECT val FROM nodes WHERE id=?', (fixture.W,)).fetchone()[0])
             row.pop('seat_id')
             conn.execute('UPDATE nodes SET val=? WHERE id=?', (json.dumps(row), fixture.W))
