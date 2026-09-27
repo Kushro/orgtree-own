@@ -5474,7 +5474,7 @@ def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
     """
     def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
         cache_key = None
-        if STORE_BACKEND == "postgres":
+        if STORE_BACKEND == "postgres" and not getattr(conn, "pinned", False):
             # Check the committed revision, never just the asynchronous local
             # notification counter. This SELECT is the warm snapshot point.
             pg = cast(Any, conn)

@@ -51,6 +51,23 @@ class PostgresTranscriptCapture(fixture.CaptureTests):
         self.assertEqual(store.org_seq(slug),seq)
         self.assertEqual(store.read_transcript_source(slug,'agent')['nodes']['agent']['session_id'],'outside')
 
+    def test_uncommitted_source_never_reuses_or_populates_shared_cache(self):
+        from orgtree import store,orgtx
+        slug=self.org.d['slug'];committed=store.read_transcript_source(slug,'agent')
+        for warm in (True,False):
+            with self.subTest(warm=warm):
+                if not warm:
+                    with store._transcript_source_cache_lock:store._transcript_source_cache.clear()
+                with self.assertRaisesRegex(RuntimeError,'rollback probe'):
+                    with orgtx.org_tx(slug,nodes=['agent']):
+                        with store._POOL.acquire(slug) as pc:
+                            self.assertTrue(pc.pinned,'must exercise pinned transaction')
+                            pc.execute("UPDATE nodes SET val=jsonb_set(val::jsonb,'{session_id}','\"uncommitted\"'::jsonb)::text WHERE id='agent'")
+                        seen=store.read_transcript_source(slug,'agent')
+                        self.assertEqual(seen['nodes']['agent']['session_id'],'uncommitted')
+                        raise RuntimeError('rollback probe')
+                self.assertEqual(store.read_transcript_source(slug,'agent'),committed)
+
     def test_cache_miss_tags_payload_with_same_statement_revision(self):
         from orgtree import store,pgstore
         from unittest.mock import patch
