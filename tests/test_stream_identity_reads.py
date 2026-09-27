@@ -107,7 +107,7 @@ class StreamIdentityReads(ProseDeltaBase):
             conn.execute('BEGIN')
             try:
                 # Valid identity rows beside deliberately unreadable unrelated data.
-                conn.execute("INSERT INTO nodes(id,val) VALUES (?,?)", ('unrelated', 'not-json'))
+                conn.execute("INSERT INTO nodes(id,ord,val) VALUES (?,?,?)", ('unrelated', 999, 'not-json'))
                 conn.execute("INSERT INTO doc(key,val) VALUES (?,?)", ('unrelated_poison', 'not-json'))
                 conn.execute('COMMIT')
                 fields = store.read_stream_identity(self.slug, 'agent')
