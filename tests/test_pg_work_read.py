@@ -66,7 +66,7 @@ class Counts(unittest.TestCase):
         return result
 
     def node(self,nid,parent):
-        self.c.execute(f'INSERT INTO {self.s}.nodes(id,val) VALUES(%s,%s) ON CONFLICT(id) DO UPDATE SET val=excluded.val',
+        self.c.execute(f'INSERT INTO {self.s}.nodes(id,ord,val) VALUES(%s,99,%s) ON CONFLICT(id) DO UPDATE SET val=excluded.val',
             (nid,json.dumps(dict(id=nid,name=nid,parent=parent,children=[]))))
 
     def asks(self,opened=True):
@@ -144,7 +144,7 @@ class Counts(unittest.TestCase):
 
     def test_raw_reconciliation_catches_counts_access_policy_and_questions(self):
         self.add(self.item()); self.refresh()
-        faults=[f"UPDATE {self.s}.work_read_totals SET total=total+1 WHERE viewer='user'",
+        faults=[f"UPDATE {self.s}.work_read_totals SET total=total+1 WHERE viewer='a'",
                 f"DELETE FROM {self.s}.work_read_access WHERE viewer='a'",
                 f"UPDATE {self.s}.work_read_policy SET manual=true",
                 f"INSERT INTO {self.s}.work_read_dependency VALUES('orphan','b')",
