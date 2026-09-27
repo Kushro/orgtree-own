@@ -1,11 +1,12 @@
 """Actual-PG coherent policy snapshots, authority and history bounds."""
-import copy
 import json
 import os
-from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
+root = tempfile.TemporaryDirectory(prefix='policy-reads-', ignore_cleanup_errors=True)
+os.environ.update(ORGTREE_DATA=root.name, ORGTREE_V2_TOKEN='test')
 import test_mail_archive_bounds_pg as fixture
 from engine.launch import load_app
 load_app()
