@@ -32700,7 +32700,8 @@ def scan_steer_records(slug: str, nid: str) -> dict[str, int]:
         return out
     try:
         try:
-            org = store.load_runtime_org(slug)  # explicit runtime projection
+            org = (store.load_runtime_org(slug) if store.STORE_BACKEND == 'postgres'
+                   else orgtx.org_read(slug))  # explicit PG runtime projection
         except LedgerError:
             return out
         if nid not in org.nodes:
