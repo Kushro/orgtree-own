@@ -3627,7 +3627,12 @@ def _write_log_rows(conn: sqlite3.Connection, table: str,
     if snap is not None and ids is not None:
         kept_ids = {cast(int, seq) for seq in ids if seq is not None}
         if cas is not None:
-            for seq, oval in old:
+            # Delete newest first so a removed prefix changes its first-row
+            # identity only once. Sent's owner-position trigger otherwise
+            # rewrites every survivor after EACH oldest-row deletion, making
+            # restart archive trimming quadratic while node locks are held.
+            # The same stored-value CAS still guards every deleted row.
+            for seq, oval in reversed(old):
                 if seq not in kept_ids:
                     _cas(conn, f"DELETE FROM {table} WHERE seq=? AND val=?",
                          (seq, oval), f"{table} row {seq} ({scope_args[0]!r})")
