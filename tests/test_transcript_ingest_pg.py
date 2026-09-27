@@ -23,6 +23,51 @@ class PostgresTranscriptCapture(fixture.CaptureTests):
         from orgtree import pgstore
         pgstore.migrate(os.environ['ORGTREE_PG_URL'])
 
+    def test_warm_source_projection_is_revision_checked_and_detached(self):
+        from orgtree import store,pgstore
+        from unittest.mock import patch
+        slug=self.org.d['slug'];first=store.read_transcript_source(slug,'agent')
+        original=pgstore.PgConn.execute;sqls=[]
+        def observe(conn,sql,*a,**kw):
+            sqls.append(sql);return original(conn,sql,*a,**kw)
+        with patch.object(pgstore.PgConn,'execute',observe):
+            second=store.read_transcript_source(slug,'agent')
+        self.assertTrue(sqls)
+        self.assertFalse(any('__source_node' in sql for sql in sqls),'warm cache must skip JSON projection')
+        second['nodes']['agent']['session_id']='poison'
+        self.assertEqual(store.read_transcript_source(slug,'agent'),first)
+
+    def test_source_cache_observes_external_revision_without_local_feed(self):
+        from orgtree import store
+        slug=self.org.d['slug'];store.read_transcript_source(slug,'agent');seq=store.org_seq(slug)
+        # A real separate writer commits data+revision without this process's
+        # local invalidation or LISTEN callback.
+        with store._POOL.acquire(slug) as pc:
+            schema="org_"+str(int(pc.org_id))
+            oid=pc.org_id
+        with psycopg.connect(os.environ['ORGTREE_PG_URL']) as conn:
+            conn.execute(f"UPDATE {schema}.nodes SET val=jsonb_set(val::jsonb,'{{session_id}}','\"outside\"'::jsonb)::text WHERE id='agent'")
+            conn.execute('UPDATE public.orgs SET revision=revision+1 WHERE org_id=%s',(oid,))
+        self.assertEqual(store.org_seq(slug),seq)
+        self.assertEqual(store.read_transcript_source(slug,'agent')['nodes']['agent']['session_id'],'outside')
+
+    def test_source_projection_cache_is_bounded_and_org_settings_invalidate(self):
+        from orgtree import store
+        from unittest.mock import patch
+        slug=self.org.d['slug']
+        with store._transcript_source_cache_lock:store._transcript_source_cache.clear()
+        with patch.object(store,'_TRANSCRIPT_SOURCE_CACHE_LIMIT',2):
+            for i in range(3):
+                other=store.create_org('cache-'+str(i)+'-'+__import__('uuid').uuid4().hex[:8])
+                other.hire(fixture.ledger.USER,None,'haiku',0,'agent');store.save_org(other)
+                store.read_transcript_source(other.d['slug'],'agent')
+            self.assertEqual(len(store._transcript_source_cache),2)
+        before=store.read_transcript_source(slug,'agent')
+        org=store.load_org(slug);org.d['reply_incarnation']='new-org-inc';store.save_org(org)
+        after=store.read_transcript_source(slug,'agent')
+        self.assertNotEqual(before['reply_incarnation'],after['reply_incarnation'])
+        self.assertEqual(after['reply_incarnation'],'new-org-inc')
+
     def test_keyset_page_has_exact_bounded_membership(self):
         from orgtree import store
         slug = self.org.d['slug']

@@ -230,13 +230,27 @@ class _SweepState:
         budget = 8
         while self.orgs and budget:
             slug = self.orgs[0]
-            page = store.read_transcript_nodes_page(slug, self.cursor, budget)
-            if page is None:
-                # JSON/old blob compatibility keeps existing normalization.
-                org = store.cached_org(slug)
-                rows = [(nid, org.node(nid).get('state'))
-                        for nid in sorted(org.nodes) if nid > self.cursor][:budget + 1]
-                page = {'rows': rows[:budget], 'more': len(rows) > budget}
+            try:
+                page = store.read_transcript_nodes_page(slug, self.cursor, budget)
+                if page is None:
+                    # JSON/old blob compatibility keeps existing normalization.
+                    org = store.cached_org(slug)
+                    rows = [(nid, org.node(nid).get('state'))
+                            for nid in sorted(org.nodes) if nid > self.cursor][:budget + 1]
+                    page = {'rows': rows[:budget], 'more': len(rows) > budget}
+            except Exception:
+                # A deleted/renamed/unreadable org must not pin this cursor
+                # forever and starve every later org. Keep known active nodes
+                # until the next catalog round, and retry transient failures
+                # from the start when that round rediscovers the org.
+                _log.exception('Transcript discovery failed for %s; retry next round', slug)
+                for key in self.active:
+                    if key[0] == slug:
+                        self.active[key] = self.round
+                self.orgs.popleft()
+                self.cursor = ''
+                budget -= 1
+                continue
             rows = page['rows']
             for nid, state in rows:
                 key = (slug, nid)
@@ -245,7 +259,7 @@ class _SweepState:
                     archived.append(key)
                 else:
                     self.active[key] = self.round
-            budget -= len(rows)
+            budget -= max(1, len(rows))
             if rows:
                 self.cursor = rows[-1][0]
             if not page['more']:

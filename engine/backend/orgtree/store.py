@@ -73,6 +73,7 @@ from its children ran a sqlite build against `~/orgtree` — the live root — a
 from __future__ import annotations
 
 import contextlib
+import collections
 import copy
 import hashlib
 import json
@@ -5459,6 +5460,11 @@ def read_transcript_nodes_page(slug: str, after: str = "", limit: int = 8):
     return _bounded_read(slug, body)
 
 
+_transcript_source_cache_lock = threading.Lock()
+_TRANSCRIPT_SOURCE_CACHE_LIMIT = 2048
+_transcript_source_cache: collections.OrderedDict[tuple, tuple[int, dict]] = collections.OrderedDict()
+
+
 def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
     """Coherent source-resolution inputs, without charter, docket or mail.
 
@@ -5467,6 +5473,21 @@ def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
     node identity and org path settings together on READ COMMITTED PG.
     """
     def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+        cache_key = None
+        if STORE_BACKEND == "postgres":
+            # Check the committed revision, never just the asynchronous local
+            # notification counter. This SELECT is the warm snapshot point.
+            pg = cast(Any, conn)
+            row = conn.execute("SELECT revision FROM public.orgs WHERE org_id=?",
+                                 (pg.org_id,)).fetchone()
+            if row is None:
+                raise LedgerError(f"no such org: {slug!r}")
+            cache_key = (str(DATA_ROOT), str(pg.org_id), slug, nid)
+            with _transcript_source_cache_lock:
+                hit = _transcript_source_cache.get(cache_key)
+                if hit is not None and hit[0] == int(row[0]):
+                    _transcript_source_cache.move_to_end(cache_key)
+                    return copy.deepcopy(hit[1])
         paths = ",".join("'$." + field + "'" for field in _TRANSCRIPT_NODE_FIELDS)
         rows = dict(conn.execute(
             "SELECT '__source_node', json_extract(val," + paths + ") "
@@ -5475,8 +5496,11 @@ def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
                if STORE_BACKEND == 'postgres' else
                "CASE WHEN json_type(val,'$.desktop_import') IS NOT NULL THEN '1' ELSE '0' END ")
             + "FROM nodes WHERE id=? UNION ALL SELECT key,val FROM doc "
-            "WHERE key IN ('nodes','reply_incarnation','sandbox','kiosk')",
-            (nid, nid)).fetchall())
+            "WHERE key IN ('nodes','reply_incarnation','sandbox','kiosk')"
+            + (" UNION ALL SELECT '__source_revision',revision::text FROM public.orgs WHERE org_id=?"
+               if cache_key is not None else ""),
+            (nid, nid, cast(Any, conn).org_id) if cache_key is not None else (nid, nid)).fetchall())
+        revision = rows.pop("__source_revision", None)
         if "nodes" in rows:
             return None
         desktop_present = rows.pop("__desktop_present", "0") == "1"
@@ -5491,6 +5515,14 @@ def read_transcript_source(slug: str, nid: str) -> dict[str, Any] | None:
             node["desktop_import"] = None
         result = {key: json.loads(value) for key, value in rows.items()}
         result.update(slug=slug, nodes={nid: node})
+        if cache_key is not None and revision is not None:
+            # Revision comes from the SAME statement as the payload. A write
+            # between the warm check and this read cannot mislabel old data.
+            with _transcript_source_cache_lock:
+                _transcript_source_cache[cache_key] = (int(revision), copy.deepcopy(result))
+                _transcript_source_cache.move_to_end(cache_key)
+                while len(_transcript_source_cache) > _TRANSCRIPT_SOURCE_CACHE_LIMIT:
+                    _transcript_source_cache.popitem(last=False)
         return result
     return cast("dict[str, Any] | None", _bounded_read(slug, body))
 

@@ -365,6 +365,40 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(view.node('agent')['session_id'], 'changed-session')
         self.assertEqual(records.incarnation(view, 'agent'), 'changed-incarnation')
 
+    def test_disappearing_org_mid_page_does_not_starve_later_org(self):
+        slug = self.org.d['slug']
+        org = store.load_org(slug)
+        for i in range(12):
+            node = dict(org.node('agent'));node.update(id=f'old{i:02d}', state='archived')
+            org.d['nodes'][node['id']] = node
+        store.save_org(org)
+        later = store.create_org('later-'+uuid.uuid4().hex[:8])
+        later.hire(ledger.USER,None,'haiku',0,'later-agent');store.save_org(later)
+        state = ingest._SweepState()
+        with patch.object(store,'org_slugs',return_value=[slug,later.d['slug']]):
+            state.discover()
+            self.assertEqual(state.orgs[0],slug)
+            store.delete_org(slug)
+            state.discover()
+        self.assertIn((later.d['slug'],'later-agent'),state.active)
+        self.assertNotIn(slug,state.orgs)
+        with patch.object(store,'org_slugs',return_value=[later.d['slug']]):
+            state.discover()
+        self.assertFalse(any(key[0]==slug for key in state.active))
+
+    def test_transient_org_discovery_failure_retries_next_round(self):
+        state=ingest._SweepState();failed=[]
+        def page(slug,after='',limit=8):
+            if slug=='x' and not failed:
+                failed.append(slug);raise OSError('temporary unreadable org')
+            return {'rows':[(slug+'-agent','live')],'more':False}
+        with patch.object(store,'org_slugs',return_value=['x','y']), \
+             patch.object(store,'read_transcript_nodes_page',side_effect=page):
+            state.discover()
+            self.assertIn(('y','y-agent'),state.active)
+            state.discover()
+        self.assertEqual(set(state.active),{('x','x-agent'),('y','y-agent')})
+
     def test_unread_suffix_retries_without_another_file_change(self):
         import builtins
         self.write(0,3);self.backfill();self.assertFalse(self.backfill())
