@@ -46,9 +46,9 @@ class LiveRows(unittest.TestCase):
         initial=stamp(); self.assertGreater(initial,0)
         org=store.load_org(self.slug); org.d['nodes']['a']['last_status']={'summary':'changed'}
         store.save_org(org); self.assertEqual(stamp(),initial)
-        org=store.load_org(self.slug); org.d['work_items_archive'].append({'slug':'arch','value':1})
+        org=store.load_org(self.slug); org.d.setdefault('work_items_archive',[]).append({'slug':'arch','value':1})
         store.save_org(org); archived=stamp(); self.assertGreater(archived,initial)
-        org=store.load_org(self.slug); org.d['work_scope_log'].setdefault('arch',[]).append({'seq':1,'text':'scope'})
+        org=store.load_org(self.slug); org.d.setdefault('work_scope_log',{}).setdefault('arch',[]).append({'seq':1,'text':'scope'})
         store.save_org(org); self.assertGreater(stamp(),archived)
         a=store.load_org(self.slug); b=store.load_org(self.slug)
         a.d['work_items'][0]['rev']=2; store.save_org(a); before=stamp()
@@ -65,11 +65,11 @@ class LiveRows(unittest.TestCase):
         store.save_org(org); slug=org.d['slug']; item=org.d['work_items'][-1]['slug']
         worktx.run(slug,lambda o:o.work_assign('own',item,'sub'))
         fresh=store.load_org(slug); self.assertEqual(fresh.d['work_items'][-1]['owner']['node'],'sub')
-        with orgtx.org_tx(slug,sections=['work_items','work_items_archive','asks']) as tx:
-            row=tx.d['work_items'].pop(); tx.d['work_items_archive'].append(row)
+        with orgtx.org_tx(slug,sections=['work_items','asks'],logs=['work_items_archive']) as tx:
+            row=tx.d['work_items'].pop(); tx.d.setdefault('work_items_archive',[]).append(row)
         self.assertEqual(store.read_work_items_rows(slug,[item])['ids'],[])
         fresh=store.load_org(slug); self.assertEqual(fresh.d['work_items_archive'][-1]['slug'],item)
-        with orgtx.org_tx(slug,sections=['work_items','work_items_archive','asks']) as tx:
+        with orgtx.org_tx(slug,sections=['work_items','asks'],logs=['work_items_archive']) as tx:
             tx.d['work_items'].append(tx.d['work_items_archive'].pop())
         restored=store.read_work_items_rows(slug,[item])['items'][item]
         self.assertEqual(restored['owner']['node'],'sub')
