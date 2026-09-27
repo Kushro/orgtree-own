@@ -355,4 +355,55 @@ class LazyRows(unittest.TestCase):
         self.assertFalse(lazy.d['work_items'][0]._loaded)
         self.assertEqual(lazy.d['work_items'][0]['scope'],3)
 
+
+    def test_runtime_gate_projection_is_coherent_and_reads_committed_holds(self):
+        from orgtree import halt
+        org=store.load_org(self.slug)
+        org.nodes['a']['halt']=False
+        org.d['killswitch']=None
+        store.save_org(org)
+        with patch.object(store,'cached_org',side_effect=AssertionError('eager gate')):
+            self.assertIsNone(halt.blocked(self.slug,'a'))
+            with orgtx.org_tx(self.slug,nodes=['a'],sections=['killswitch']) as tx:
+                tx.org.nodes['a']['halt']=True
+                tx.d['killswitch']={'at':'now','by':'user'}
+            self.assertEqual(halt.blocked(self.slug,'a'),'halt')
+            self.assertEqual(halt.blocked(self.slug,'missing'),'killswitch')
+            with orgtx.org_tx(self.slug,nodes=['a']) as tx:
+                tx.org.nodes['a']['halt']=False
+            self.assertEqual(halt.blocked(self.slug,'a'),'killswitch')
+        # A commit after the statement has executed cannot mix its node with
+        # a newer latch. PgConn buffers the statement's complete result.
+        original=pgstore.PgConn.execute
+        fired=[]
+        def execute(conn,sql,params=()):
+            result=original(conn,sql,params)
+            if '__runtime_node' in sql and not fired:
+                fired.append(True)
+                with orgtx.org_tx(self.slug,nodes=['a'],sections=['killswitch']) as tx:
+                    tx.org.nodes['a']['halt']=True
+                    tx.d['killswitch']=None
+            return result
+        with patch.object(pgstore.PgConn,'execute',execute):
+            before=store.read_runtime_node(self.slug,'a',('killswitch',))
+        self.assertEqual(fired,[True])
+        self.assertFalse(before['node']['halt'])
+        self.assertTrue(before['killswitch'])
+        after=store.read_runtime_node(self.slug,'a',('killswitch',))
+        self.assertTrue(after['node']['halt'])
+        self.assertIsNone(after['killswitch'])
+
+    def test_runtime_node_projection_excludes_work_and_preserves_legacy_fallback(self):
+        seen,watch=self.watch()
+        with watch:
+            row=store.read_runtime_node(self.slug,'a',('spend_frozen','storage_blocked'))
+        self.assertEqual(row['node']['id'],'a')
+        self.assertEqual(len(seen),1,seen)
+        self.assertIn('UNION ALL',seen[0][0])
+        self.assertNotIn('work_items',str(seen))
+        with self.assertRaises(ValueError): store.read_runtime_node(self.slug,'a',('work_items',))
+        self.assertIsNone(store.read_runtime_node(self.slug,'absent')['node'])
+        with patch.object(store,'row_store',return_value=False):
+            self.assertIsNone(store.read_runtime_node(self.slug,'a'))
+
 if __name__=='__main__': unittest.main()

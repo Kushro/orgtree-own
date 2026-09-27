@@ -5408,6 +5408,30 @@ def log_append(d: dict[str, Any], sect: str, row: Any) -> None:
     appender(sect, row)
 
 
+def read_runtime_node(slug: str, nid: str, sections: Iterable[str] = ()) -> dict[str, Any] | None:
+    """One stored node and gate sections from ONE SQL statement/snapshot.
+
+    No Org normalization is implied. None requests the legacy/JSON fallback;
+    a missing node is represented by node=None. Gate callers still recheck
+    mutations on their locked rows. The fixed allowlist excludes large docs.
+    """
+    selected = tuple(sections)
+    if isinstance(sections, str) or not set(selected) <= {"killswitch", "spend_frozen", "storage_blocked"}:
+        raise ValueError("unsupported runtime node section")
+    def body(conn: sqlite3.Connection) -> dict[str, Any] | None:
+        keys = ("nodes", *selected)
+        rows = dict(conn.execute(
+            "SELECT '__runtime_node', val FROM nodes WHERE id=? UNION ALL "
+            "SELECT key, val FROM doc WHERE key IN (" + ",".join("?" for _ in keys) + ")",
+            (nid, *keys)).fetchall())
+        if "nodes" in rows:
+            return None
+        result = {key: json.loads(raw) for key, raw in rows.items()}
+        result["node"] = result.pop("__runtime_node", None)
+        return result
+    return cast("dict[str, Any] | None", _bounded_read(slug, body))
+
+
 def load_runtime_org(slug: str, sections: Iterable[str] = ()) -> Org:
     """Explicit read-only runtime view with version-checked deferred work rows.
 

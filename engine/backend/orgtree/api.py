@@ -12077,9 +12077,13 @@ def _agent_identity(body: AgentCall, request: Request, *, durable: bool = False)
     # the eager UI cache. Dispatch still repeats seat, halt and killswitch
     # checks on its locked rows; no authorization relies on this preflight.
     try:
-        org = (store.load_runtime_org(body.org) if store.STORE_BACKEND == "postgres"
-               else store.cached_org(body.org))
-        caller = org.node(body.node)
+        projection = (store.read_runtime_node(body.org, body.node)
+                      if store.STORE_BACKEND == "postgres" else None)
+        caller = projection.get("node") if projection is not None else None
+        if caller is None or any(key not in caller for key in ("state", "generation", "seat_id")):
+            org = (store.load_runtime_org(body.org) if store.STORE_BACKEND == "postgres"
+                   else store.cached_org(body.org))
+            caller = org.node(body.node)
     except LedgerError as exc:
         raise HTTPException(403, "authenticated seat is missing; reconnect through a live seat") from exc
     if caller.get("state") != "live" or caller.get("successor"):

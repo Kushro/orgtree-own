@@ -506,13 +506,18 @@ def blocked(slug: str, nid: str) -> str | None:
     # load was convoy: a snapshot rebuild that fell back to a full parse ran
     # inside it and stalled every write for tens of seconds.
     try:
-        org = store.cached_org(slug)
+        projection = (store.read_runtime_node(slug, nid, ("killswitch",))
+                      if store.STORE_BACKEND == "postgres" else None)
+        if projection is None:
+            org = store.cached_org(slug)
+            n, latch = org.nodes.get(nid), org.d.get("killswitch")
+        else:
+            n, latch = projection["node"], projection.get("killswitch")
     except LedgerError:
         return None
-    n = org.nodes.get(nid)
     if n is not None and n.get("halt"):
         return "halt"
-    if org.d.get("killswitch"):
+    if latch:
         return "killswitch"
     return None
 

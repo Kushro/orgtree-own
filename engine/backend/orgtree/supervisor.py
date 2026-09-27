@@ -24312,9 +24312,15 @@ def _run_one_turn_recorded(slug: str, nid: str,
             # state-review 2026-09-12.
             _belt_owned = True
             try:
-                # PG-3e-A: a pure read — one coherent lock-free `org_read`.
-                _bo = orgtx.org_read(slug)
-                _bn = _bo.node(nid) if nid in _bo.nodes else None
+                # One coherent node/gate projection; retain the legacy read seam.
+                _bp = (store.read_runtime_node(slug, nid, ("spend_frozen", "storage_blocked"))
+                       if store.STORE_BACKEND == "postgres" else None)
+                if _bp is None:
+                    _bo = orgtx.org_read(slug)
+                    _bn = _bo.node(nid) if nid in _bo.nodes else None
+                    _bd = _bo.d
+                else:
+                    _bn, _bd = _bp["node"], _bp
                 _belt_owned = bool(
                     _bn is None
                     or _bn.get("halt")
@@ -24322,8 +24328,8 @@ def _run_one_turn_recorded(slug: str, nid: str,
                     or _bn.get("limit_locked")
                     or _bn.get("remote_controlled")
                     or _bn["state"] != "live"
-                    or _bo.d.get("spend_frozen")
-                    or (_bo.d.get("storage_blocked")
+                    or _bd.get("spend_frozen")
+                    or (_bd.get("storage_blocked")
                         and sbx.on_disk(slug)))
             except Exception:                                # noqa: BLE001
                 _belt_owned = True
