@@ -13,7 +13,7 @@ import weakref
 from collections import OrderedDict
 from typing import Any
 
-from . import store
+from . import refs, store
 from .ledger import USER, LedgerError
 
 # Every field consumed by list rows, search, grouping, references and Attention.
@@ -152,7 +152,11 @@ def _build(slug: str) -> dict[str, Any]:
     org = store.load_org(slug)
     if org.work_identity_state() != "slug":
         raise IdentityMigrationRequired("work identity migration required")
-    return project(org.work_list(USER, include_archived=True, include_backlogged=True))
+    payload = org.work_list(USER, include_archived=True, include_backlogged=True)
+    for group in GROUPS[:3]:
+        for item in payload.get(group, []):
+            item["ref"] = refs.item(slug, item["slug"])
+    return project(payload)
 
 
 def _selected(all_rows: dict[str, Any], archived: bool, backlogged: bool) -> dict[str, Any]:

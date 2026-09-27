@@ -55,6 +55,7 @@ class WorkUI(unittest.TestCase):
         row = body["items"][0]
         self.assertEqual(row["objective"], "Searchable full description")
         self.assertEqual(row["view"], "list")
+        self.assertEqual(row["ref"], f"@item:{self.slug}/visible")
         self.assertNotIn("evidence", row)
         self.assertLess(len(response.content), 10000)
         self.assertEqual(body["attention"][0]["manual_attention"]["reason"], "Please decide")

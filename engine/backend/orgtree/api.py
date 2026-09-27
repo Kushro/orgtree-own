@@ -7624,7 +7624,7 @@ def work_items_view(slug: str, archived: int = 0, backlogged: int = 0,
     try:
         revision, body = work_ui.read(slug, bool(archived), bool(backlogged), since)
     except work_ui.IdentityMigrationRequired as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, WORK_IDENTITY_STALE) from e
     except LedgerError as e:
         raise HTTPException(404, str(e))
     headers = {"ETag": '"' + revision + '"', "Cache-Control": "private, no-cache"}
