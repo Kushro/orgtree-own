@@ -1389,14 +1389,8 @@ def _external_candidates(name: str) -> dict[str, list[str]]:
     retired 2026-09-25 with the external-chat MCP server.)"""
     out: dict[str, list[str]] = {"org": [], "net": []}
     try:
-        for o in store.list_orgs():
-            if o.get("slug") == name:
-                try:
-                    if store.load_org(name).d.get("kiosk") is not None:
-                        continue
-                except LedgerError:
-                    continue
-                out["org"].append(name)
+        from . import org_listing
+        out["org"] = org_listing.local_candidates(name)
     except OSError:
         pass
     for p in net.remote_peers():
@@ -12267,7 +12261,8 @@ def _list_orgs_payload(body: AgentCall) -> dict[str, Any]:
     # WHICH transports resolve it, derived from the same data
     # the bare-name resolver consults — the list and the send
     # agree by construction.
-    locs = [o for o in store.list_orgs() if not o.get("kiosk")]
+    from . import org_listing
+    locs = org_listing.discovery_rows()
     local_net = {str(o.get("net_slug")): o["slug"]
                  for o in locs if o.get("net_slug")}
     peers = net.remote_peers()
