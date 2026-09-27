@@ -96,6 +96,8 @@ def _source_view(slug, nid):
     doc = store.read_transcript_source(slug, nid)
     if doc is not None:
         node = doc['nodes'][nid]
+        if not node.get('session_id'):
+            return _SourceView(doc)  # capture returns before path/identity resolution
         # Source naming and legacy identity initialization remain owned by
         # their existing routines. Never let a partial view enter a mint.
         if (doc.get('reply_incarnation') and node.get('transcript_incarnation')

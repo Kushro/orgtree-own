@@ -205,6 +205,14 @@ class CaptureTests(unittest.TestCase):
             self.assertTrue(ingest.capture(slug, 'agent', backfill=True))
         self.assertEqual(len(self.rows()), 4)
 
+    def test_source_without_session_needs_no_whole_org_or_identity_mint(self):
+        slug = self.org.d['slug']
+        org = store.load_org(slug)
+        org.node('agent').pop('session_id', None)
+        store.save_org(org)
+        with patch.object(store, 'cached_org', side_effect=AssertionError('whole Org')):
+            self.assertFalse(ingest.capture(slug, 'agent', backfill=True))
+
     def test_source_projection_excludes_unrelated_payloads(self):
         slug = self.org.d['slug']
         org = store.load_org(slug)
