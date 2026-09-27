@@ -257,6 +257,13 @@ export function buildNodeFacts(roots?: TreeNode[]): Map<string, NodeFacts> {
 }
 
 const PROSE_TOKEN = /[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?/g
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/** Tokens that are never worth an agent lookup: plain numbers, pieces of a
+ *  timestamp (`2026-09-27T22`, `124Z`) and UUIDs. Word-shaped tokens stay:
+ *  whether one names an agent is the backend's answer, not a guess here. */
+export function notAgentShaped(id: string): boolean {
+  return /^\d+$/.test(id) || /^\d[\d-]*(?:T\d+)?Z?$/i.test(id) || UUID.test(id)
+}
 
 /** Name-shaped words in an item's text, excluding what the caller already
  *  resolves. Bounded by count and by characters scanned: a candidate list,
@@ -272,7 +279,7 @@ export function proseCandidates(value: unknown, skip: (id: string) => boolean,
       budget -= text.length
       for (const m of text.matchAll(PROSE_TOKEN)) {
         const id = m[0]
-        if (id.length >= 2 && id.length <= 64 && !skip(id)) out.add(id)
+        if (id.length >= 2 && id.length <= 64 && !notAgentShaped(id) && !skip(id)) out.add(id)
         if (out.size >= cap) return
       }
     } else if (Array.isArray(v)) v.forEach(x => visit(x, depth + 1))

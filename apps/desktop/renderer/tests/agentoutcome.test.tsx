@@ -10,7 +10,7 @@ import test from 'node:test'
 import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { ForegroundViewContext, resolveRef, useRefRoutes } from '../src/canvas/reflinks'
-import { actorFit, proseCandidates, useNodeFacts, useProseAgentIndex } from '../src/canvas/docket'
+import { actorFit, notAgentShaped, proseCandidates, useNodeFacts, useProseAgentIndex } from '../src/canvas/docket'
 import type { NodeFacts } from '../src/canvas/docket'
 import type { MentionIndex } from '../src/canvas/workrefs'
 import type { RefRoutes } from '../src/canvas/reflinks'
@@ -174,4 +174,25 @@ test('an owner answered only for another catalog stays unconfirmed, never gone (
   const lagging = await mountFacts(t, 'lagging-' + t.name)
   assert.equal(lagging().get('old')?.unresolved, true)
   assert.equal(actorFit({ node: 'old', generation: 0 }, lagging()).fit, 'unknown', 'a stale answer is not a gone actor')
+})
+
+test('prose lookup skips numbers, timestamp pieces and UUIDs, but keeps real names (including digits)', async (t) => {
+  const text = 'At 2026-09-27T22:08:24.124Z the docket lock review window 08 went to worker-7 and coord-0; '
+    + 'n1-review-astra saw retired-0019 and agent2, session 1e1b0558-3cc0-4480-acef-fcb43934e6ba, sha 26f8ed8'
+  const got = proseCandidates({ objective: text }, () => false)
+  for (const noise of ['2026-09-27T22', '08', '24', '124Z', '1e1b0558-3cc0-4480-acef-fcb43934e6ba']) {
+    assert.ok(!got.includes(noise), `${noise} is not looked up`)
+    assert.equal(notAgentShaped(noise), true)
+  }
+  for (const name of ['worker-7', 'coord-0', 'n1-review-astra', 'retired-0019', 'agent2', 'docket', '26f8ed8']) {
+    assert.ok(got.includes(name), `${name} is still a candidate`)
+  }
+  const asked = stubReferences(t, ['worker-7', 'retired-0019'])
+  const index = await mountIndex(t, { catalog_revision: 'cat-' + t.name, present: [], missing: [] },
+    { objective: text }, new Map())
+  await inAct(async () => { await flush(4) })
+  const words = asked.flat()
+  assert.ok(!words.some(w => notAgentShaped(w)), 'no number, timestamp or UUID reached the lookup')
+  assert.deepEqual(index().get('worker-7'), { kind: 'agent', id: 'worker-7', tier: 'astra' }, 'a real name still resolves')
+  assert.equal(index().get('retired-0019')?.kind, 'agent')
 })
