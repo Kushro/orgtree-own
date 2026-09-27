@@ -46,7 +46,7 @@ class StartupHealGuard(unittest.TestCase):
         original = pgstore.PgConn.execute
         measurements = []
         for count in (20, 200):
-            self.query("INSERT INTO nodes(id,val) SELECT 'history-'||x,? FROM generate_series(1,?) x "
+            self.query("INSERT INTO nodes(id,ord,val) SELECT 'history-'||x,1000+x,? FROM generate_series(1,?) x "
                        'ON CONFLICT(id) DO NOTHING', ('{"state":"archived"}', count))
             rows = []
             def measured(conn, sql, params=()):
@@ -116,13 +116,13 @@ class StartupHealGuard(unittest.TestCase):
         self.prepare()
         before = {table: self.query('SELECT * FROM '+table+' ORDER BY 1')
                   for table in ('nodes','doc','log_l')}
-        original = store._save_sqlite
+        original = store._write_doc
         entered = []
-        def fail_after_save(org):
-            original(org)
+        def fail_after_save(*args, **kwargs):
+            original(*args, **kwargs)
             entered.append(True)
             raise RuntimeError('after save before commit')
-        with patch.object(store, '_save_sqlite', fail_after_save):
+        with patch.object(store, '_write_doc', fail_after_save):
             with self.assertRaisesRegex(RuntimeError, 'after save before commit'):
                 settingstx.heal_plan_stamps(self.slug)
         self.assertEqual(entered, [True])
