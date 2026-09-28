@@ -66,41 +66,58 @@ class ForegroundEtag(unittest.TestCase):
         self.c.execute(f"UPDATE {self.s}.nodes SET val=jsonb_set(val::jsonb,%s,%s::jsonb)::text WHERE id='a'",
                        ('{' + field + '}', json.dumps(value)))
 
-    def test_every_kind_of_change_moves_the_etag(self):
+    def moves(self, mutate):
         # Each mutation must change what the list SHOWS (body revision), and the
         # counter ETag must move with it. The body check guards the test itself:
         # a mutation the body cannot see would prove nothing about the ETag.
+        self.seed()
+        before = self.state(backlogged=True)
+        self.assertEqual(self.state(backlogged=True), before, 'unstable without a write')
+        mutate(); self.refresh()
+        after = self.state(backlogged=True)
+        self.assertNotEqual(after[1], before[1], 'body did not change (bad test)')
+        self.assertNotEqual(after[0], before[0], 'ETag did not move')
+        self.assertIsNotNone(self.read(since=before[0], backlogged=True)[1],
+                             'old ETag still answered 304')
+
+    def test_change_create(self):
+        self.moves(lambda: self.add(self.item('three')))
+
+    def test_change_title(self):
+        self.moves(lambda: self.add(self.item('one', participants=['b'], title='Renamed')))
+
+    def test_change_status(self):
+        self.moves(lambda: self.add(self.item('two', status='blocked',
+                                              reviewer={'node': 'b', 'generation': 0})))
+
+    def test_change_owner(self):
+        self.moves(lambda: self.add(self.item('two', owner={'node': 'b', 'generation': 0},
+                                              reviewer={'node': 'b', 'generation': 0})))
+
+    def test_change_participants(self):
+        self.moves(lambda: self.add(self.item('one', participants=['b', 'c'])))
+
+    def test_change_manual_attention(self):
+        self.moves(lambda: self.add(self.item('one', participants=['b'],
+                                              manual_attention={'reason': 'look'})))
+
+    def test_change_attached_question(self):
+        self.moves(lambda: (self.add(self.item('archive', status='done'), True), self.asks()))
+
+    def test_change_archive(self):
         def archive_one():
             row = self.item('one', participants=['b'], status='done')
             self.drop('one'); self.add(row, True)
-        mutations = [
-            ('create', lambda: self.add(self.item('three'))),
-            ('update title', lambda: self.add(self.item('one', participants=['b'], title='Renamed'))),
-            ('update status', lambda: self.add(self.item('two', status='blocked',
-                                                         reviewer={'node': 'b', 'generation': 0}))),
-            ('owner change', lambda: self.add(self.item('two', owner={'node': 'b', 'generation': 0},
-                                                        reviewer={'node': 'b', 'generation': 0}))),
-            ('participant change', lambda: self.add(self.item('one', participants=['b', 'c']))),
-            ('manual attention', lambda: self.add(self.item('one', participants=['b'],
-                                                            manual_attention={'reason': 'look'}))),
-            ('attached question', lambda: (self.add(self.item('archive', status='done'), True),
-                                           self.asks())),
-            ('archive', archive_one),
-            ('delete', lambda: self.drop('two')),
-            ('owner generation', lambda: self.node('generation', 9)),
-            ('owner retired', lambda: self.node('state', 'retired')),
-        ]
-        for name, mutate in mutations:
-            with self.subTest(name):
-                self.tearDown(); self.setUp(); self.seed()
-                before = self.state(backlogged=True)
-                self.assertEqual(self.state(backlogged=True), before, 'unstable without a write')
-                mutate(); self.refresh()
-                after = self.state(backlogged=True)
-                self.assertNotEqual(after[1], before[1], f'{name}: body did not change (bad test)')
-                self.assertNotEqual(after[0], before[0], f'{name}: ETag did not move')
-                self.assertIsNotNone(self.read(since=before[0], backlogged=True)[1],
-                                     f'{name}: old ETag still answered 304')
+        self.moves(archive_one)
+
+    def test_change_delete(self):
+        self.moves(lambda: self.drop('two'))
+
+    def test_change_owner_generation(self):
+        self.moves(lambda: self.node('generation', 9))
+
+    def test_change_owner_retired(self):
+        self.moves(lambda: self.node('state', 'retired'))
 
     def test_backlog_only_change_moves_the_backlog_view_etag(self):
         self.seed()
