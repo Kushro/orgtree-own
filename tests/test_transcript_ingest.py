@@ -36,13 +36,13 @@ class CaptureTests(unittest.TestCase):
         self.lookup.start();self.addCleanup(self.lookup.stop)
         # Mint conversation identity before comparing two unchanged passes.
         source_key(store.load_org(self.org.d['slug']), 'agent')
-    def write(self,start,count,mode='w'):
+    def write(self,start,count,mode='w',width=0):
         with self.path.open(mode,encoding='utf8') as stream:
-            for i in range(start,start+count):stream.write(json.dumps({'type':'assistant','message':{'content':str(i)}})+'\n')
+            for i in range(start,start+count):stream.write(json.dumps({'type':'assistant','message':{'content':str(i).zfill(width)}})+'\n')
     def rows(self):
         return records.tail(source_key(store.load_org(self.org.d['slug']),'agent'),1000)[0]
     def slice_of(self,records_per_slice):
-        """Patch the byte budget to exactly this many of this file's records."""
+        """Patch the byte budget to exactly this many of this file's (fixed-width) records."""
         line=len(self.path.read_bytes().splitlines()[0])+1
         return patch.object(ingest,'SLICE_BYTES',records_per_slice*line)
     def test_new_session_captured_at_failed_turn_boundary_without_any_view(self):
@@ -64,10 +64,10 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual([r['visible'] for r in rows],['human message'])
 
     def test_known_session_suffix_is_captured_and_history_backfills_in_slices(self):
-        self.write(0,180)
+        self.write(0,180,width=3)
         ingest.capture(self.org.d['slug'],'agent',beginning=True)
         self.assertEqual(len(self.rows()),1,'admission must not import the entire old transcript')
-        self.write(180,20,'a')
+        self.write(180,20,'a',width=3)
         ingest.capture(self.org.d['slug'],'agent')
         self.assertEqual(len(self.rows()),21)
         with self.slice_of(64):
@@ -94,7 +94,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(len(self.rows()),15)
         self.assertFalse(self.backfill())
     def test_pending_history_keeps_the_node_unsettled(self):
-        self.write(0,200)
+        self.write(0,200,width=3)
         with self.slice_of(64):
             self.assertEqual([self.backfill() for _ in range(5)],[True,True,True,True,False])
         self.assertEqual(len(self.rows()),200)
@@ -107,7 +107,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(len({(r[0],r[1]) for r in self.rows()}),200)
 
     def test_one_slice_never_reads_more_than_its_budget_plus_one_record(self):
-        self.write(0,200)
+        self.write(0,200,width=3)
         seen=[]
         original=records._insert
         def counted(conn,source,epoch,rows):
@@ -132,14 +132,15 @@ class CaptureTests(unittest.TestCase):
 
     def test_unbounded_backfill_does_not_count_lifetime_records(self):
         import contextlib
-        self.write(0,200)
+        self.write(0,200,width=3)
         statements=[]
         original=records.database
         class Proxy:
             def __init__(self,conn):self.conn=conn
             def execute(self,sql,*args):
                 statements.append(sql);return self.conn.execute(sql,*args)
-            def executemany(self,sql,*args):return self.conn.executemany(sql,*args)
+            def executemany(self,sql,*args):
+                statements.append(sql);return self.conn.executemany(sql,*args)
             def __getattr__(self,name):return getattr(self.conn,name)
         @contextlib.contextmanager
         def observed():
