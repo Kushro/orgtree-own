@@ -16,6 +16,7 @@ from contextlib import closing
 from pathlib import Path
 
 from . import census_contacts, ledger, maildrain, orgtx, profiling, store
+from .mcptool import MANAGED_WAIT_READ_ACTIONS as READ_ACTIONS
 from .mcptool import MANAGED_WAIT_TOOLS as TOOLS
 
 WAIT_S = 10.0
@@ -87,6 +88,19 @@ class _DestinationGone(Exception):
 def tool_name(body):
     name = body.args.get('tool', '') if body.tool == 'orgtree_op_call' else body.tool
     return name if isinstance(name, str) else ''
+
+
+def managed_call(body):
+    """Whether this call takes the managed-wait path: a managed tool, unless
+    the action is one of its reads (`MANAGED_WAIT_READ_ACTIONS`). A keyed
+    `orgtree_op_call` is judged by the call it wraps."""
+    name = tool_name(body)
+    if name not in TOOLS:
+        return False
+    args = body.args if isinstance(body.args, dict) else {}
+    if body.tool == 'orgtree_op_call':
+        args = args.get('args') if isinstance(args.get('args'), dict) else {}
+    return str(args.get('action') or '') not in READ_ACTIONS.get(name, ())
 
 
 def _destination(org, row):

@@ -2137,6 +2137,12 @@ MANAGED_WAIT_TOOLS = frozenset({'orgtree_staff', 'orgtree_hire', 'orgtree_rehire
                               # that starts an app-server, which is exactly the
                               # wait this path exists for
                               'orgtree_continue_on'})
+# The read-only actions of a managed tool. They spawn nothing and wait on
+# nothing, so they keep the ordinary agent-call path: a watchdog `list` used
+# to pay the operation journal (three fsync'd sidecar writes under one lock)
+# and a MAX_RUNNING slot for a read of a few rows. Matched exactly as the
+# handlers read it, `str(args.get('action') or '')`.
+MANAGED_WAIT_READ_ACTIONS = {'orgtree_watchdog': frozenset({'list'})}
 
 
 def available_tools() -> list[dict[str, Any]]:

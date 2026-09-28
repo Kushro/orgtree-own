@@ -1291,11 +1291,13 @@ class OperationContacts(unittest.TestCase):
         """hire, staff, rehire, retire, dissolve and cheap_compact are
         managed-wait tools (mcptool.MANAGED_WAIT_TOOLS): EVERY call, refused
         or replayed too, journals in the tool_waits sidecar, re-running its
-        DDL outside a transaction. No other row touches that sidecar."""
+        DDL outside a transaction. No other row touches that sidecar. A
+        watchdog `list` is a read and takes the ordinary path
+        (mcptool.MANAGED_WAIT_READ_ACTIONS), so it journals nothing."""
         seen = set()
         for r in self.doc["rows"]:
             with self.subTest(variant=r["variant"], condition=r["condition"]):
-                managed = r["tool"] in MANAGED_WAIT
+                managed = r["tool"] in MANAGED_WAIT and r["contract"] != "watchdogs.list"
                 self.assertEqual("tool_waits" in r["harness"]["sidecars_touched"], managed)
                 if managed:
                     seen.add(r["tool"])
