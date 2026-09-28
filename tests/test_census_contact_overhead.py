@@ -24,8 +24,10 @@ WORKLOADS = ["pooled_read", "write_transaction", "executemany_batch",
              "transcript_ingest", "reply_events_remember", "reply_events_lookup"]
 # Statement calls per operation: fixed for the primary-store workloads, measured
 # by the observer for the sidecar ones (the real site functions decide them).
+# reply_events_remember is 2 (INSERT, COMMIT) since 320bdb6: a stream writer
+# reuses one connection per thread, so the schema DDL and PRAGMAs run once.
 CALLS_PER_OP = {"pooled_read": 1, "write_transaction": 3, "executemany_batch": 3,
-                "transcript_ingest": 2, "reply_events_remember": 5, "reply_events_lookup": 5}
+                "transcript_ingest": 2, "reply_events_remember": 2, "reply_events_lookup": 5}
 THREADS = [1, 8]
 RESULT_FIELDS = {"workload", "threads", "arm", "calls_per_repetition", "rows_per_repetition",
                  "median_ns_per_call", "p90_ns_per_call", "delta_median_ns_vs_plain",
