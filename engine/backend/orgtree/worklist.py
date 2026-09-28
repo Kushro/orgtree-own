@@ -96,41 +96,85 @@ def _read(slug, viewer, build, now_ts):
         return None
 
 
+#: Per engine process: a restart (possibly a new build with a different row
+#: projection) never answers 304 to a validator issued by an older process.
+_ETAG_EPOCH = os.urandom(8).hex()
+
+
+def etag(ctx, org_slug, backlogged):
+    """Validator for the plain foreground (archive_limit=0) from counters only.
+
+    The body is a function of the snapshot and the clock. Every source write
+    it reads bumps one of the three catalog revisions in the SAME transaction
+    (work_index_state: item bodies and location; work_read_state: access,
+    questions, node parents; work_list_state: derived list fields, node
+    identity, asks/release/identity docs). The clock only moves an item when it
+    crosses its archive deadline (`deadline < now`, the exact complement of the
+    candidate query), so the number of passed active deadlines covers it.
+    Counts and rows are NOT read here: that is the whole point of the 304.
+    """
+    q = ctx.query
+    passed = q.raw.execute(
+        f"SELECT count(*) FROM {q.schema}.work_read_policy "
+        "WHERE location='active' AND deadline < %s", (q.now,)).fetchone()[0]
+    return '"f' + work_ui._hash([_ETAG_EPOCH, FORMAT, org_slug, q.org_id, q.viewer,
+                                 bool(backlogged), q.catalog, int(passed)]) + '"'
+
+
+def foreground_conditional(slug, viewer=USER, *, backlogged=False, since='', now_ts=None):
+    """(etag, body) for the plain foreground, or (etag, None) when `since`
+    already names this version; None requests whole-route compatibility.
+
+    The validator and the body share one snapshot, so a body is never labelled
+    with a newer version than it shows. On a match nothing is selected,
+    counted or projected."""
+    def build(ctx, org_slug):
+        tag = etag(ctx, org_slug, backlogged)
+        if since == tag:
+            return tag, None
+        return tag, _foreground_body(ctx, org_slug, viewer, backlogged, 0)
+    return _read(slug, viewer, build, now_ts)
+
+
 def foreground(slug, viewer=USER, *, backlogged=False, archive_limit=0, now_ts=None):
     if type(archive_limit) is not int or not 0 <= archive_limit <= workquery.MAX_PAGE:
         raise ValueError(f'archive_limit must be 0..{workquery.MAX_PAGE}')
     def build(ctx, org_slug):
-        q = ctx.query
-        counts = workread.counts_raw(q.raw, q.org_id, viewer=viewer, now_ts=q.now)
-        if counts is None:
-            raise workquery.CompatibilityRequired('docket counts unavailable')
-        body = dict(format=FORMAT, counts=counts, now=q.now, items=[], references=[], attention=[])
-        if backlogged:
-            body['backlogged'] = []
-        for raw in q.foreground(include_backlogged=backlogged):
-            row = ctx.light(raw, org_slug)
-            group = 'backlogged' if ctx._work_backlogged(raw.summary) else 'items'
-            body[group].append(row)
-            body['references'].append(reference(row))
-            if row.get('manual_attention'):
-                body['attention'].append(row)
-        if archive_limit:
-            # The first archive page and foreground must share BOTH snapshot
-            # and classification clock. A separately fetched first page can
-            # silently omit or duplicate an item archived between requests.
-            rows, following = q.archive(limit=archive_limit)
-            body['archived'] = [ctx.light(row, org_slug) for row in rows]
-            body['references'].extend(reference(row) for row in body['archived'])
-            body['next_cursor'] = following
-            body['catalog'] = q.catalog
-        # The revision also keys on-demand historical references in mounted
-        # views. Remote archive-only edits must invalidate positive/negative
-        # lookups even when active rows and counts are unchanged. Hash the
-        # same-snapshot catalog without returning hidden rows or raw counters.
-        body['revision'] = work_ui._hash([
-            {k: v for k, v in body.items() if k != 'now'}, q.catalog])
-        return body
+        return _foreground_body(ctx, org_slug, viewer, backlogged, archive_limit)
     return _read(slug, viewer, build, now_ts)
+
+
+def _foreground_body(ctx, org_slug, viewer, backlogged, archive_limit):
+    q = ctx.query
+    counts = workread.counts_raw(q.raw, q.org_id, viewer=viewer, now_ts=q.now)
+    if counts is None:
+        raise workquery.CompatibilityRequired('docket counts unavailable')
+    body = dict(format=FORMAT, counts=counts, now=q.now, items=[], references=[], attention=[])
+    if backlogged:
+        body['backlogged'] = []
+    for raw in q.foreground(include_backlogged=backlogged):
+        row = ctx.light(raw, org_slug)
+        group = 'backlogged' if ctx._work_backlogged(raw.summary) else 'items'
+        body[group].append(row)
+        body['references'].append(reference(row))
+        if row.get('manual_attention'):
+            body['attention'].append(row)
+    if archive_limit:
+        # The first archive page and foreground must share BOTH snapshot
+        # and classification clock. A separately fetched first page can
+        # silently omit or duplicate an item archived between requests.
+        rows, following = q.archive(limit=archive_limit)
+        body['archived'] = [ctx.light(row, org_slug) for row in rows]
+        body['references'].extend(reference(row) for row in body['archived'])
+        body['next_cursor'] = following
+        body['catalog'] = q.catalog
+    # The revision also keys on-demand historical references in mounted
+    # views. Remote archive-only edits must invalidate positive/negative
+    # lookups even when active rows and counts are unchanged. Hash the
+    # same-snapshot catalog without returning hidden rows or raw counters.
+    body['revision'] = work_ui._hash([
+        {k: v for k, v in body.items() if k != 'now'}, q.catalog])
+    return body
 
 
 def archive(slug, viewer=USER, *, limit=50, cursor='', now_ts=None):

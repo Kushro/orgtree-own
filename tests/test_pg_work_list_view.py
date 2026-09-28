@@ -256,7 +256,8 @@ class Lists(unittest.TestCase):
             self.assertEqual(asyncio.run(api._work_reference_route(self.slug,'one')).status_code,200)
             bad=asyncio.run(api._work_archive_page_route(self.slug,cursor='bad'))
             self.assertEqual(bad.status_code,409); self.assertEqual(json.loads(bad.body)['kind'],'reset')
-        with patch.object(worklist,'foreground',return_value=None):
+        with (patch.object(worklist,'foreground',return_value=None),
+              patch.object(worklist,'foreground_conditional',return_value=None)):
             fallback=api._bounded_work_response(self.slug,'foreground')
             self.assertEqual(fallback.status_code,409)
             self.assertEqual(json.loads(fallback.body)['kind'],'compatibility')

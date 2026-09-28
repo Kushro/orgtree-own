@@ -7697,8 +7697,18 @@ def _bounded_work_response(slug: str, kind: str, backlogged: bool = False,
                            since: str = '', archive_limit: int = 0) -> Any:
     from fastapi.responses import JSONResponse
     from . import worklist, workquery
+    tag = None
     try:
-        if kind == 'foreground':
+        if kind == 'foreground' and not archive_limit:
+            # Answer an unchanged poll from revision counters, before any row
+            # is selected or projected (N1000: a 304 used to cost a full 200).
+            found = worklist.foreground_conditional(slug, backlogged=backlogged,
+                                                    since=since.strip())
+            tag, body = found if found is not None else (None, None)
+            if tag is not None and body is None:
+                return Response(status_code=304, headers={
+                    'Cache-Control': 'private, no-cache', 'ETag': tag})
+        elif kind == 'foreground':
             body = worklist.foreground(slug, backlogged=backlogged, archive_limit=archive_limit)
         elif kind == 'archive':
             body = worklist.archive(slug, limit=limit, cursor=cursor)
@@ -7720,7 +7730,9 @@ def _bounded_work_response(slug: str, kind: str, backlogged: bool = False,
             'kind': 'compatibility', 'legacy_url': f'/api/orgs/{slug}/work-items-view'})
     headers = {'Cache-Control': 'private, no-cache'}
     if kind == 'foreground':
-        headers['ETag'] = '"' + body['revision'] + '"'
+        headers['ETag'] = tag or '"' + body['revision'] + '"'
+        # A validator issued before the counter ETag (the body revision) still
+        # matches after a full build; it just does not get the cheap path.
         if since.strip('"') == body['revision']:
             return Response(status_code=304, headers=headers)
     return Response(content=_dump_tree(body), media_type='application/json', headers=headers)
