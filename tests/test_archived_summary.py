@@ -162,7 +162,8 @@ class ArchivedSummaryTests(unittest.TestCase):
         self.assertEqual(arch['charter_line'], 'retired seat')
         # the row reads turns[turns.length - 1]; one is all it can use
         self.assertEqual(len(arch['turns']), 1)
-        self.assertEqual(arch['turns'][0]['n'], 7)
+        # the newest one, by its time (ORGTREE_TURN_LOG renumbers `n`)
+        self.assertEqual(arch['turns'][0]['at'], '2026-01-08T00:00:00Z')
         for f in ('id', 'title', 'tier', 'state', 'seat', 'grant',
                   'occupancy', 'context_window', 'pending_switch', 'frozen'):
             self.assertIn(f, arch, f'the tray needs {f}')
