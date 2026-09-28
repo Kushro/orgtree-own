@@ -3,7 +3,7 @@ module that reads the contract registry or its boundary fixtures, plus the
 modules the change touches, one module per call, at the tip or at <base>
 (the changed code AND docs/state-system restored with `git checkout`, so the
 CRLF bytes the span hashes read are the base's own).
-Usage: local_watchdog_list_landing_checks.py <base sha> <tag> tip|base"""
+Usage: local_watchdog_list_landing_checks.py <base sha> <tag> tip|base [first module index]"""
 import json
 import os
 from pathlib import Path
@@ -18,7 +18,8 @@ from assert_repo_import import assert_repo_import
 provenance = assert_repo_import(repo)
 BASE, PHASE = sys.argv[1], sys.argv[3]
 out = Path('C:/Temp/watchdog-list-landing-' + sys.argv[2]) / PHASE
-out.mkdir(parents=True)
+out.mkdir(parents=True, exist_ok=True)
+FIRST = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 REGISTRY_READERS = sorted(
     'tests/' + p.name for p in (repo / 'tests').glob('test_*.py')
     if re.search(r'source_contract_sha256|operation-contracts\.json', p.read_text(encoding='utf-8')))
@@ -41,7 +42,7 @@ summary = {}
 try:
     if PHASE == 'base':
         git('checkout', BASE, '--', *RESTORE)
-    for mod in MODULES:
+    for mod in MODULES[FIRST:]:
         name = Path(mod).stem
         receipt = out / (name + '.json')
         subprocess.run([sys.executable, 'tools/run-python-verification.py', mod,
@@ -62,5 +63,5 @@ finally:
         git('checkout', 'HEAD', '--', *RESTORE)
     clean = subprocess.run(['git', 'status', '--porcelain', '--', *RESTORE], cwd=repo,
                            capture_output=True, text=True).stdout.strip() == ''
-    provenance.write_result(out / 'summary.json', {'modules': summary, 'source_restored': clean})
+    provenance.write_result(out / f'summary-{FIRST}.json', {'modules': summary, 'source_restored': clean})
     print('source_restored', clean, flush=True)
