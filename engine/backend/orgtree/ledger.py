@@ -37,13 +37,14 @@ from __future__ import annotations
 import contextlib
 import sys
 import copy
+import itertools
 import json
 import math
 import os
 import re
 import time as _time
 import uuid
-from collections.abc import Callable, Iterable, Mapping, MutableMapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final, Literal, cast
 
@@ -12725,12 +12726,26 @@ class Org:
         key, an item with no name, or two items answering to the same name.
         The last one must be caught here, or a duplicate reaches
         `work_identity_migrate`'s refusal only by luck. No items at all is
-        `slug`."""
+        `slug`.
+
+        The ARCHIVE is judged from the docket index when the store can answer
+        from it (`LazyDoc.archive_identity`: the same three facts per item,
+        without reading a body — at N1000 this walk was ~109 MB per
+        `orgtree_work` call); otherwise from the rows, exactly as before."""
         names: set[str] = set()
-        for it in self._work_all():
-            if "id" in it:
+        indexed = getattr(self.d, "archive_identity", None)
+        archived = indexed() if indexed is not None else None
+
+        def rows(items: list[WorkItem]) -> Iterator[tuple[str, bool]]:
+            for it in items:             # `id` first, as it always was
+                yield ("", True) if "id" in it else (str(it.get("slug") or ""), False)
+        facts: Iterable[tuple[str, bool]] = rows(
+            self._work_all() if archived is None else self._work_active())
+        if archived is not None:
+            facts = itertools.chain(facts, archived)
+        for name, has_old_id in facts:
+            if has_old_id:
                 return "legacy"          # old identity, definitively
-            name = str(it.get("slug") or "")
             if not name:
                 return "legacy"          # unnamed: nothing can reference it
             if name in names:

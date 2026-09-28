@@ -3895,6 +3895,53 @@ class LazyDoc(dict[str, Any]):
         self._proj[key] = rows
         return rows
 
+    def archive_identity(self) -> list[tuple[str, bool]] | None:
+        """`(slug, has_old_id)` for every archived docket item, from the
+        PostgreSQL docket index, WITHOUT reading a single archived body; `None`
+        whenever the index cannot stand in for the rows, and the caller then
+        takes the ordinary materialising read.
+
+        THE PROBLEM. `Org.work_identity_state` runs at the head of every
+        `orgtree_work` call and walked the whole archive: at N1000 that was a
+        ~109 MB read per call, about 30% of an update's time, for three facts
+        per item. The index already holds exactly those facts. `work_index`
+        has one row per archived `log_l` row, maintained by trigger in the
+        writer's own transaction; its insert refuses a non-object item and an
+        empty slug (so neither can be stored at all); `legacy_identity` is
+        `body ? 'id'`, the same key-presence test as `"id" in it`. Duplicate
+        slugs are NOT assumed away by the UNIQUE constraint (it is deferred, so
+        an open transaction can hold two) — every row is returned and the
+        caller counts them as before.
+
+        Same fallbacks as `project`: a section resident, dropped, buffered or
+        blobbed answers from memory, so there is one answer, never two. Also
+        refused: SQLite, an index that is not `ready`, any archived row whose
+        summary predates the `_query` format, and a stored `work_items_archive`
+        doc blob (which the index does not cover)."""
+        k = "work_items_archive"
+        if (STORE_BACKEND != "postgres" or dict.__contains__(self, k)
+                or k in self._dropped or k in self._pending
+                or k in self._snap_doc or k in self._deferred_doc
+                or k not in self._present):
+            return None
+        from . import workindex
+        with _POOL.acquire(self._slug) as conn:
+            raw = getattr(conn, "raw", None)
+            org_id = getattr(conn, "org_id", None)
+            if raw is None or org_id is None or not workindex.ready(raw, org_id):
+                return None
+            s = f"org_{int(org_id)}"
+            if raw.execute(f"SELECT 1 FROM {s}.doc WHERE key=%s", (k,)).fetchone():
+                return None
+            rows = raw.execute(
+                f"SELECT slug, summary->'_query'->>'format', "
+                f"summary->'_query'->>'legacy_identity' FROM {s}.work_index "
+                f"WHERE location='archive'").fetchall()
+        if any(fmt != "orgtree.work-query/v1" or legacy not in ("true", "false")
+               for _, fmt, legacy in rows):
+            return None
+        return [(str(slug), legacy == "true") for slug, _, legacy in rows]
+
     def materialize_all(self) -> None:
         for k in (*LAZY_SECTIONS, *list(self._pending), *list(self._deferred_doc)):
             if not dict.__contains__(self, k):
