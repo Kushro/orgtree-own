@@ -16,6 +16,7 @@ if ADMIN:
     os.environ['ORGTREE_PG_URL'] = urlunsplit((url.scheme, url.netloc, '/' + DBNAME, url.query, url.fragment))
     os.environ['ORGTREE_STORE'] = 'postgres'
 
+import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
 from test_prose_delta_lock import ProseDeltaBase
 from orgtree import assistant_messages, ledger, orgtx, reply_events, store, tree_changes
 
