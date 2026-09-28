@@ -19,6 +19,7 @@ test_pgstore.
 
 Run:  python tools/run-python-verification.py tests/test_work_refs_snapshot_pg.py
 """
+import hashlib
 import json
 import os
 import unittest
@@ -49,7 +50,8 @@ class WorkRefsSnapshot(unittest.TestCase):
         store.claim_data_root()
 
     def setUp(self):
-        self.slug = f._fresh_org('wsnap-' + self._testMethodName[-20:])
+        # a distinct org per test (several test names end the same way)
+        self.slug = f._fresh_org('wsnap-' + hashlib.sha1(self._testMethodName.encode()).hexdigest()[:12])
         org = store.load_org(self.slug)
         org.d['work_items'] = items()
         store.save_org(org)
