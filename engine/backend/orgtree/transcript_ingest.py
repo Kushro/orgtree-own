@@ -258,6 +258,12 @@ class _SweepState:
         self.round_unsettled = False
         self.active_settled = False
         self.archive_allowance = 0
+        # Active keys seen settled at least once in this process. A capture of
+        # any other active key is catch-up work; once every active key is in
+        # here the worker is back on the idle cadence, however slow re-checks
+        # of evicted settled nodes are. Pruned with `active`, so bounded by it.
+        self.settled_seen = set()
+        self.last_busy = None
 
     def seed_active(self, slugs):
         """Put every active node in the queue at the start of a round, from
@@ -335,6 +341,7 @@ class _SweepState:
         if not self.orgs:
             for key in [key for key, seen in self.active.items() if seen != self.round]:
                 del self.active[key]
+            self.settled_seen &= self.active.keys()
         return archived
 
 
@@ -346,25 +353,34 @@ def _is_settled_now(key):
 def _sweep(state, *, clock=time.monotonic):
     """Busy capture, active backfill, then bounded historical reconciliation.
 
-    Returns True when this tick left backfill work unsettled, so the caller
-    pauses briefly instead of for a whole second.
+    Returns True while catch-up work remains, so the caller pauses briefly
+    instead of for a whole second: this tick caught up an active node never
+    seen settled, left one unsettled, or active nodes never seen settled are
+    still queued. An archived node left unsettled also counts. Once every
+    active node has been seen settled, ticks return False (idle cadence).
 
     Active first: every active node is queued at round start (seed_active),
     and archived nodes are captured only after a complete active round found
     all of them settled, apart from a small per-round allowance so one node
     that can never settle cannot starve history. Backfill work in one tick is
-    bounded by WORK_BUDGET_S; settled re-checks by IDLE_CHECKS_PER_TICK, the
-    old idle cadence. Busy nodes are captured every tick, as before. At most
+    bounded by WORK_BUDGET_S (checked between captures, so one capture, e.g.
+    a first-visit identity mint, can overrun it); settled re-checks by
+    IDLE_CHECKS_PER_TICK, the old idle cadence. Busy nodes are captured at
+    most once per second, as before, outside the backfill budget. At most
     eight historical node rows are discovered per tick. Settled archived
     sources never enter the active queue, but retain stat/signature checks
     and re-enter ingestion when their slice finds change.
     """
     from . import supervisor as sup, transcript_records as records
     records._drain_spool()
-    with sup._state_lock:
-        busy = [key for key, value in sup._state.items() if value.get('busy')]
-    for slug, nid in busy:
-        capture_safely(slug, nid)
+    now = clock()
+    if state.last_busy is None or now - state.last_busy >= 1.0:
+        # one-second busy capture, however short the pending pauses are
+        state.last_busy = now
+        with sup._state_lock:
+            busy = [key for key, value in sup._state.items() if value.get('busy')]
+        for slug, nid in busy:
+            capture_safely(slug, nid)
     for key in state.discover():
         if len(state.archived) < ARCHIVED_PENDING_LIMIT and key not in state.archived:
             state.archived.append(key)
@@ -385,13 +401,20 @@ def _sweep(state, *, clock=time.monotonic):
         key = state.hot.popleft()
         if key not in state.active:
             continue
+        catching_up = key not in state.settled_seen
         capture_safely(*key, backfill=True)
         if _is_settled_now(key):
-            checks += 1
-            if checks >= IDLE_CHECKS_PER_TICK:
-                break
+            state.settled_seen.add(key)
+            pending = pending or catching_up
+            if not catching_up:
+                checks += 1
+                if checks >= IDLE_CHECKS_PER_TICK:
+                    break
         else:
+            state.settled_seen.discard(key)
             state.round_unsettled = pending = True
+    if not pending and any(key not in state.settled_seen for key in state.hot):
+        pending = True   # the budget ran out with never-settled active nodes queued
     while state.archived and clock() < deadline and (
             state.active_settled or state.archive_allowance > 0):
         key = state.archived.popleft()

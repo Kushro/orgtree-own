@@ -115,8 +115,11 @@ class CaptureTests(unittest.TestCase):
             return original(conn,source,epoch,rows)
         line=self.path.read_bytes().index(b'\n')+1
         with self.slice_of(10), patch.object(records,'_insert',side_effect=counted):
-            while self.backfill():
-                pass
+            for _ in range(60):
+                if not self.backfill():
+                    break
+            else:
+                self.fail('backfill never settled')
         self.assertEqual(len(self.rows()),200)
         self.assertTrue(seen,'control: slices really inserted rows')
         self.assertLessEqual(max(seen),10*line+line)
@@ -194,14 +197,15 @@ class CaptureTests(unittest.TestCase):
         calls=[]
         def fake(slug,nid,**kw):
             calls.append((nid,bool(kw.get('backfill'))));return False
-        queue=ingest._SweepState()
+        queue=ingest._SweepState();now=[0.0]
         with patch.object(store,'org_slugs',return_value=['x']), \
              patch.object(store,'read_transcript_nodes_page',return_value={'rows': [('a','live'),('b','live'),('c','live')], 'more': False}), \
              patch.dict(sup._state,{('x','busy'):{'busy':True}},clear=True), \
              patch.object(ingest,'capture_safely',side_effect=fake):
-            ingest._sweep(queue)
+            ingest._sweep(queue,clock=lambda:now[0])
             self.assertEqual(calls,[('busy',False),('a',True),('b',True),('c',True)]);calls.clear()
-            ingest._sweep(queue)
+            now[0]+=1.0
+            ingest._sweep(queue,clock=lambda:now[0])
             self.assertEqual(calls,[('busy',False),('a',True),('b',True),('c',True)])
     def test_a_cycle_that_worked_does_not_pause(self):
         import collections
@@ -262,6 +266,38 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(len(calls),4,'0.15 s budget at 0.04 s per capture')
         self.assertEqual(len(state.hot),16,'the rest waits for the next tick')
 
+    def test_single_slice_catch_up_never_sleeps_a_second_while_work_remains(self):
+        """The N1000 shape: every active file settles in ONE visit. Each tick
+        must still report pending while never-settled nodes remain."""
+        now=[0.0];calls=[]
+        def fake(slug,nid,**kw):
+            calls.append(nid);now[0]+=0.04
+            with ingest._lock:ingest._remember_settled((slug,nid),((),()))
+            return True
+        state=self.fake_state([str(i) for i in range(20)])
+        results=[]
+        with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
+            for _ in range(8):
+                results.append(ingest._sweep(state,clock=lambda:now[0]))
+                if len(set(calls))==20 and results[-1] is False:
+                    break
+        self.assertEqual(len(set(calls)),20,'control: every node was caught up')
+        first_idle=results.index(False)
+        self.assertTrue(all(results[:first_idle]),results)
+        self.assertEqual(len(set(calls[:4*first_idle])),20,'no idle pause before the last node settled')
+        calls.clear()
+        self.assertFalse(ingest._sweep(state,clock=lambda:now[0]),'all settled: idle cadence again')
+        self.assertTrue(0 < len(calls) <= ingest.IDLE_CHECKS_PER_TICK)
+
+    def test_busy_nodes_are_captured_once_per_second_however_short_the_pauses(self):
+        calls=[];now=[0.0]
+        state=self.fake_state([])
+        with patch.dict(sup._state,{('x','busy'):{'busy':True}},clear=True), \
+             patch.object(ingest,'capture_safely',side_effect=lambda s,n,**k:calls.append(n)):
+            for step in (0.0,0.3,0.6,1.05,1.5,2.1):
+                now[0]=step;ingest._sweep(state,clock=lambda:now[0])
+        self.assertEqual(calls.count('busy'),3)
+
     def test_settled_rechecks_keep_the_old_idle_cadence(self):
         calls=[]
         def fake(slug,nid,**kw):
@@ -269,6 +305,7 @@ class CaptureTests(unittest.TestCase):
             with ingest._lock:ingest._remember_settled((slug,nid),((),()))
             return True       # an evicted settled node: real check, still settled
         state=self.fake_state([str(i) for i in range(30)])
+        state.settled_seen.update(state.active)   # all caught up earlier in this process
         with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
             self.assertFalse(ingest._sweep(state))
         self.assertEqual(len(calls),ingest.IDLE_CHECKS_PER_TICK)
@@ -425,12 +462,14 @@ class CaptureTests(unittest.TestCase):
             return {'rows': tail[:limit], 'more': len(tail) > limit}
         state = ingest._SweepState()
         calls = []
+        now = [0.0]
         with patch.object(store, 'org_slugs', return_value=['x']), \
              patch.object(store, 'read_transcript_nodes_page', side_effect=page), \
              patch.dict(sup._state, {('x','busy'): {'busy': True}}, clear=True), \
              patch.object(ingest, 'capture_safely', side_effect=lambda s,n,**k: calls.append((n,k))):
             for _ in range(11):
-                ingest._sweep(state)
+                ingest._sweep(state, clock=lambda: now[0])
+                now[0] += 1.0
         self.assertEqual(sum(len(batch) for batch in selected), 81)
         self.assertTrue(all(len(batch) <= 8 for batch in selected))
         self.assertEqual(list(state.active), [('x', 'zlive')])
