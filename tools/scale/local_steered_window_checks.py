@@ -27,7 +27,7 @@ EXISTING = ['tests/test_chat_window.py', 'tests/test_prompt_view_clock_skew.py',
             'tests/test_restart_replay_envelope.py', 'tests/test_send_file_seat.py',
             'tests/test_history_retention.py', 'tests/test_live_durable_identity.py',
             'tests/test_manual_inbox.py', 'tests/test_state_material_reads.py',
-            'tests/test_client_op.py']
+            'tests/test_client_op.py', 'tests/test_pg_lazy_rows.py']
 
 
 def pg(action):
@@ -43,7 +43,8 @@ def restore():
         path.write_bytes(raw)
 
 
-def run(label, modules, expected=None):
+def run(label, modules, expected=None, extra_env=None):
+    env = dict(base_env, **(extra_env or {}))
     receipt = out / (label + '.json')
     cp = subprocess.run([sys.executable, 'tools/run-python-verification.py', *modules,
                          '--timeout', '400', '--json-output', str(receipt)], cwd=repo, env=env,
@@ -68,8 +69,9 @@ def mutate(path, old, new):
 
 try:
     pg('init-root'); pg('init'); pg('start')
-    env = dict(os.environ, ORGTREE_TEST_PG_ADMIN_URL=pg('urls')['urls']['P03_PG_ADMIN_URL'])
+    base_env = dict(os.environ, ORGTREE_TEST_PG_ADMIN_URL=pg('urls')['urls']['P03_PG_ADMIN_URL'])
     run('tip', NEW + EXISTING)
+    run('tip-lazy-rows', NEW, extra_env={'ORGTREE_LAZY_ROWS': '1'})
     for path in paths:
         path.write_bytes(subprocess.check_output(['git', 'show', BASE + ':' + path.relative_to(repo).as_posix()], cwd=repo))
     run('base', EXISTING)
