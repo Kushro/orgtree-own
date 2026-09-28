@@ -731,7 +731,7 @@ def heal_decoded_box(sect: str, box: Any) -> bool:
     return changed
 
 
-#: ORGTREE_TURN_LOG (default OFF until reviewed and flipped): a node's full
+#: ORGTREE_TURN_LOG (ON by default; 0/false/off/no turns it off): a node's full
 #: `turns` history lives in the `turn_log` dict log (one row per turn, owner =
 #: node id); the node row keeps only its newest TREE_TURNS entries, each with a
 #: turn number `n`, plus `turn_seq` (turns logged so far) and the running sums
@@ -745,7 +745,7 @@ def heal_decoded_box(sect: str, box: Any) -> bool:
 #: decoded on demand: that transaction may not have named the log. Until then
 #: readers count the un-logged entries themselves (`turn_estimate_sums`,
 #: history.py), so the answer is the same either way.
-TURN_LOG = (os.environ.get("ORGTREE_TURN_LOG") or "").strip().lower() in ("1", "true", "on", "yes")
+TURN_LOG = (os.environ.get("ORGTREE_TURN_LOG") or "").strip().lower() not in ("0", "false", "off", "no")
 
 
 def _turn_pair(e: Any) -> tuple[Any, Any] | None:

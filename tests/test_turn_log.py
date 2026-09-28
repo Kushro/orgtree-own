@@ -175,11 +175,22 @@ class TurnSums(unittest.TestCase):
 
 
 class SwitchDefault(unittest.TestCase):
-    def test_the_turn_log_default_is_off(self):
+    def test_the_turn_log_default_is_on_and_0_turns_it_off(self):
         import os
-        if 'ORGTREE_TURN_LOG' in os.environ:
-            self.skipTest('ORGTREE_TURN_LOG set in this environment: default NOT tested')
-        self.assertFalse(ledger.TURN_LOG)
+        import subprocess
+        import child_python
+        from pathlib import Path
+        repo = Path(__file__).resolve().parents[1]
+        code = 'from orgtree import ledger; print(ledger.TURN_LOG)'
+        for value, want in ((None, 'True'), ('', 'True'), ('1', 'True'), ('0', 'False'),
+                            ('false', 'False'), ('Off', 'False'), (' no ', 'False')):
+            env = {k: v for k, v in os.environ.items() if k != 'ORGTREE_TURN_LOG'}
+            if value is not None:
+                env['ORGTREE_TURN_LOG'] = value
+            out = subprocess.run(child_python.argv('-c', code, checkout=repo), env=env,
+                                 capture_output=True, text=True, timeout=120)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(out.stdout.strip().splitlines()[-1], want, value)
 
 
 class Rename(unittest.TestCase):
