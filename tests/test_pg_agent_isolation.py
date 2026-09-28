@@ -100,7 +100,10 @@ class LiveClusterRefusalTests(unittest.TestCase):
         self.passfile = self.live / "pg" / "cluster" / "secrets" / "pgpass.conf"
         self.opened: list[str] = []
         fake = mock.Mock()
-        fake.connect.side_effect = lambda target, autocommit: self.opened.append(target) or "conn"
+        # an object, not a str: pgstore.connect sets raw._ot_path on the new
+        # connection (6c642a2, S-B session-state cache)
+        self.conn = mock.NonCallableMock(name="conn")
+        fake.connect.side_effect = lambda target, autocommit: self.opened.append(target) or self.conn
         patcher = mock.patch.object(pgstore, "_psycopg", return_value=fake)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -147,15 +150,15 @@ class LiveClusterRefusalTests(unittest.TestCase):
     def test_an_agents_own_database_is_allowed(self) -> None:
         mine = self.tmp / "mine" / "pg" / "cluster" / "secrets" / "pgpass.conf"
         with mock.patch.dict(os.environ, self.agent(), clear=True):
-            self.assertEqual(self.pgstore.connect(self.conninfo(port=41000, passfile=mine)), "conn")
+            self.assertEqual(self.pgstore.connect(self.conninfo(port=41000, passfile=mine)), self.conn)
             # same port number, but not on this machine's loopback
-            self.assertEqual(self.pgstore.connect(self.conninfo(port=59999, passfile=mine, host="10.0.0.5")), "conn")
+            self.assertEqual(self.pgstore.connect(self.conninfo(port=59999, passfile=mine, host="10.0.0.5")), self.conn)
         self.assertEqual(len(self.opened), 2)
 
     def test_the_engine_itself_is_not_an_agent(self) -> None:
         clean = {k: v for k, v in os.environ.items() if k not in (devguard.LIVE, devguard.LEGACY)}
         with mock.patch.dict(os.environ, clean, clear=True):
-            self.assertEqual(self.pgstore.connect(self.conninfo()), "conn")
+            self.assertEqual(self.pgstore.connect(self.conninfo()), self.conn)
         self.assertEqual(self.opened, [self.conninfo()])
 
 
