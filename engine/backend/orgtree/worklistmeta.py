@@ -83,10 +83,13 @@ def _body(raw, schema, location, key):
     return row[0]
 
 
-def refresh(raw, org_id):
-    """Same writer transaction; SQL errors abort, unsupported data disables reads."""
+def refresh(raw, org_id, known_pending=None):
+    """Same writer transaction; SQL errors abort, unsupported data disables reads.
+
+    `known_pending`: the caller's own reading of `pending(raw, org_id)` in this
+    transaction (workread's save probe), so it is not read twice."""
     schema = f'org_{int(org_id)}'
-    if not pending(raw, org_id):
+    if not (pending(raw, org_id) if known_pending is None else known_pending):
         return
     # Same lock and ordering as access metadata: every relevant writer takes
     # this before recording dirties. Never erase a concurrent invalidation.

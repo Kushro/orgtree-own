@@ -136,10 +136,14 @@ def refresh(raw, org_id: int) -> bool:
     supported raw save or manufacture an empty count.
     """
     try:
-        result = _refresh(raw,org_id)
+        probe = _probe(raw,org_id)
+        result = _refresh(raw,org_id,probe)
         if result:
             from . import worklistmeta
-            worklistmeta.refresh(raw,org_id)
+            # a quiet save (no access work) reuses the probe's list state;
+            # after access work the list state is read again, as before
+            quiet = probe is not None and _quiet(probe)
+            worklistmeta.refresh(raw,org_id,known_pending=bool(probe[6]) if quiet else None)
         return result
     except (KeyError,ValueError) as exc:
         schema=f'org_{int(org_id)}'
@@ -148,7 +152,36 @@ def refresh(raw, org_id: int) -> bool:
         return False
 
 
-def _refresh(raw, org_id: int) -> bool:
+_PROBE_TABLES = ('work_read_state','work_index_state','work_list_state')
+
+
+def _probe(raw, org_id: int):
+    """What every save's refresh decides on, in TWO statements instead of six.
+
+    First whether the three read-model tables exist -- asked on every save,
+    never cached, so tables installed while the engine runs are seen by the
+    next save -- then the three singleton states in one join:
+    (index format, index valid, initialized, questions_dirty, ready,
+    access dirty exists, list pending). None when a table or a singleton row
+    is missing: the separate checks then decide, exactly as before."""
+    schema=f'org_{int(org_id)}'
+    names=[f'{schema}.{t}' for t in _PROBE_TABLES]
+    if None in raw.execute('SELECT to_regclass(%s),to_regclass(%s),to_regclass(%s)',names).fetchone():
+        return None
+    return raw.execute(
+        f'SELECT i.format,i.valid,s.initialized,s.questions_dirty,s.ready,'
+        f'EXISTS(SELECT 1 FROM {schema}.work_read_dirty),'
+        f'NOT l.initialized OR EXISTS(SELECT 1 FROM {schema}.work_list_dirty) '
+        f'FROM {schema}.work_index_state i,{schema}.work_read_state s,{schema}.work_list_state l '
+        f'WHERE i.singleton AND s.singleton AND l.singleton').fetchone()
+
+
+def _quiet(probe) -> bool:
+    """The save left access metadata alone: _refresh returns without writing."""
+    return bool(probe[2]) and not probe[3] and not probe[5]
+
+
+def _refresh(raw, org_id: int, probe=None) -> bool:
     """Called inside the writer's transaction, after raw rows and before commit.
 
     The SQL marker's state-row lock serializes work/topology/ask writers before
@@ -156,8 +189,12 @@ def _refresh(raw, org_id: int) -> bool:
     External writers that omit this call leave dirty markers: readers fall back.
     """
     schema=f'org_{int(org_id)}'
-    if not _installed(raw,schema) or not workindex.ready(raw,org_id): return False
-    state=raw.execute(f'SELECT initialized,questions_dirty,ready,EXISTS(SELECT 1 FROM {schema}.work_read_dirty) FROM {schema}.work_read_state WHERE singleton').fetchone()
+    if probe is not None:
+        if not workindex.ready_row(probe[:2]): return False
+        state=probe[2:6]
+    else:
+        if not _installed(raw,schema) or not workindex.ready(raw,org_id): return False
+        state=raw.execute(f'SELECT initialized,questions_dirty,ready,EXISTS(SELECT 1 FROM {schema}.work_read_dirty) FROM {schema}.work_read_state WHERE singleton').fetchone()
     if state is None: return False
     if state[0] and not state[1] and not state[3]:
         return bool(state[2])  # unrelated saves must not write/lock this row

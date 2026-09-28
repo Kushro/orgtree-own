@@ -19,6 +19,11 @@ def ready(raw: Any, org_id: int) -> bool:
     if raw.execute("SELECT to_regclass(%s)", (schema + ".work_index_state",)).fetchone()[0] is None:
         return False
     row = raw.execute(f"SELECT format,valid FROM {schema}.work_index_state WHERE singleton").fetchone()
+    return ready_row(row)
+
+
+def ready_row(row: Any) -> bool:
+    """`ready`'s verdict on a (format, valid) row already read."""
     return bool(row and row[0] == "orgtree.work-index/v1" and row[1])
 
 
