@@ -57,6 +57,8 @@ class Prologue(unittest.TestCase):
         self.assertIn('pg_advisory_xact_lock_shared', seen[1])      # the org lock
         self.assertTrue(seen[2].startswith('DO $orgtx_'), seen[2][:40])
         self.assertFalse(any(q.startswith(('BEGIN', 'SET LOCAL')) for q in seen[1:]), seen)
+        # every lock of this node-only write is in those two statements
+        self.assertEqual([q[:60] for q in seen[3:] if 'pg_advisory' in q], [])
         self.assertEqual(f._node(self.slug, 'a')['name'], 'A')
 
     @staticmethod
