@@ -43,7 +43,7 @@ class CaptureTests(unittest.TestCase):
         return records.tail(source_key(store.load_org(self.org.d['slug']),'agent'),1000)[0]
     def slice_of(self,records_per_slice):
         """Patch the byte budget to exactly this many of this file's (fixed-width) records."""
-        line=len(self.path.read_bytes().splitlines()[0])+1
+        line=self.path.read_bytes().index(b'\n')+1   # on-disk size, CRLF included
         return patch.object(ingest,'SLICE_BYTES',records_per_slice*line)
     def test_new_session_captured_at_failed_turn_boundary_without_any_view(self):
         def body(*a,**k):
@@ -113,7 +113,7 @@ class CaptureTests(unittest.TestCase):
         def counted(conn,source,epoch,rows):
             rows=list(rows);seen.append(sum(len(line)+1 for _,line in rows))
             return original(conn,source,epoch,rows)
-        line=len(self.path.read_bytes().splitlines()[0])+1
+        line=self.path.read_bytes().index(b'\n')+1
         with self.slice_of(10), patch.object(records,'_insert',side_effect=counted):
             while self.backfill():
                 pass
