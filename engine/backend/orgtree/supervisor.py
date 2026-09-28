@@ -8204,9 +8204,116 @@ def _state_segments(org: Org, nid: str, state_text: str, facts: Mapping[str, Any
     return segs
 
 
+#: ORGTREE_ORG_STATE_SHARED (ON by default; 0/false/off/no turns it off): a
+#: turn's ORG STATE roster and chart render from the shared read-only snapshot
+#: (`store.cached_org`) instead of the turn's own admission copy. Measured
+#: 2026-09-28 at N=1000 (mem-leak-probe, item n1000-engine-memory-climbs):
+#: `_org_state_parts` → `children_index` walks every node, which on on-demand
+#: rows (ORGTREE_LAZY_ROWS) decodes the whole node table into the private
+#: copy — ~200 MB that the turn then holds until it ends; with 16 turns
+#: running, 1.0 → 5.1 GB within ~20 s of a message burst.
+ORG_STATE_SHARED = (os.environ.get("ORGTREE_ORG_STATE_SHARED", "1").strip().lower()
+                    not in ("0", "false", "off", "no"))
+
+#: renders that wrote into a shared snapshot (see `_shared_read_only`): zero in
+#: a healthy engine, and the render that did it fell back to the turn's copy
+SHARED_SNAPSHOT_WRITES: list[int] = [0]
+
+
+class SharedSnapshotWritten(RuntimeError):
+    """A read-only render changed the shared snapshot it was handed."""
+
+
+def _org_state_view(slug: str, nid: str, at_least: int) -> Org | None:
+    """The shared snapshot the ORG STATE block may render from, or None to
+    render on the turn's own copy as before: switch off, the snapshot
+    unavailable, OLDER than `at_least` (the change sequence taken after the
+    turn's admission commit — checked, not assumed), or no longer holding
+    `nid` (retired in between)."""
+    if not ORG_STATE_SHARED:
+        return None
+    try:
+        snap, seq = store.cached_org_seq(slug)
+        if seq < at_least or nid not in snap.nodes:
+            return None
+    except Exception:                                      # noqa: BLE001
+        return None
+    return snap
+
+
+def _snapshot_marks(org: Org) -> tuple[Any, ...]:
+    """What a write into `org` would move, read WITHOUT decoding anything:
+    the document object; every top-level value present (identity and, for a
+    container, size); every decoded node row (identity and its write mark,
+    `store._NodeMutation`, which every node-row write sets); the node table's
+    deletions; buffered log appends and dropped sections. Keys that load
+    during the read are new, not changed, so a lazy load is never a write."""
+    doc = org.d
+    top: dict[str, Any] = {}
+    for k, v in dict.items(doc):
+        size = (dict.__len__(v) if isinstance(v, dict)
+                else list.__len__(v) if isinstance(v, list) else None)
+        top[k] = (id(v), size)
+    rows: dict[str, Any] = {}
+    nodes = dict.get(doc, "nodes")
+    if isinstance(nodes, dict):
+        for k, v in dict.items(nodes):
+            mark = getattr(v, "__dict__", {}).get("_mutation")
+            rows[k] = (id(v), bool(mark is not None and mark.dirty))
+    state = getattr(doc, "__dict__", {})
+    return (id(doc), top, rows, len(getattr(nodes, "__dict__", {}).get("_deleted", ())),
+            sum(len(p) for p in state.get("_pending", {}).values()),
+            len(state.get("_dropped", ())))
+
+
+def _marks_moved(before: tuple[Any, ...], after: tuple[Any, ...]) -> list[str]:
+    """The writes `before` → `after` shows; keys that appeared are loads."""
+    doc0, top0, rows0, *rest0 = before
+    doc1, top1, rows1, *rest1 = after
+    moved = []
+    if doc0 != doc1:
+        moved.append("document replaced")
+    moved += [f"section {k}" for k, v in top0.items() if top1.get(k) != v]
+    moved += [f"node {k}" for k, v in rows0.items() if rows1.get(k) != v]
+    if rest0 != rest1:
+        moved.append("deletions/appends/drops")
+    return moved
+
+
+@contextlib.contextmanager
+def _shared_read_only(slug: str, snap: Org) -> Iterator[None]:
+    """Run a read on the shared snapshot and refuse any write it made.
+
+    Enforced, not by convention: the snapshot's write marks are compared
+    before and after, and a change raises `SharedSnapshotWritten` after
+    evicting the snapshot from the cache (`store.drop_cached_org`), so no
+    later reader — and no section-granular refresh built on it — sees the
+    write. The caller renders again from its own copy."""
+    before = _snapshot_marks(snap)
+    try:
+        yield
+    finally:
+        # checked even when the read raised: a write before the error
+        # would otherwise stay in the cache
+        moved = _marks_moved(before, _snapshot_marks(snap))
+        if moved:
+            _refuse_shared_write(slug, snap, moved)
+
+
+def _refuse_shared_write(slug: str, snap: Org, moved: list[str]) -> None:
+    """Count, evict, say so, raise — for `_shared_read_only`."""
+    SHARED_SNAPSHOT_WRITES[0] += 1
+    store.drop_cached_org(slug, snap)
+    print(f"[orgtree] {slug}: shared snapshot CHANGED during the "
+          f"ORG STATE render ({', '.join(moved[:5])}) — snapshot evicted, block "
+          f"rendered from the turn's own copy")
+    raise SharedSnapshotWritten(", ".join(moved[:5]))
+
+
 def _envelope_state_block(org: Org, nid: str, now: float,
                           pending: dict[str, envelope.Snapshot],
-                          out: dict[str, Any] | None = None) -> str:
+                          out: dict[str, Any] | None = None, *,
+                          view: Org | None = None) -> str:
     """The turn's ORG STATE block, with the chart span suppressed while the org
     has not moved (D-223). A node whose visibility renders no chart has nothing
     suppressible and simply gets the block it always got.
@@ -8214,11 +8321,25 @@ def _envelope_state_block(org: Org, nid: str, now: float,
     `out` (typed composition): receives {"seq", "chart", "chart_ref"} — the
     snapshot number and whether the chart went in full or by reference — so the
     `context.org_state` segment can carry them as facts (design D-223: exactly
-    one of chart / chart_ref is non-null)."""
+    one of chart / chart_ref is non-null).
+
+    `view` (see `_org_state_view`): a shared read-only snapshot the roster,
+    chart and tail are rendered from under `_shared_read_only`; the D-223
+    decision still reads this node's envelope history from `org`."""
     if out is not None:
         out.update({"seq": None, "chart": "", "chart_ref": None})
     try:
-        parts = _org_state_parts(org, nid, False)
+        parts = None
+        if view is not None:
+            try:
+                with _shared_read_only(str(org.d.get("slug") or ""), view):
+                    parts = _org_state_parts(view, nid, False)
+            except Exception:                              # noqa: BLE001
+                # a refused write (SharedSnapshotWritten) or any failure of
+                # the shared read: render from the turn's own copy as before
+                parts = None
+        if parts is None:
+            parts = _org_state_parts(org, nid, False)
         chart = parts[1]
         if out is not None:
             out["chart"] = chart
@@ -21215,6 +21336,9 @@ def _run_one_turn_recorded(slug: str, nid: str,
             # turn-locals: `org` (the admission transaction's copy) is the
             # one version the turn keeps; the transactions themselves are done
             _cmp_tx = _adm_tx = None
+            # the change sequence as of the admission commit: the shared
+            # snapshot the ORG STATE block reads must cover at least this
+            _adm_seq = store.org_seq(slug)
             imgblock.pop(_img_tok)
             _img_tok = None
             if cache_forecast_event is not None:
@@ -21249,8 +21373,14 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 # (3) BEFORE the provider seam below, so the codex lane gets
                 #     the same block through the same door.
                 if not is_cmd:
+                    # the roster and chart read the SHARED snapshot, never
+                    # this turn's own copy: they walk every node, and the
+                    # walk would decode the whole node table into a copy the
+                    # turn then holds until it ends (N1000: ~200 MB per
+                    # running turn, 16 turns at once; see _org_state_view)
                     state_block = _envelope_state_block(
-                        o2, nid, time.time(), env_pending, out=state_facts)
+                        o2, nid, time.time(), env_pending, out=state_facts,
+                        view=_org_state_view(slug, nid, _adm_seq))
                     # Keep only the already-loaded doc. Provider
                     # cache/registry locks must never sit underneath a
                     # row lock or DOC_LOCK, and this block is advisory:

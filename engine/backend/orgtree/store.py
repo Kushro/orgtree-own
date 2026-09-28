@@ -7318,11 +7318,20 @@ def cached_org(slug: str) -> Org:
     rebuilder's result instead of parsing in parallel (the herd is the
     2026-09-19 incident's amplifier), and every waiter is served a snapshot
     at least as fresh as its own arrival."""
+    return cached_org_seq(slug)[0]
+
+
+def cached_org_seq(slug: str) -> tuple[Org, int]:
+    """`cached_org` and the change sequence the snapshot is known to cover —
+    the cache key it was stored or served under, or the caller's arrival seq
+    when a fresh load was not cached. A caller that needs the snapshot to
+    include a particular commit compares this against `org_seq` taken after
+    that commit, instead of trusting the freshness contract unchecked."""
     arrival = org_seq(slug)
     with _doc_cache_lock:
         hit = _doc_cache.get(slug)
     if hit is not None and hit[0] == arrival:
-        return hit[1]
+        return hit[1], hit[0]
     if not row_store():
         # the JSON backend keeps the historical semantics: fresh load,
         # cache only when the seq held still across it
@@ -7336,13 +7345,13 @@ def cached_org(slug: str) -> Org:
         if org_seq(slug) == arrival:
             with _doc_cache_lock:
                 _doc_cache[slug] = (arrival, org)
-        return org
+        return org, arrival
     with _rebuild_mutex(slug):
         # the rebuilder ahead of us may already have served our need
         with _doc_cache_lock:
             hit = _doc_cache.get(slug)
         if hit is not None and hit[0] >= arrival:
-            return hit[1]
+            return hit[1], hit[0]
         if hit is not None:
             assembled = _assemble_snapshot(slug, hit[1])
             if assembled is not None:
@@ -7356,7 +7365,7 @@ def cached_org(slug: str) -> Org:
                     cur = _doc_cache.get(slug)
                     if cur is None or cur[0] <= seq2:
                         _doc_cache[slug] = (seq2, org2)
-                return org2
+                return org2, seq2
         try:
             org, seq_pin = _load_pinned(slug)
         except LedgerError:
@@ -7378,7 +7387,7 @@ def cached_org(slug: str) -> Org:
             if org_seq(slug) == arrival:
                 with _doc_cache_lock:
                     _doc_cache[slug] = (arrival, org)
-            return org
+            return org, arrival
         except Exception:
             with _doc_cache_lock:
                 _doc_cache.pop(slug, None)
@@ -7388,7 +7397,20 @@ def cached_org(slug: str) -> Org:
             cur = _doc_cache.get(slug)
             if cur is None or cur[0] <= seq_pin:
                 _doc_cache[slug] = (seq_pin, org)
-        return org
+        return org, seq_pin
+
+
+def drop_cached_org(slug: str, org: Org) -> bool:
+    """Forget the shared snapshot `org` if it is still the cached one, so the
+    next reader rebuilds from storage. For a snapshot something wrote into:
+    the section-granular refresh builds on the cached entry and would carry
+    the write forward. True when it was dropped."""
+    with _doc_cache_lock:
+        cur = _doc_cache.get(slug)
+        if cur is not None and cur[1] is org:
+            _doc_cache.pop(slug, None)
+            return True
+    return False
 
 
 #: slugs handed a resident during the CURRENT thread's lock hold — what the
