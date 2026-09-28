@@ -86,7 +86,7 @@ class Dispatch(unittest.TestCase):
     def test_the_read_actions_are_only_reads(self) -> None:
         # widening this table sends a call around the journal: only a real
         # read with no spawn and no wait belongs in it
-        self.assertEqual(mcptool.MANAGED_WAIT_READ_ACTIONS,
+        self.assertEqual(toolwait.READ_ACTIONS,
                          {'orgtree_watchdog': frozenset({'list'})})
 
 

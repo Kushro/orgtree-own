@@ -12199,8 +12199,6 @@ async def _agent_call_route(body: AgentCall, request: Request) -> dict[str, Any]
     if body.tool == OP_CALL and isinstance(_census_args.get("args"), dict):
         _census_args = _census_args["args"]
     census.classify(toolwait.tool_name(body), _census_args, body.node)
-    # `managed_call`, not bare membership in `toolwait.TOOLS`: a managed
-    # tool's read (watchdog `list`) takes the ordinary path below.
     if body.node != USER and toolwait.managed_call(body):
         from fastapi.concurrency import run_in_threadpool
 

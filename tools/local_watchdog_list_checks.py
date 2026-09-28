@@ -23,11 +23,11 @@ GROUP = [NEW, 'tests/test_s10_watchdog_route.py', 'tests/test_pg3c_watchdog_tx.p
          'tests/test_operation_census.py', 'tests/test_send_file_seat.py',
          'tests/test_agent_continue_on.py', 'tests/test_state_requests_boundary.py',
          'tests/test_p02_operation_contacts.py', 'tests/test_state_p02_contact_facets.py']
-CHANGED = ['engine/backend/orgtree/api.py', 'engine/backend/orgtree/mcptool.py',
-           'engine/backend/orgtree/toolwait.py', 'tests/test_p02_operation_contacts.py',
+CHANGED = ['engine/backend/orgtree/api.py', 'engine/backend/orgtree/toolwait.py',
+           'tests/test_p02_operation_contacts.py', 'tests/test_watchdog_list_unmanaged.py',
            'tests/test_operation_census.py']
 saved = {f: (repo / f).read_bytes() for f in CHANGED}
-API, MCP, TW = CHANGED[:3]
+API, TW = CHANGED[:2]
 
 MUTANTS = [
     # the ticket's mutant: list back on the managed path
@@ -39,9 +39,9 @@ MUTANTS = [
      "        args = args.get('args') if isinstance(args.get('args'), dict) else {}\n",
      "        pass  # not unwrapped\n",
      'test_keyed_list_is_judged_by_the_call_it_wraps'),
-    ('mut-pause-counted-a-read', MCP,
-     "MANAGED_WAIT_READ_ACTIONS = {'orgtree_watchdog': frozenset({'list'})}",
-     "MANAGED_WAIT_READ_ACTIONS = {'orgtree_watchdog': frozenset({'list', 'pause'})}",
+    ('mut-pause-counted-a-read', TW,
+     "READ_ACTIONS = {'orgtree_watchdog': frozenset({'list'})}",
+     "READ_ACTIONS = {'orgtree_watchdog': frozenset({'list', 'pause'})}",
      'test_list_skips_the_journal_and_pause_still_uses_it'),
     ('mut-case-folded-action', TW,
      "    return str(args.get('action') or '') not in READ_ACTIONS.get(name, ())",
@@ -81,7 +81,7 @@ try:
             run(PHASE + '-' + Path(mod).stem, [mod])
     elif PHASE in ('latency-tip', 'latency-base'):
         if PHASE == 'latency-base':
-            for f in CHANGED[:3]:
+            for f in CHANGED[:2]:
                 (repo / f).write_bytes(subprocess.check_output(['git', 'show', f'{BASE}:{f}'], cwd=repo))
         cp = subprocess.run([sys.executable, 'tools/local_watchdog_list_latency.py',
                              str(out / 'latency.json')], cwd=repo, capture_output=True,

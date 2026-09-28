@@ -16,7 +16,6 @@ from contextlib import closing
 from pathlib import Path
 
 from . import census_contacts, ledger, maildrain, orgtx, profiling, store
-from .mcptool import MANAGED_WAIT_READ_ACTIONS as READ_ACTIONS
 from .mcptool import MANAGED_WAIT_TOOLS as TOOLS
 
 WAIT_S = 10.0
@@ -25,6 +24,12 @@ MAX_PUBLISH_FAILURES = 8
 MAX_PUBLISH_AGE_S = 3600
 # Read/control/mail calls stay short and retain their existing response path.
 # These operations can wait on processes, files, provider discovery or smoke runs.
+# The read-only actions of a managed tool. They spawn nothing and wait on
+# nothing, so they keep the ordinary agent-call path: a watchdog `list` used
+# to pay this journal (three fsync'd writes under `_lock`) and a MAX_RUNNING
+# slot for a read of a few rows. Matched exactly as the handlers read it,
+# `str(args.get('action') or '')`.
+READ_ACTIONS = {'orgtree_watchdog': frozenset({'list'})}
 _slots = threading.BoundedSemaphore(MAX_RUNNING)
 _lock = threading.RLock()
 _publish_lock = threading.Lock()
@@ -92,7 +97,7 @@ def tool_name(body):
 
 def managed_call(body):
     """Whether this call takes the managed-wait path: a managed tool, unless
-    the action is one of its reads (`MANAGED_WAIT_READ_ACTIONS`). A keyed
+    the action is one of its reads (`READ_ACTIONS`). A keyed
     `orgtree_op_call` is judged by the call it wraps."""
     name = tool_name(body)
     if name not in TOOLS:

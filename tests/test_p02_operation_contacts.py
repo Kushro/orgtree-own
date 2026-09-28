@@ -1293,7 +1293,7 @@ class OperationContacts(unittest.TestCase):
         or replayed too, journals in the tool_waits sidecar, re-running its
         DDL outside a transaction. No other row touches that sidecar. A
         watchdog `list` is a read and takes the ordinary path
-        (mcptool.MANAGED_WAIT_READ_ACTIONS), so it journals nothing."""
+        (toolwait.READ_ACTIONS), so it journals nothing."""
         seen = set()
         for r in self.doc["rows"]:
             with self.subTest(variant=r["variant"], condition=r["condition"]):

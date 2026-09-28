@@ -882,7 +882,7 @@ class ManagedYieldTests(CensusCase):
         self.addCleanup(setattr, toolwait, 'invoke', real)
         got = self.client.post('/api/agent', headers=OPERATOR, json={
             # `pause`, not `list`: a watchdog list is a read and takes the
-            # ordinary path (mcptool.MANAGED_WAIT_READ_ACTIONS). The yield
+            # ordinary path (toolwait.READ_ACTIONS). The yield
             # is stubbed, so no dog is paused.
             'org': slug, 'node': node, 'tool': 'orgtree_watchdog',
             'args': {'action': 'pause', 'id': 'wd-none'}})
