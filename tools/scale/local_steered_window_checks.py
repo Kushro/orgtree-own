@@ -78,8 +78,9 @@ try:
     for label, path, old, new, expected in (
         ('mut-unbounded-tail', store_py, '            (sect, owner, cap)).fetchall()]',
          '            (sect, owner, 10 ** 9)).fetchall()]', ['test_cost_does_not_grow_with_the_steered_log']),
-        ('mut-no-seq-offset', supervisor_py, '    seq0 = max(0, total - len(selected)) + omitted\n',
-         '    seq0 = max(0, total - len(selected))\n', ['test_cost_does_not_grow_with_the_steered_log']),
+        ('mut-floor-marker-leaks', supervisor_py,
+         '        selected[position] = {k: v for k, v in selected[position].items() if k != _WINDOW_FLOOR}\n',
+         '        pass\n', ['test_cost_does_not_grow_with_the_steered_log']),
         ('mut-no-window-guard', supervisor_py,
          '        if position is None or position >= len(selected) - cast(int, window):\n            return None\n',
          '        if position is None:\n            return None\n',
