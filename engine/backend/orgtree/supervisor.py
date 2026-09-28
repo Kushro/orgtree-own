@@ -21118,6 +21118,9 @@ def _run_one_turn_recorded(slug: str, nid: str,
                     # file's identity); the locked composition loads the rest
                     print(f"[orgtree] {slug}/{nid}: image pre-load incomplete "
                           f"({type(exc).__name__}: {exc})")
+                # turn-locals: the pre-load's copy is not read again — never
+                # pin it across the turn that follows (test_turn_locals_org_copies)
+                _pre = _box = None
             # every image load inside the admission transaction (the journal
             # row's composition, the envelope, the human view) reads the cache
             _img_tok = imgblock.push(_img_cache)
