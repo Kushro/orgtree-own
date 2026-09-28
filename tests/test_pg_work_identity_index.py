@@ -227,6 +227,18 @@ class OnPostgres(unittest.TestCase):
         self.assertIsNone(org.d.archive_identity())
         self.assertEqual(org.work_identity_state(), 'legacy')
 
+    def test_buffered_archive_row_forces_the_row_walk(self):
+        # review-astra f1: the sweep moves an item with store.log_append, which
+        # buffers it without loading the section. Until the save the index does
+        # not have that row and the active list no longer does, so answering
+        # from the index would drop its name and let create mint it again.
+        org = store.load_org(self.slug)
+        moved = org.d['work_items'].pop(0)
+        store.log_append(org.d, ARCHIVE, moved)
+        self.assertIsNone(org.d.archive_identity(), 'a buffered archive row must force the row walk')
+        self.assertIn(moved['slug'], org._work_names_in_use())
+        self.assertEqual(org.work_identity_state(), 'slug')
+
     def test_archive_blob_or_bad_index_falls_back(self):
         org = store.load_org(self.slug)
         self.assertIsNotNone(org.d.archive_identity())
