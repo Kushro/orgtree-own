@@ -3752,6 +3752,18 @@ class LazyDoc(dict[str, Any]):
             self._snap_logs[k] = []
             self[k] = v
             return v
+        if k in DICT_LOGS and type(default) is dict and not default \
+                and k not in self._dropped and k not in self._snap_doc:
+            # The same for a dict log with no rows (turn_log review
+            # 2026-09-28): a plain {} saved through the whole-section path,
+            # `DELETE FROM log_d WHERE sect=?`, and nothing locks a bare
+            # section name, so two concurrent first writers on different
+            # owners erased each other (reproduced: the second commit left
+            # only its own owner). An empty row-tracked map saves per owner.
+            sm = SectionMap(self._slug, k, ())
+            self._snap_logs[k] = sm._snaps
+            self[k] = sm
+            return sm
         self[k] = default
         return default
 
@@ -4566,6 +4578,13 @@ def _write_dict_log(conn: sqlite3.Connection, sect: str, cur: dict[str, Any],
         for row in rows:
             conn.execute("INSERT INTO log_d(sect,owner,at,val) VALUES(?,?,?,?)",
                          (sect, owner, _at_of(row), _dumps(row)))
+    if (cur._dropped or cur._added) and STORE_BACKEND == "postgres":
+        # Read-merge-write of the owner list: two transactions adding
+        # different owners both read the old list, and the later upsert
+        # dropped the earlier one's owner (READ COMMITTED re-applies the
+        # stale merge). Serialize the merge per section.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(?),hashtext(?))",
+                     (f"org_{conn.org_id}", _META_OWNERS + sect))
     raw_old_owners = _meta_get(conn, _META_OWNERS + sect)
     # Owner names are a separate journal from loaded row snapshots. Merge
     # only this proxy's structural changes into the currently committed
@@ -6443,7 +6462,9 @@ def turn_log_append(d: dict[str, Any], owner: str, row: Any) -> None:
     """Append one row to `owner`'s turn_log WITHOUT reading its history: on a
     lazy document the row is buffered and the save INSERTs it; otherwise it is
     a plain append."""
-    sec = d.get("turn_log") if "turn_log" in d else None
+    # an absent section on a lazy document becomes an empty row-tracked map
+    # (LazyDoc.setdefault), so even the first append is a pure INSERT
+    sec = d.setdefault("turn_log", {}) if isinstance(d, LazyDoc) else d.get("turn_log")
     if isinstance(sec, SectionMap) and not dict.__contains__(sec, owner) \
             and owner not in sec._dropped and owner not in sec._replaced:
         if owner not in sec._present:

@@ -19,6 +19,7 @@ import contextlib
 import copy
 import json
 import random
+import threading
 import unittest
 import uuid
 from unittest.mock import patch
@@ -378,6 +379,153 @@ class PgTurnLog(unittest.TestCase):
                 ledger.record_turn(tx.org.d, 'n3', tx.org.node('n3'), turn(self.rnd, 1))
         self.assertEqual(self.log_rows(), [])
         self.assertEqual(len(self.node_row()['turns']), self.LEGACY + 1)
+
+
+@unittest.skipUnless(f.ADMIN, 'disposable PostgreSQL required: NOT RUN')
+class PgFirstWrites(unittest.TestCase):
+    """An org where no node has a turn yet: the dict log does not exist, and
+    two FIRST writers on different nodes run at once (review 2026-09-28,
+    pg-supervisor-a's probe). The first write must be a per-owner INSERT —
+    a plain {} saved as a whole section deleted the other writer's rows —
+    and the owner list must keep both owners."""
+
+    setUpClass = PgTurnLog.setUpClass
+    raw = PgTurnLog.raw
+
+    def setUp(self):
+        flags = patch.multiple(store, LAZY_ROWS=True, ORGTX_RESCOPE=True, _heal_epoch_value=[])
+        flags.start()
+        self.addCleanup(flags.stop)
+        flag = patch.object(ledger, 'TURN_LOG', True)
+        flag.start()
+        self.addCleanup(flag.stop)
+        old = orgtx.use_backend(orgtx.PgBackend())
+        self.addCleanup(orgtx.use_backend, old)
+        org = store.create_org('turnlog1st-' + uuid.uuid4().hex[:10])
+        self.slug = org.d['slug']
+        for i in range(3):
+            org.d['nodes'][f'n{i}'] = node(f'n{i}')
+        store.save_org(org)
+        with pgstore.connect() as raw:
+            self.oid = raw.execute('SELECT org_id FROM public.orgs WHERE slug=%s',
+                                   (self.slug,)).fetchone()[0]
+        with orgtx.org_tx(self.slug, nodes=['n0']):  # the whole-load heal, stamped
+            pass
+        self.assertEqual(self.owners('turn_log'), [], 'precondition: no turn_log rows')
+
+    def owners(self, sect):
+        with self.raw() as raw:
+            return sorted(r[0] for r in raw.execute(
+                'SELECT DISTINCT owner FROM log_d WHERE sect=%s', (sect,)).fetchall())
+
+    def owner_meta(self, sect):
+        with self.raw() as raw:
+            row = raw.execute('SELECT val FROM meta WHERE key=%s',
+                              ('owners:' + sect,)).fetchone()
+        return sorted(json.loads(row[0])) if row else []
+
+    def race(self, sect, write):
+        """B loads first and waits; A writes and commits; then B writes."""
+        loaded, go, err = threading.Event(), threading.Event(), []
+
+        def b():
+            try:
+                with orgtx.org_tx(self.slug, nodes=['n2'], logs=[sect]) as tx:
+                    tx.org.node('n2')
+                    self.assertNotIn(sect, tx.org.d)
+                    loaded.set()
+                    go.wait(60)
+                    write(tx, 'n2')
+            except Exception as e:                          # noqa: BLE001
+                err.append(repr(e)[:300])
+            finally:
+                loaded.set()
+        t = threading.Thread(target=b)
+        t.start()
+        self.assertTrue(loaded.wait(60))
+        with orgtx.org_tx(self.slug, nodes=['n1'], logs=[sect]) as tx:
+            write(tx, 'n1')
+        self.assertEqual(self.owners(sect), ['n1'])
+        go.set()
+        t.join(120)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(err, [])
+
+    @staticmethod
+    def record(tx, nid):
+        ledger.record_turn(tx.org.d, nid, tx.org.node(nid),
+                           {'at': 't', 'cost': 1.0, 'toks': 10})
+
+    def test_concurrent_first_turns_keep_both(self):
+        self.race('turn_log', self.record)
+        self.assertEqual(self.owners('turn_log'), ['n1', 'n2'])
+        self.assertEqual(self.owner_meta('turn_log'), ['n1', 'n2'])
+        view = store.load_runtime_org(self.slug)
+        for nid in ('n1', 'n2'):
+            self.assertEqual(len(history._turn_log_rows(view, nid)), 1, nid)
+
+    def test_the_first_write_of_any_absent_dict_log_is_per_owner(self):
+        # the same idiom every dict-log writer uses (supervisor steered_log)
+        def steer(tx, nid):
+            tx.org.d.setdefault('steered_log', {}).setdefault(nid, []).append({'at': nid})
+        self.race('steered_log', steer)
+        self.assertEqual(self.owners('steered_log'), ['n1', 'n2'])
+        self.assertEqual(self.owner_meta('steered_log'), ['n1', 'n2'])
+
+    def test_an_absent_dict_log_loads_as_an_empty_row_tracked_map(self):
+        with orgtx.org_tx(self.slug, nodes=['n1'], logs=['turn_log']) as tx:
+            sec = tx.org.d.setdefault('turn_log', {})
+            self.assertIsInstance(sec, store.SectionMap)
+            self.assertEqual(dict(sec.items()), {})
+
+    def test_concurrent_new_owners_both_stay_in_the_owner_list(self):
+        # Both saves read the owner list before either commits: the merge
+        # must be serialized or the later upsert drops the earlier owner.
+        with orgtx.org_tx(self.slug, nodes=['n0'], logs=['turn_log']) as tx:
+            self.record(tx, 'n0')                   # the section exists now
+        real, real_write = store._meta_get, store._write_dict_log
+        a_read, b_read = threading.Event(), threading.Event()
+        me = threading.local()
+
+        def write_dict_log(*a, **kw):
+            me.saving = True
+            try:
+                return real_write(*a, **kw)
+            finally:
+                me.saving = False
+
+        def meta_get(conn, key):
+            val = real(conn, key)
+            if key == 'owners:turn_log' and getattr(me, 'saving', False):
+                if me.who == 'a':
+                    a_read.set()
+                    b_read.wait(3)                  # B blocks on the lock: time out
+                else:
+                    b_read.set()
+            return val
+        err = []
+
+        def run(who, nid):
+            me.who = who
+            try:
+                with orgtx.org_tx(self.slug, nodes=[nid], logs=['turn_log']) as tx:
+                    self.record(tx, nid)
+                    if who == 'b':
+                        a_read.wait(30)             # save only after A read the list
+            except Exception as e:                  # noqa: BLE001
+                err.append(repr(e)[:300])
+        with patch.object(store, '_meta_get', meta_get), \
+                patch.object(store, '_write_dict_log', write_dict_log):
+            ts = [threading.Thread(target=run, args=('a', 'n1')),
+                  threading.Thread(target=run, args=('b', 'n2'))]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(120)
+        self.assertEqual(err, [])
+        self.assertTrue(a_read.is_set())
+        self.assertEqual(self.owners('turn_log'), ['n0', 'n1', 'n2'])
+        self.assertEqual(self.owner_meta('turn_log'), ['n0', 'n1', 'n2'])
 
 
 if __name__ == '__main__':
