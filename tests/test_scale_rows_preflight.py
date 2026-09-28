@@ -5,7 +5,7 @@ import unittest
 
 import import_provenance  # noqa: F401
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/scale"))
-from rows_preflight import bytes_verdict, verdict
+from rows_preflight import bytes_verdict, judge, verdict
 
 
 def arm(read, message, tokens=1, harness=5):
@@ -68,6 +68,34 @@ class BytesVerdict(unittest.TestCase):
     def test_zero_bytes_refuses_a_verdict(self):
         with self.assertRaises(ValueError):
             bytes_verdict({10: sized(org_list=0), 100: sized()})
+
+
+class Judge(unittest.TestCase):
+    """preflight() decides through judge(): each check alone must fail it."""
+
+    def test_flat_everything_passes(self):
+        passed, _, _, fell = judge({10: sized(), 100: sized()})
+        self.assertTrue(passed)
+        self.assertEqual(fell, {})
+
+    def test_bytes_alone_fail_it(self):
+        passed, ratios, byte_ratios, _ = judge({10: sized(chat=1.0), 100: sized(chat=3.5)})
+        self.assertFalse(passed)
+        self.assertEqual(ratios["chat"], 1.0)
+
+    def test_rows_alone_fail_it(self):
+        large = sized()
+        large["org_list"]["rows"] = 50
+        passed, ratios, byte_ratios, _ = judge({10: sized(), 100: large})
+        self.assertFalse(passed)
+        self.assertEqual(byte_ratios["org_list"], 1.0)
+
+    def test_a_lazy_fallback_alone_fails_it(self):
+        large = sized()
+        large["message"]["lazy_fallbacks"] = 1
+        passed, _, _, fell = judge({10: sized(), 100: large})
+        self.assertFalse(passed)
+        self.assertEqual(fell, {"100:message": 1})
 
 
 if __name__ == "__main__":

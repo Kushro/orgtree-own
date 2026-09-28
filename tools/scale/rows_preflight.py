@@ -59,6 +59,15 @@ def fallbacks(results):
             for n in SIZES for call in JUDGED if results[n][call].get("lazy_fallbacks", 0)}
 
 
+def judge(results):
+    """The whole preflight decision: rows (2x) AND value bytes (3x) AND no
+    lazy-rows fallbacks. Returns (passed, rows ratios, byte ratios, fallbacks)."""
+    rows_passed, ratios = verdict(results)
+    bytes_passed, byte_ratios = bytes_verdict(results)
+    fell = fallbacks(results)
+    return rows_passed and bytes_passed and not fell, ratios, byte_ratios, fell
+
+
 def calls(desc):
     """The fixed call sequence; returns the call labels in order."""
     headers = {"X-Orgtree-Desktop-Token": desc["token"], "X-Scale-Kind": KIND}
@@ -132,10 +141,7 @@ def arm(ctrl, admin, n):
 
 def preflight(ctrl, admin):
     results = {n: arm(ctrl, admin, n) for n in SIZES}
-    passed, ratios = verdict(results)
-    bytes_passed, byte_ratios = bytes_verdict(results)
-    fell = fallbacks(results)
-    passed = passed and bytes_passed and not fell
+    passed, ratios, byte_ratios, fell = judge(results)
     # Absolute N=100 size beside each ratio: a flat but huge read stays visible.
     judged = {call: dict(rows_ratio=round(ratios[call], 2), bytes_ratio=round(byte_ratios[call], 2),
                          rows_n100=results[SIZES[1]][call]["rows"],
