@@ -2383,30 +2383,100 @@ class _WorkRowRef(str):
         return self.raw
 
 
+#: Every item's version in ONE row (message-send-reads-grow-above-n-100-
+#: 985-rows-1-2): a row per item made each load's cost follow the docket
+#: size -- four loads per ordinary message, 720 rows at 180 active items.
+_WORK_LISTING_SQL = (
+    "SELECT array_agg(key ORDER BY key), array_agg(xmin::text ORDER BY key), "
+    "array_agg(ctid::text ORDER BY key), array_agg(tableoid::text ORDER BY key) "
+    "FROM doc WHERE starts_with(key, ?)")
+#: ...and the same listing with the docket header, in ONE statement
+_WORK_HEADER_LISTING_SQL = ("SELECT (SELECT val FROM doc WHERE key = ?), "
+                            + _WORK_LISTING_SQL[len("SELECT "):])
+
+
+class _WorkRefsRace(Exception):
+    """Two reads of the docket disagreed because a docket write committed
+    between them (READ COMMITTED gives every statement its own snapshot)."""
+
+
 def _load_work_refs(conn: Any, slug: str, rows: dict[str, str]) -> None:
-    # Every item's version in ONE row (message-send-reads-grow-above-n-100-
-    # 985-rows-1-2): a row per item made each load's cost follow the docket
-    # size -- four loads per ordinary message, 720 rows at 180 active items.
-    # The same keys and versions, so every check below is unchanged; the
-    # bytes remain (~15 KB at the 200-item cap).
-    agg = conn.execute(
-        "SELECT array_agg(key ORDER BY key), array_agg(xmin::text ORDER BY key), "
-        "array_agg(ctid::text ORDER BY key), array_agg(tableoid::text ORDER BY key) "
-        "FROM doc WHERE starts_with(key, ?)",
-        (workrows.PREFIX,)).fetchone()
-    versions = list(zip(*agg)) if agg and agg[0] is not None else []
+    """Bind the docket's item rows into a lazy load's `rows`.
+
+    work-items-header-row-mismatch-valueerror-under: inside org_tx the
+    connection is READ COMMITTED, and a transaction that does not lock the
+    docket does not hold back a concurrent create, archive or update. The
+    header (from the load's doc read), the version listing and the body
+    fetch are separate statements, so such a commit between two of them made
+    them disagree, and the caller's tool call failed (N1000 attempt 5).
+    A disagreement is now re-read, never raised and never kept:
+      1. the load's header and the one-row listing (the cheap, usual path);
+      2. on a disagreement: header and listing in ONE statement;
+      3. if an item changes again before its body is fetched: the header and
+         every item row in ONE statement (the full docket, only under churn).
+    A disagreement inside one statement is not a race: it still raises."""
+    try:
+        _bind_work_refs(conn, slug, rows, _work_versions(
+            conn.execute(_WORK_LISTING_SQL, (workrows.PREFIX,)).fetchone()), coherent=False)
+        return
+    except _WorkRefsRace:
+        _work_race_count("relisted")
+    _drop_work_rows(rows)
+    got = conn.execute(_WORK_HEADER_LISTING_SQL, (workrows.SECTION, workrows.PREFIX)).fetchone()
+    rows.pop(workrows.SECTION, None)
+    if got[0] is not None:
+        rows[workrows.SECTION] = got[0]
+    try:
+        _bind_work_refs(conn, slug, rows, _work_versions(got[1:]), coherent=True)
+        return
+    except _WorkRefsRace:
+        _work_race_count("whole")
+    _load_work_rows_whole(conn, rows)
+
+
+#: how often a load had to re-read the docket (`relisted`: step 2, `whole`: step 3)
+WORK_RACE_STATS: dict[str, int] = {"relisted": 0, "whole": 0}
+
+
+def _work_race_count(what: str) -> None:
+    WORK_RACE_STATS[what] = WORK_RACE_STATS.get(what, 0) + 1
+
+
+def _work_versions(agg: Any) -> list[tuple[str, ...]]:
+    return list(zip(*agg)) if agg and agg[0] is not None else []
+
+
+def _drop_work_rows(rows: dict[str, Any]) -> None:
+    for key in [k for k in rows if k.startswith(workrows.PREFIX)]:
+        del rows[key]
+
+
+def _work_shape(rows: dict[str, Any], keys: set[str], *, coherent: bool) -> bool:
+    """Do the header in `rows` and the item `keys` agree? False when there is
+    no header or the docket is still one blob. A disagreement raises: as a
+    race when the two came from different statements, else as corruption."""
+    def disagree(what: str) -> None:
+        if coherent:
+            raise ValueError(what)
+        raise _WorkRefsRace(what)
     if workrows.SECTION not in rows:
-        if versions:
-            raise ValueError("orphaned work-item rows")
-        return
-    header = json.loads(rows[workrows.SECTION])
-    if isinstance(header, list):
-        if versions:
-            raise ValueError("mixed work-items blob and item rows")
-        return
+        if keys:
+            disagree("orphaned work-item rows")
+        return False
+    if isinstance(json.loads(rows[workrows.SECTION]), list):
+        if keys:
+            disagree("mixed work-items blob and item rows")
+        return False
     ids = workrows.ids_from_header(rows[workrows.SECTION])
-    if {v[0] for v in versions} != {workrows.PREFIX + x for x in ids}:
-        raise ValueError("work-items header/row count or identity mismatch")
+    if keys != {workrows.PREFIX + x for x in ids}:
+        disagree("work-items header/row count or identity mismatch")
+    return True
+
+
+def _bind_work_refs(conn: Any, slug: str, rows: dict[str, str],
+                    versions: list[tuple[str, ...]], *, coherent: bool) -> None:
+    if not _work_shape(rows, {v[0] for v in versions}, coherent=coherent):
+        return
     namespace = (str(DATA_ROOT), conn.raw.info.host, conn.raw.info.port, conn.raw.info.dbname, conn.org_id)
     unknown = []
     identities = {}
@@ -2425,10 +2495,12 @@ def _load_work_refs(conn: Any, slug: str, rows: dict[str, str]) -> None:
         fetched = {}
         for key, raw, *version in fetched_rows:
             if tuple(version) != tuple(identities[key][-3:]):
-                raise StaleWrite("work item changed during lazy baseline acquisition")
+                # changed since the listing: never cache a body under the
+                # listing's version; re-read instead
+                raise _WorkRefsRace("work item changed during lazy baseline acquisition")
             fetched[key] = raw
         if set(fetched) != set(unknown):
-            raise StaleWrite("work items changed while reading transaction baselines")
+            raise _WorkRefsRace("work items changed while reading transaction baselines")
         ready = True
         for key, raw in fetched.items():
             value = json.loads(raw)
@@ -2446,8 +2518,24 @@ def _load_work_refs(conn: Any, slug: str, rows: dict[str, str]) -> None:
                 _WORK_ITEM_META[identities[key]] = (metadata, summary)
             rows[key] = raw
         if not ready:
-            # Legacy attention initialization retains the full coherent load.
-            rows.update(_read_doc_key(conn, workrows.SECTION))
+            # Legacy attention initialization retains the full coherent load
+            # (header and every item in one statement, so one snapshot).
+            _load_work_rows_whole(conn, rows)
+
+
+def _load_work_rows_whole(conn: Any, rows: dict[str, str]) -> None:
+    """The docket header and every item row, raw, in ONE statement."""
+    got = conn.execute("SELECT key, val FROM doc WHERE key = ? OR starts_with(key, ?)",
+                       (workrows.SECTION, workrows.PREFIX)).fetchall()
+    _drop_work_rows(rows)
+    rows.pop(workrows.SECTION, None)
+    for key, raw in got:
+        rows[cast(str, key)] = cast(str, raw)
+    items = {k for k in rows if k.startswith(workrows.PREFIX)}
+    if _work_shape(rows, items, coherent=True):
+        for key in items:
+            if workrows.slug_of(json.loads(rows[key])) != key[len(workrows.PREFIX):]:
+                raise ValueError("work-item key disagrees with stored slug")
 
 
 class _WorkItem(_NodeDict):

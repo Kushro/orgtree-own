@@ -134,7 +134,10 @@ class LazyRows(unittest.TestCase):
         with orgtx.org_tx(self.slug,sections=['work_items','asks']) as tx: tx.d['work_items'][0]['rev']=3
         self.assertEqual(self.row()['rev'],3)
 
-    def test_metadata_body_race_refuses_instead_of_caching_wrong_version(self):
+    def test_metadata_body_race_rereads_instead_of_caching_wrong_version(self):
+        # work-items-header-row-mismatch-valueerror-under: this race used to
+        # raise StaleWrite to the caller; the load now re-reads (header and
+        # listing in one statement) and binds the version it actually read
         import psycopg
         store._WORK_ITEM_META.clear()
         original=pgstore.PgConn.execute; fired=[]
@@ -149,9 +152,11 @@ class LazyRows(unittest.TestCase):
                     other.execute(f'UPDATE org_{c.org_id}.doc SET val=%s WHERE key=%s',(store._dumps(value),workrows.PREFIX+'one'))
             return cur
         with patch.object(pgstore.PgConn,'execute',execute):
-            with self.assertRaises(store.StaleWrite):
-                with orgtx.org_tx(self.slug,nodes=['a']): pass
+            with orgtx.org_tx(self.slug,nodes=['a']) as tx:
+                self.assertEqual(tx.d['work_items'][0]['rev'],17)
         self.assertEqual(fired,[True]);self.assertEqual(self.row()['rev'],17)
+        with orgtx.org_tx(self.slug,nodes=['a']) as tx:
+            self.assertEqual(tx.d['work_items'][0]['rev'],17)
 
     def test_delete_and_replace_unread_item_preserve_original_cas(self):
         with orgtx.org_tx(self.slug,sections=['work_items','asks']) as tx:
