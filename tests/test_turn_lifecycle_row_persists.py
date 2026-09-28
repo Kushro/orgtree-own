@@ -43,7 +43,10 @@ class TurnLifecycleRow(base.RunningTurn):
             return real_record(doc, **kw)
 
         def txn_spy(slug, **kw):
-            if sys._getframe(1).f_code.co_name == "_after_turn":
+            f = sys._getframe(1)
+            while f is not None and f.f_code.co_filename.endswith("mock.py"):
+                f = f.f_back            # past unittest.mock's own call frames
+            if f is not None and f.f_code.co_name == "_after_turn":
                 txns.append(kw)
             return real_txn(slug, **kw)
         control = "probe:" + uuid.uuid4().hex
