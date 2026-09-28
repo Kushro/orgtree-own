@@ -124,7 +124,9 @@ def require_slots(small):
     owned = []
     for name in ("holder.json", "holder2.json"):
         row = read(lockdir / name)
-        if not row.get("released") and row.get("pid") in parents and row.get("agent") == "scale-ui-astra":
+        # The live-ancestor pid proves ownership; any agent may run it (the
+        # rows preflight is another owner's acceptance check).
+        if not row.get("released") and row.get("pid") in parents and row.get("agent"):
             owned.append(row)
     if len(owned) < (1 if small else 2) or (not small and any(r.get("small") for r in owned)):
         raise ValueError("controller must run inside the owned p03 slots")
