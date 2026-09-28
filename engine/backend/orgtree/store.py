@@ -4186,11 +4186,18 @@ _PRESENCE_SQL: str = " UNION ALL ".join(
 #: ...and the meta rows a load reads, in one `IN (...)` read
 #: written by receiptstore.convert in the conversion transaction
 _META_RECEIPT_ROWS = "receipt_rows"
+_LOAD_OWNER_KEYS: tuple[str, ...] = tuple(_META_OWNERS + s for s in DICT_LOGS)
 _LOAD_META_KEYS: tuple[str, ...] = ((_META_KEY_ORDER, "schema_version", _META_RECEIPT_ROWS,
-                                     _META_HEAL_EPOCH)
-                                    + tuple(_META_OWNERS + s for s in DICT_LOGS))
-_LOAD_META_SQL: str = ("SELECT key, val FROM meta WHERE key IN ("
+                                     _META_HEAL_EPOCH) + _LOAD_OWNER_KEYS)
+#: an owners row only says its dict log is present (meta.val is NOT NULL), so
+#: its value -- every owner the log has, N-sized -- is not read here: ''
+#: stands in for it (scale preflight N=100 -> 1000: 4 loads per send carried
+#: ~180 KB of owner lists). _owners_of reads the list when a section loads.
+_LOAD_META_SQL: str = ("SELECT key, CASE WHEN key IN ("
+                       + ",".join("?" * len(_LOAD_OWNER_KEYS))
+                       + ") THEN '' ELSE val END FROM meta WHERE key IN ("
                        + ",".join("?" * len(_LOAD_META_KEYS)) + ")")
+_LOAD_META_PARAMS: tuple[str, ...] = _LOAD_OWNER_KEYS + _LOAD_META_KEYS
 
 
 def _load_probes(conn: sqlite3.Connection
@@ -4204,7 +4211,7 @@ def _load_probes(conn: sqlite3.Connection
     None`), a list log when it has a row. Run inside the caller's
     transaction, so the answer is the same snapshot as before."""
     metas: dict[str, Any] = {cast(str, k): v for k, v in
-                             conn.execute(_LOAD_META_SQL, _LOAD_META_KEYS).fetchall()}
+                             conn.execute(_LOAD_META_SQL, _LOAD_META_PARAMS).fetchall()}
     hits = {_PROBE_SECTS[int(r[0])] for r in
             conn.execute(_PRESENCE_SQL, _PROBE_SECTS).fetchall()}
     present = {s for s in DICT_LOGS

@@ -11,7 +11,9 @@ reads (about 35 statements; each a round trip on PostgreSQL). Now: one meta
   * `_load_probes` answers exactly what the per-section probes answered
     (the old algorithm is re-implemented here) across fixtures: no logs,
     list and dict rows, an owners meta row without rows; and a loaded
-    document still has its sections.
+    document still has its sections;
+  * the probe does not fetch the owners lists' values (N-sized), only
+    their presence.
 
 Run:  python tools/run-python-verification.py tests/test_load_probes.py
 """
@@ -118,6 +120,33 @@ class LoadProbes(unittest.TestCase):
         self.assertEqual(new, old)
         self.assertIn('steered_log', new[2])
         self.assertNotIn('turn_error_log', new[2])
+
+    def test_the_owner_lists_are_not_fetched(self) -> None:
+        # scale preflight N=100 -> 1000: every load read each dict log's
+        # whole owner list (N names) only to learn that the row exists
+        big = '[' + ','.join(f'"agent-{i:04d}"' for i in range(1000)) + ']'
+        with store._POOL.acquire(self.slug) as conn:
+            conn.execute('BEGIN')
+            for sect in store.DICT_LOGS:
+                store._meta_set(conn, store._META_OWNERS + sect, big)
+            conn.execute('COMMIT')
+            conn.execute('BEGIN')
+            try:
+                rows = conn.execute(store._LOAD_META_SQL, store._LOAD_META_PARAMS).fetchall()
+                probed = store._load_probes(conn)
+                old = _old_probes(conn)
+            finally:
+                conn.execute('ROLLBACK')
+        got = dict(rows)
+        for sect in store.DICT_LOGS:
+            self.assertEqual(got[store._META_OWNERS + sect], '', sect)
+        self.assertIsNotNone(got['schema_version'])      # other values still read
+        self.assertLess(sum(len(v or '') for v in got.values()), 2000)
+        self.assertEqual(probed[:3], old)
+        self.assertTrue(set(store.DICT_LOGS) <= probed[2])
+        # the section itself still loads its owners, in order
+        self.assertEqual(list(store.load_org(self.slug).d['mail_log'])[:2],
+                         ['agent-0000', 'agent-0001'])
 
     def test_a_loaded_document_is_unchanged(self) -> None:
         self._fill_logs()
