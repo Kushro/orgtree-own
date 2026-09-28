@@ -619,11 +619,18 @@ def fetch(force: bool = False) -> dict[str, Any]:
 
     with _fetch_lock:
         now = time.time()
+        hit: dict[str, Any] | None = None
         with _lock:
             cached = _reconcile_unlocked(account, version)
             if (not force and isinstance(cached, dict)
                     and now - float(_cache.get("at") or 0) <= CACHE_TTL):
-                return _account(dict(cached), status)
+                hit = dict(cached)
+        # ⚠ `_account` runs OUTSIDE `_lock`: it calls providers.*_status(), which can
+        # read files and run the CLI. `peek()` takes `_lock` on the event loop
+        # (api.py, the async usage peeks), so no I/O may ever run under it
+        # (review n1-review-astra 2026-09-28; tests/test_usage_peek_async.py).
+        if hit is not None:
+            return _account(hit, status)
         exe = status.get("path")
         if not isinstance(exe, str) or not exe:
             return _account({"available": False,

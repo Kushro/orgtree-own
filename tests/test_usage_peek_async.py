@@ -12,11 +12,24 @@ queued at N1000, p50 ~230 ms for a ~1 ms read). What this proves:
     makes at least 2 through the same counter, so the counter works;
   * the response bytes equal the old shape's bytes for every kind of peek
     payload (unavailable, stale, available with float/int/unicode/null
-    limits).
+    limits);
+  * a peek can never wait on I/O, because nothing does I/O while holding the
+    `_lock` a peek takes. Every cache-hit path of codex_limits.fetch and
+    antigravity_limits.fetch calls `_account` (providers.*_status(): files
+    and the CLI) with its module `_lock` RELEASED (review n1-review-astra on
+    b35e6f0: at that commit it ran under the lock, so a slow status call held
+    peek, and with it the event loop, for the whole call). A spy records the
+    lock state at every `_account` call; the NEGATIVE CONTROL calls `_account`
+    under the lock on purpose and the spy sees it. A timing probe blocks
+    `_account` inside fetch() on a thread and requires peek() to return
+    promptly; its negative control holds `_lock` across the block and peek()
+    waits.
 
 Run:  python tools/run-python-verification.py tests/test_usage_peek_async.py
 """
 import inspect
+import threading
+import time
 import os
 from pathlib import Path
 import sys
@@ -123,6 +136,113 @@ class UsagePeekAsync(unittest.TestCase):
                 r = self.client.get(path)
                 self.assertEqual(r.status_code, 200)
                 self.assertIn("available", r.json())
+
+
+
+class NoIoUnderPeekLock(unittest.TestCase):
+    """`_account` (providers.*_status: files, the CLI) never runs under `_lock`."""
+
+    def spy(self, module):
+        seen = []
+        real = module._account
+
+        def account(data, *rest):
+            seen.append(module._lock.locked())   # single-threaded: held == held by the caller
+            return real(data, *rest)
+        return seen, patch.object(module, "_account", account)
+
+    def test_negative_control_the_spy_sees_a_held_lock(self):
+        seen, p = self.spy(codex_limits)
+        with p, patch.object(codex_limits.providers, "codex_status", return_value={}):
+            with codex_limits._lock:
+                codex_limits._account({"available": False})
+            codex_limits._account({"available": False})
+        self.assertEqual(seen, [True, False])
+
+    def _codex_fresh(self):
+        return {"at": time.time(), "complete_at": time.time(), "account": "A",
+                "data": {"available": True, "limits": []}}
+
+    def test_codex_fetch_cache_hits_call_account_unlocked(self):
+        status = {"installed": True, "connected": True, "kind": "chatgpt", "email": "a@b"}
+        saved = dict(codex_limits._cache)
+        self.addCleanup(codex_limits._cache.update, saved)
+        seen, p = self.spy(codex_limits)
+        with p, patch.object(codex_limits, "account_namespace", return_value="A"),                 patch.object(codex_limits.providers, "codex_status", return_value=status):
+            # path 1: the first cache check
+            codex_limits._cache.update(self._codex_fresh())
+            self.assertTrue(codex_limits.fetch()["available"])
+            # path 2: the re-check under _fetch_lock (another fetch filled the
+            # cache while this one read the provider status)
+            codex_limits._cache.update(at=0.0, data=None)
+
+            def status_then_fill():
+                codex_limits._cache.update(self._codex_fresh())
+                return status
+            with patch.object(codex_limits.providers, "codex_status", side_effect=status_then_fill):
+                self.assertTrue(codex_limits.fetch()["available"])
+        self.assertGreaterEqual(len(seen), 2, "both cache-hit paths must reach _account")
+        self.assertEqual(set(seen), {False}, f"_account ran under codex_limits._lock: {seen}")
+
+    def test_antigravity_fetch_cache_hits_call_account_unlocked(self):
+        status = {"installed": True, "connected": True, "email": "a@b", "kind": "oauth",
+                  "version": "1.2.3"}
+        account = antigravity_limits._account_key(status)
+        version = antigravity_limits.capability.version_key(status["version"])
+        fresh = {"at": time.time(), "account": account, "version": version,
+                 "data": {"available": True, "limits": []}}
+        saved = dict(antigravity_limits._cache)
+        self.addCleanup(antigravity_limits._cache.update, saved)
+        seen, p = self.spy(antigravity_limits)
+        with p, patch.object(antigravity_limits.providers, "antigravity_status", return_value=status),                 patch.object(antigravity_limits.providers, "antigravity_cached_status", return_value=status):
+            # path 1: the check before _fetch_lock
+            antigravity_limits._cache.update(fresh)
+            self.assertTrue(antigravity_limits.fetch()["available"])
+            # path 2: the re-check under _fetch_lock
+            antigravity_limits._cache.update(at=0.0, data=None)
+            real = antigravity_limits._supports_usage
+
+            def supported_then_fill(v):
+                antigravity_limits._cache.update(dict(fresh, at=time.time()))
+                return real(v)
+            with patch.object(antigravity_limits, "_supports_usage", side_effect=supported_then_fill):
+                self.assertTrue(antigravity_limits.fetch()["available"])
+        self.assertGreaterEqual(len(seen), 2, "both cache-hit paths must reach _account")
+        self.assertEqual(set(seen), {False}, f"_account ran under antigravity_limits._lock: {seen}")
+
+    def test_peek_is_prompt_while_fetch_is_blocked_in_account(self):
+        """The reviewer's probe: fetch() stuck inside a slow `_account` must not hold peek()."""
+        saved = dict(codex_limits._cache)
+        self.addCleanup(codex_limits._cache.update, saved)
+        codex_limits._cache.update(self._codex_fresh())
+
+        def measure(hold_lock):
+            entered, release = threading.Event(), threading.Event()
+
+            def slow_account(data):
+                entered.set()
+                release.wait(10)
+                return data
+
+            def run():
+                with patch.object(codex_limits, "account_namespace", return_value="A"),                         patch.object(codex_limits, "_account", slow_account):
+                    if hold_lock:       # NEGATIVE CONTROL: the b35e6f0 shape
+                        with codex_limits._lock:
+                            codex_limits._account({})
+                    else:
+                        codex_limits.fetch()
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            self.assertTrue(entered.wait(10), "fetch never reached _account")
+            timer = threading.Timer(0.5, release.set)
+            timer.start()
+            t0 = time.perf_counter()
+            codex_limits.peek()
+            ms = (time.perf_counter() - t0) * 1000
+            release.set(); timer.cancel(); t.join(10)
+            return ms
+        self.assertGreater(measure(hold_lock=True), 400, "negative control: peek did not wait on a held lock")
+        self.assertLess(measure(hold_lock=False), 100, "peek waited on fetch's _account")
 
 
 if __name__ == "__main__":

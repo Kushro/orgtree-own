@@ -252,6 +252,7 @@ def fetch(force: bool = False) -> dict[str, Any]:
     """Read Codex usage, cached for the modal's polling cadence."""
     now = time.time()
     acct = account_namespace()
+    hit: dict[str, Any] | None = None
     with _lock:
         cached = _cache.get("data")
         # a cached board describes ONE login: if the account moved under it
@@ -263,7 +264,13 @@ def fetch(force: bool = False) -> dict[str, Any]:
             _observed.clear()
             cached = None
         if not force and cached is not None and now - float(_cache["at"]) <= CACHE_TTL:
-            return _account(dict(cached))
+            hit = dict(cached)
+    # ⚠ `_account` runs OUTSIDE `_lock`: it calls providers.*_status(), which can
+    # read files and run the CLI. `peek()` takes `_lock` on the event loop
+    # (api.py, the async usage peeks), so no I/O may ever run under it
+    # (review n1-review-astra 2026-09-28; tests/test_usage_peek_async.py).
+    if hit is not None:
+        return _account(hit)
     status = providers.codex_status()
     if not status.get("installed"):
         return _account({"available": False, "error": "Codex CLI is not installed"})
@@ -289,11 +296,14 @@ def fetch(force: bool = False) -> dict[str, Any]:
 
     with _fetch_lock:
         now = time.time()
+        hit = None
         with _lock:
             cached = _cache.get("data")
             if (not force and cached is not None
                     and now - float(_cache["at"]) <= CACHE_TTL):
-                return _account(dict(cached))
+                hit = dict(cached)
+        if hit is not None:
+            return _account(hit)                 # outside _lock: see above
         exe, _source = providers.codex_path()
         if not exe:
             return _account({"available": False, "error": "Codex CLI is not installed"})
