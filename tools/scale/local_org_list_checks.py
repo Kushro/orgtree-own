@@ -1,6 +1,6 @@
 """Owned focused base/tip runs and observed source mutants for the bounded org
 list (org-list-api-orgs-reads-grow-with-agent-count).
-Usage: local_org_list_checks.py <base sha> <tag>"""
+Usage: local_org_list_checks.py <base sha> <tag> [--new-only]"""
 import json
 import os
 from pathlib import Path
@@ -63,11 +63,15 @@ def mutate(old, new):
 try:
     pg('init-root'); pg('init'); pg('start')
     env = dict(os.environ, ORGTREE_TEST_PG_ADMIN_URL=pg('urls')['urls']['P03_PG_ADMIN_URL'])
-    run('tip', NEW + EXISTING)
-    target.write_bytes(subprocess.check_output(
-        ['git', 'show', BASE + ':engine/backend/orgtree/org_summary.py'], cwd=repo))
-    run('base', EXISTING)
-    target.write_bytes(saved)
+    if '--new-only' in sys.argv:
+        # a test-only follow-up: the new module at tip plus the mutants
+        run('tip', NEW)
+    else:
+        run('tip', NEW + EXISTING)
+        target.write_bytes(subprocess.check_output(
+            ['git', 'show', BASE + ':engine/backend/orgtree/org_summary.py'], cwd=repo))
+        run('base', EXISTING)
+        target.write_bytes(saved)
     for label, old, new, expected in (
         ('mut-load-all-active-nodes',
          "        if settings.get('kiosk'):\n"
@@ -87,6 +91,10 @@ try:
          "\"SELECT count(*) FROM node_index i WHERE i.meta->>'state'='live'\"",
          "\"SELECT count(*) FROM node_index i WHERE i.meta->>'state'<>'archived'\"",
          ['test_rows_equal_the_full_org_answer_for_every_node_shape']),
+        ('mut-kiosk-reads-archived-top-level',
+         "\"WHERE i.meta->>'state'<>'archived' AND i.meta->>'parent'='' \"",
+         "\"WHERE i.meta->>'parent'='' \"",
+         ['test_kiosk_read_skips_retired_top_level_seats']),
     ):
         mutate(old, new)
         run(label, NEW, expected)

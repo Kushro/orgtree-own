@@ -47,10 +47,11 @@ class OrgList(unittest.TestCase):
         from orgtree import pgstore
         pgstore.migrate(os.environ['ORGTREE_PG_URL'])
 
-    def make_org(self, agents, *, kiosk=False, shapes=False):
+    def make_org(self, agents, *, kiosk=False, shapes=False, retired_leads=0):
         """An org with `agents` live workers under two top-level seats; with
         `shapes`, also a retired seat, a compacted predecessor and a reseeded
-        (lost) predecessor, and a top-level seat left unrecoverable."""
+        (lost) predecessor, and a top-level seat left unrecoverable; plus
+        `retired_leads` retired top-level seats."""
         slug = 'list-' + uuid.uuid4().hex[:8]
         slugs.append(slug)
         org = store.create_org(slug)
@@ -73,6 +74,9 @@ class OrgList(unittest.TestCase):
             org.node('w001')['state'] = 'unrecoverable'
             org.reseed(ledger.USER, 'w001', str(uuid.uuid4()))
             org.node('lead-b')['state'] = 'unrecoverable'
+        for i in range(retired_leads):
+            org.hire(ledger.USER, None, 'haiku', 0, f'old{i:03d}')
+            org.retire(ledger.USER, f'old{i:03d}')
         store.save_org(org)
         return slug
 
@@ -156,6 +160,20 @@ class OrgList(unittest.TestCase):
                 self.assertGreater(small['rows'], 0, 'control: the listing read rows')
                 self.assertEqual(large['rows'], small['rows'], (small, large))
                 self.assertLess(large['bytes'], small['bytes'] * 1.5, (small, large))
+
+    def test_kiosk_read_skips_retired_top_level_seats(self):
+        """Retired top-level seats grow with history; the kiosk's held read
+        must not fetch their documents (Org.children would drop them anyway,
+        so only the read count can see this)."""
+        few = self.make_org(5, kiosk=True, retired_leads=1)
+        many = self.make_org(5, kiosk=True, retired_leads=20)
+        archived = sum(n['state'] == 'archived' and n.get('parent') is None
+                       for n in store.load_org(many).nodes.values())
+        self.assertGreaterEqual(archived, 20, 'control: retired top-level seats exist')
+        small, large = self.counted_reads(few), self.counted_reads(many)
+        self.assertGreater(small['rows'], 0, 'control: the listing read rows')
+        self.assertEqual(large['rows'], small['rows'], (small, large))
+        self.assertEqual(self.listed(many)['kiosk_cfg']['held'], self.reference(many)[1])
 
 
 def tearDownModule():
