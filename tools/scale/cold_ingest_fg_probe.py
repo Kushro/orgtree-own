@@ -19,6 +19,9 @@ ap.add_argument('--root', type=Path, required=True)
 ap.add_argument('--active', type=int, default=300)
 ap.add_argument('--busy', type=int, default=0)
 ap.add_argument('--window', type=float, default=15.0)
+# owner addition: cold nodes already carry their transcript identity (an
+# existing org), so first visits do no identity-mint org_tx
+ap.add_argument('--preminted', action='store_true')
 args = ap.parse_args()
 REPO = args.repo.resolve()
 sys.path.insert(0, str(REPO / 'tools'))
@@ -88,6 +91,12 @@ try:
         nids = [f'worker-{i:03d}' for i in range(n)]
         for nid in nids:
             org.hire(ledger.USER, None, 'haiku', 0, nid)
+        if args.preminted and prefix == 'cold-':
+            org.d.setdefault('reply_incarnation', uuid.uuid4().hex)
+            for nid in nids:
+                node = org.node(nid)
+                node.setdefault('reply_incarnation', uuid.uuid4().hex)
+                node['transcript_incarnation'] = org.d['reply_incarnation'] + ':' + node['reply_incarnation']
         store.save_org(org)
         org = store.load_org(org.d['slug'])
         for nid in nids:

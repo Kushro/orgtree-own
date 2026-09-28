@@ -19,11 +19,15 @@ from control import free_commit_gb
 out = Path('C:/Temp') / ('cold-arms-' + TAG)
 out.mkdir()
 arms = []
-for busy in (0, 20):
+if len(sys.argv) > 3 and sys.argv[3] == 'preminted':
+    for name, repo in (('tip', TIP), ('base', BASE)):
+        arms.append((f'fg-{name}-b0-preminted', [PY, str(TIP / 'tools/scale/cold_ingest_fg_probe.py'), '--repo', str(repo),
+                     '--root', f'C:/Temp/cold-review-{TAG}-{name}-b0-pre', '--active', '300', '--busy', '0', '--preminted']))
+for busy in (0, 20) if not arms else ():
     for name, repo in (('tip', TIP), ('base', BASE)):
         arms.append((f'fg-{name}-b{busy}', [PY, str(TIP / 'tools/scale/cold_ingest_fg_probe.py'), '--repo', str(repo),
                      '--root', f'C:/Temp/cold-review-{TAG}-{name}-b{busy}', '--active', '300', '--busy', str(busy)]))
-for name, repo in (('tip', TIP), ('base', BASE)):
+for name, repo in (('tip', TIP), ('base', BASE)) if len(sys.argv) <= 3 else ():
     arms.append((f'paced-{name}', [PY, str(repo / 'tools/scale/cold_ingest_profile.py'), '--paced',
                  '--root', f'C:/Temp/cold-ingest-{TAG}-paced-{name}']))
 summary = {}
