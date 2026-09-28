@@ -281,13 +281,13 @@ class CaptureTests(unittest.TestCase):
                 results.append(ingest._sweep(state,clock=lambda:now[0]))
                 if len(set(calls))==20 and results[-1] is False:
                     break
-        self.assertEqual(len(set(calls)),20,'control: every node was caught up')
-        first_idle=results.index(False)
-        self.assertTrue(all(results[:first_idle]),results)
-        self.assertEqual(len(set(calls[:4*first_idle])),20,'no idle pause before the last node settled')
-        calls.clear()
-        self.assertFalse(ingest._sweep(state,clock=lambda:now[0]),'all settled: idle cadence again')
-        self.assertTrue(0 < len(calls) <= ingest.IDLE_CHECKS_PER_TICK)
+            self.assertEqual(len(set(calls)),20,'control: every node was caught up')
+            first_idle=results.index(False)
+            self.assertTrue(all(results[:first_idle]),results)
+            self.assertEqual(len(set(calls[:4*first_idle])),20,'no idle pause before the last node settled')
+            calls.clear()
+            self.assertFalse(ingest._sweep(state,clock=lambda:now[0]),'all settled: idle cadence again')
+            self.assertTrue(0 < len(calls) <= ingest.IDLE_CHECKS_PER_TICK)
 
     def test_busy_nodes_are_captured_once_per_second_however_short_the_pauses(self):
         calls=[];now=[0.0]
