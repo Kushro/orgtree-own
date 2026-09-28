@@ -3938,7 +3938,7 @@ class LazyDoc(dict[str, Any]):
                 f"summary->'_query'->>'legacy_identity' FROM {s}.work_index "
                 f"WHERE location='archive'").fetchall()
         if any(fmt != "orgtree.work-query/v1" or legacy not in ("true", "false")
-               for _, fmt, legacy in rows):
+               or not slug for slug, fmt, legacy in rows):
             return None
         return [(str(slug), legacy == "true") for slug, _, legacy in rows]
 

@@ -121,6 +121,37 @@ class SameFactsNoDatabase(unittest.TestCase):
                 fallback.d[ARCHIVE] = archived
                 self.assertEqual(fallback.work_identity_state(), expected)
 
+    def test_names_in_use_and_backfill_match_the_row_walk(self):
+        # An archived item's name must stay taken either way, and a nameless
+        # ACTIVE item must be minted the same name either way.
+        active = [{'slug': 'a'}, {'title': 'Old ticket'}, {'title': 'Old ticket'}]
+        archived = [{'slug': 'old-ticket'}, {'slug': 'b'}]
+        deleted = ['old-ticket-2']
+
+        def make(indexed):
+            act = [dict(it) for it in active]
+            org = self.org(act, [(it['slug'], False) for it in archived] if indexed else None)
+            org.d['work_deleted_names'] = deleted
+            if not indexed:
+                org.d[ARCHIVE] = [dict(it) for it in archived]
+            return org
+        new, old = make(True), make(False)
+        with patch.object(ledger.Org, '_work_archive',
+                          side_effect=AssertionError('archive walked')):
+            self.assertEqual(new._work_names_in_use(), {'a', 'old-ticket', 'b', 'old-ticket-2'})
+            minted = new._work_backfill_slugs()
+        self.assertEqual(old._work_names_in_use(), new._work_names_in_use() - set(minted))
+        self.assertEqual(minted, old._work_backfill_slugs())
+        self.assertEqual(minted, ['old-ticket-3', 'old-ticket-4'])
+        self.assertEqual([it['slug'] for it in new.d['work_items']],
+                         [it['slug'] for it in old.d['work_items']])
+
+    def test_backfill_reads_nothing_when_every_item_is_named(self):
+        org = self.org([{'slug': 'a'}], [('b', False)])
+        with patch.object(ledger.Org, '_work_names_in_use',
+                          side_effect=AssertionError('names built')):
+            self.assertEqual(org._work_backfill_slugs(), [])
+
 
 @unittest.skipUnless(f.ADMIN, 'disposable PG not configured: NOT RUN')
 class OnPostgres(unittest.TestCase):

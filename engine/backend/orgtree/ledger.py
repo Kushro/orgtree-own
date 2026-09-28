@@ -12626,11 +12626,16 @@ class Org:
         an id first: a slug equal to some other item's id would have been
         permanently shadowed. There are no ids to shadow anything now.)"""
         names: set[str] = set()
-        for it in self._work_active() + self._work_archive():
+        archived = self._work_archive_identity()
+        for it in (self._work_active() if archived is not None
+                   else self._work_active() + self._work_archive()):
             if it is skip:
                 continue
             if it.get("slug"):
                 names.add(str(it["slug"]))
+        # the index path: `skip` can only be an archived item a caller is
+        # holding whole, and then the section is resident and this is None
+        names.update(name for name, _ in archived or ())
         # a DELETED item's name stays taken (user 2026-09-07): the record is
         # gone, but an old chip, closed ask or mail row may still carry the
         # name, and minting it again would make that reference point at a
@@ -12658,10 +12663,18 @@ class Org:
         make `GET` a writer, race two viewers, and dirty documents nobody
         edited. Until the first mutation an old item simply has no slug and
         the UI shows its id; the backfill is not a migration and never runs
-        against a document this process is not already about to save."""
+        against a document this process is not already about to save.
+
+        When the docket index answers for the archive every archived item has
+        a name (`archive_identity` is refused otherwise), so only the active
+        list can need one; and when nothing needs a name, nothing else is read."""
+        pool = (self._work_active() if self._work_archive_identity() is not None
+                else self._work_active() + self._work_archive())
+        if all(it.get("slug") for it in pool):
+            return []
         taken = self._work_names_in_use()
         done: list[str] = []
-        for it in self._work_active() + self._work_archive():
+        for it in pool:
             if it.get("slug"):
                 continue
             s = self._work_unique_slug(str(it.get("title") or ""), taken)
@@ -12733,8 +12746,7 @@ class Org:
         without reading a body — at N1000 this walk was ~109 MB per
         `orgtree_work` call); otherwise from the rows, exactly as before."""
         names: set[str] = set()
-        indexed = getattr(self.d, "archive_identity", None)
-        archived = indexed() if indexed is not None else None
+        archived = self._work_archive_identity()
 
         def rows(items: list[WorkItem]) -> Iterator[tuple[str, bool]]:
             for it in items:             # `id` first, as it always was
@@ -12752,6 +12764,14 @@ class Org:
                 return "legacy"          # ambiguous: two items answer to one
             names.add(name)
         return self.WORK_IDENTITY_SLUG
+
+    def _work_archive_identity(self) -> list[tuple[str, bool]] | None:
+        """`(slug, has_old_id)` per archived item from the docket index, or
+        None when the store cannot answer that way (see
+        `store.LazyDoc.archive_identity`) and the caller must walk the rows.
+        Every slug it returns is non-empty."""
+        indexed = getattr(self.d, "archive_identity", None)
+        return indexed() if indexed is not None else None
 
     def _work_require_current_identity(self) -> None:
         """Refuse a docket WRITE while the document still holds old-style
