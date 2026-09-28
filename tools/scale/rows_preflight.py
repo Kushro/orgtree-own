@@ -28,8 +28,10 @@ THRESHOLD = 2.0
 BYTES_THRESHOLD = 3.0
 #: ...but only when the N=100 read is big enough to matter: a 8 KB -> 29 KB read
 #: is 3.5x yet costs nothing. Every whole-org load seen so far read >= 3 MB at
-#: N=100 (notifications 5.2, chat 6.1, org list 3.3).
-BYTES_FLOOR = 1_000_000
+#: N=100 (notifications 5.2, chat 6.1, org list 3.3). 256 KB (coordinator
+#: 2026-09-28 04:28Z) caps a hidden bytes-only growth at ~2.5 MB per request
+#: at N=1000.
+BYTES_FLOOR = 256_000
 JUDGED = ("work_items", "chat", "notifications", "org_list", "message")
 KIND = "rows-preflight"
 

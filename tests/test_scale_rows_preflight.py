@@ -74,6 +74,11 @@ class BytesVerdict(unittest.TestCase):
     def test_growth_crossing_the_floor_fails(self):
         passed, _ = bytes_verdict({10: sized(org_list=0.37), 100: sized(org_list=3.25)})
         self.assertFalse(passed)
+        # just above the 256 KB floor still counts; just below does not
+        passed, _ = bytes_verdict({10: sized(chat=0.05), 100: sized(chat=0.3)})
+        self.assertFalse(passed)
+        passed, _ = bytes_verdict({10: sized(chat=0.05), 100: sized(chat=0.2)})
+        self.assertTrue(passed)
 
     def test_zero_bytes_refuses_a_verdict(self):
         with self.assertRaises(ValueError):
