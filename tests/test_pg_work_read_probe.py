@@ -8,6 +8,7 @@ import unittest
 
 import test_pgstore as f
 import test_pg_work_read as fixture
+import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
 from orgtree import store, workread, worklistmeta
 
 
