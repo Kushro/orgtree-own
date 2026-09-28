@@ -21,7 +21,7 @@ import {
   getAccountRegistry, getRegisteredAccountUsage,
   getAntigravityUsage, getAntigravityUsagePeek,
   getCodexUsage, getCodexUsagePeek, getOpenRouterUsage, getOpenRouterUsagePeek,
-  getProviders, getAppTree, invalidateTreeCache,
+  getProviders, getAppTree, patchedTreeCache,
   getUsage, getUsagePeek, killAll,
   markRead, openWs,
   probeHub, putOrgMd,
@@ -939,10 +939,11 @@ export default function App() {
           // Live metadata goes straight to subscribed desks. It cannot
           // replace chart roots or rebuild layout; the frame is buffered by
           // onFrame above so a fetch racing it converges by replay
-          // instead of being discarded. The cache entry is still dropped:
-          // a 304 must not revalidate a pre-patch body for the CACHE —
-          // the render itself no longer depends on that.
-          invalidateTreeCache(slug)
+          // instead of being discarded. The full-tree cache entry is still
+          // dropped (a 304 must not revalidate a pre-patch body for that
+          // CACHE); the selected tree keeps its ETag, because its server
+          // moved the runtime stamp before sending this frame.
+          patchedTreeCache(slug)
           const frame = data
           publishNodeMetadata(slug, frame)
           if (frame.kind === 'mcp_tool_count') {

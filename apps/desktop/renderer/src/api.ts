@@ -256,6 +256,17 @@ export const invalidateTreeCache = (slug: string): void => {
   treeCacheGen.set(slug, (treeCacheGen.get(slug) ?? 0) + 1)
   foregroundTreeReader.invalidate()
 }
+/** A ws metadata patch (cache forecast, MCP counts) that edited the rendered
+ *  tree in place. The full-tree cache is fenced exactly as invalidateTreeCache
+ *  fences it. The SELECTED tree keeps its ETag (foreground-tree F1): its
+ *  server moves the runtime stamp BEFORE it sends the frame, so a 304 there
+ *  only ever confirms a body equal to the server's current one, and a changed
+ *  body comes back as a delta against the kept base. Dropping the ETag instead
+ *  made every such frame cost a full snapshot. */
+export const patchedTreeCache = (slug: string): void => {
+  treeCache.delete(slug)
+  treeCacheGen.set(slug, (treeCacheGen.get(slug) ?? 0) + 1)
+}
 /** Resolves the tree body — ALWAYS (2026-09-19 base+patch protocol). The
  *  old contract resolved NULL when bounded attempts raced ws-patch
  *  invalidations; under a working swarm's continuous patch traffic every
