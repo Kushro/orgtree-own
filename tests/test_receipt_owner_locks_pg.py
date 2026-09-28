@@ -149,6 +149,23 @@ class BlobOrg(_PgBase):
 
 
 @unittest.skipUnless(fixture.f.ADMIN, 'disposable PostgreSQL required: NOT RUN')
+class FlagOnUnconvertedOrg(BlobOrg):
+    """RECEIPT_ROWS on, this org NOT converted yet: the rollout state while
+    orgs convert one by one. Its receipts are still one blob, so it must keep
+    the whole-section lock (pg-workitems' landing condition on 7a9143f: the
+    org's own meta row decides, not the flag alone)."""
+
+    def setUp(self):
+        switch = patch.object(store, 'RECEIPT_ROWS', True); switch.start()
+        self.addCleanup(switch.stop)
+        _PgBase.setUp(self)
+        with self.raw() as raw:
+            self.assertIsNone(raw.execute("SELECT 1 FROM meta WHERE key = %s",
+                                          (store._META_RECEIPT_ROWS,)).fetchone(),
+                              'control: the fixture org is not converted')
+
+
+@unittest.skipUnless(fixture.f.ADMIN, 'disposable PostgreSQL required: NOT RUN')
 class ConvertedOrg(_PgBase):
     """RECEIPT_ROWS on and the org converted: owners lock independently."""
 
