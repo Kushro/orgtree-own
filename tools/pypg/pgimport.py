@@ -631,6 +631,12 @@ class PgSink:
         return json.loads(row[0]) if row and row[0] else None
 
     def replace_org(self, slug: str, rows: Mapping[str, list[tuple[Any, ...]]], receipt: Mapping[str, Any]) -> None:
+        # The import writes no receipt rows (and clears any, below), so the
+        # converted marker must not come with it: a marked org with no
+        # conversion record would load with no custody receipts at all.
+        if any(r[0] == store._META_RECEIPT_ROWS for r in rows.get("meta", ())):
+            raise ValueError(f"{slug!r}: the import carries the converted-receipts "
+                             f"meta key {store._META_RECEIPT_ROWS!r} but no receipt rows")
         with self.conn.transaction():
             org_id = self._org_id(slug)
             if org_id is None:

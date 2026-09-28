@@ -91,17 +91,60 @@ class ReceiptStore(unittest.TestCase):
         store.save_org(org)
         self.assertIn('op', store.load_org(org.d['slug']).d['mail_transitions']['n'])
 
-    def test_reimport_over_a_converted_org_replaces_its_receipt_rows(self):
-        import importlib.util, json, sys
+    def test_a_marked_org_without_its_conversion_record_refuses_to_load(self):
+        with self.raw() as raw:
+            for table in ('receipt_carriers', 'receipts', 'receipt_owners', 'receipt_format'):
+                raw.execute(f'DELETE FROM {table}')
+            self.assertEqual(raw.execute("SELECT val FROM meta WHERE key='receipt_rows'").fetchone(),
+                             ('1',))
+        with self.assertRaisesRegex(ledger.LedgerError, 'no receipt_format record'):
+            store.load_org(self.slug)
+
+    def test_receipt_functions_put_pg_temp_last_and_the_old_creator_is_not_runtime_callable(self):
+        with self.raw() as raw:
+            for sig in ('orgtree_install_receipt_rows(bigint)',
+                        'orgtree_put_receipt(bigint,text,text,text,text)',
+                        'orgtree_delete_receipt(bigint,text,text,text)'):
+                config = raw.execute('SELECT proconfig FROM pg_catalog.pg_proc WHERE oid=%s::regprocedure',
+                                     ('public.' + sig,)).fetchone()[0]
+                self.assertIn('search_path=pg_catalog, public, pg_temp', config, sig)
+            if raw.execute("SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='orgtree_runtime'").fetchone() is None:
+                self.skipTest('no orgtree_runtime role: EXECUTE check NOT RUN')
+            old = 'public.orgtree_create_org_schema_before_receipts(bigint)'
+            self.assertFalse(raw.execute("SELECT has_function_privilege('orgtree_runtime', %s, 'EXECUTE')",
+                                         (old,)).fetchone()[0])
+            self.assertTrue(raw.execute("SELECT has_function_privilege('orgtree_runtime', %s, 'EXECUTE')",
+                                        ('public.orgtree_create_org_schema(bigint)',)).fetchone()[0])
+
+    def sink(self):
+        import importlib.util, os, sys
         from pathlib import Path
         spec = importlib.util.spec_from_file_location(
             'pgimport', Path(__file__).resolve().parents[1] / 'tools' / 'pypg' / 'pgimport.py')
         pgimport = importlib.util.module_from_spec(spec)
         sys.modules.setdefault('pgimport', pgimport)
         spec.loader.exec_module(pgimport)
-        import os
         # the store's own per-module database, not the server admin URL
-        sink = pgimport.PgSink(os.environ['ORGTREE_PG_URL'], Path(store._orgs_dir()))
+        return pgimport.PgSink(os.environ['ORGTREE_PG_URL'], Path(store._orgs_dir()))
+
+    def test_reimport_carrying_the_converted_marker_is_refused_and_changes_nothing(self):
+        import json
+        sink = self.sink()
+        try:
+            rows = sink.read_org(self.slug)
+            self.assertIn('receipt_rows', [r[0] for r in rows['meta']])
+            rows['doc'] = sorted([*rows['doc'], ('mail_transitions', json.dumps(self.value))])
+            with self.assertRaisesRegex(ValueError, 'receipt_rows'):
+                sink.replace_org(self.slug, rows, {'source_fingerprint': 'receipt-marker'})
+        finally:
+            sink.conn.close()
+        self.assertEqual(self.export(), self.value)
+        self.assertIsInstance(store.load_org(self.slug).d['mail_transitions'],
+                              receiptmapping.ReceiptSection)
+
+    def test_reimport_over_a_converted_org_replaces_its_receipt_rows(self):
+        import json
+        sink = self.sink()
         try:
             rows = sink.read_org(self.slug)
             # an unconverted source: receipts as the doc blob, no marker

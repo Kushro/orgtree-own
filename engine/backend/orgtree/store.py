@@ -3465,6 +3465,11 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
             preloaded[sect] = value
         receipt = (_receipt_view(conn, slug, bind=receipt_bind and not txn_open)
                    if receipt_marked else None)
+        if receipt_marked and receipt is None:
+            # marked converted but no conversion record: the doc blob is gone,
+            # so the plain path would load an org with no receipts at all
+            raise LedgerError(f"{slug!r} is marked as storing custody receipts "
+                              "as rows but has no receipt_format record")
     except BaseException:
         # Never return a connection to the pool with a live read transaction,
         # including on JSON decoding or row construction failure.
