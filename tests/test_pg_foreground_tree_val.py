@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import test_pgstore as fixture
@@ -34,6 +35,11 @@ class TreeValProbe(unittest.TestCase):
         store.claim_data_root()
 
     def setUp(self):
+        # These fixtures store LEGACY long rings (an engine without ORGTREE_TURN_LOG,
+        # or one rolled back to it): with the log on, the heal trims them to 8.
+        for p in (patch.object(ledger, 'TURN_LOG', False), patch.object(store, '_heal_epoch_value', [])):
+            p.start()
+            self.addCleanup(p.stop)
         org = store.create_org('tv-' + self._testMethodName[:40].replace('_', '-'))
         self.slug = org.d['slug']
         org.hire(ledger.USER, None, 'luna', 100, 'boss')
