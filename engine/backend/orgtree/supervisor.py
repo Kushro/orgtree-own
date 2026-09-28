@@ -8162,14 +8162,9 @@ def turn_usage_block(org: Org, nid: str, now: float | None = None, *,
 _CHART_SUPPRESS_MIN: Final = 280
 
 
-def _state_segments(org: Org, nid: str, state_text: str, facts: Mapping[str, Any],
-                    usage_text: str) -> list[dict[str, Any]]:
-    """The turn's machine-state segments: `context.org_state` (the block's text
-    plus the roster/credit facts it was rendered from) and
-    `context.provider_usage` (the board's text plus its structured rows from
-    turnusage.board_rows — recorded at render, never parsed back). Both are
-    model_only by disposition (HUMAN_HIDDEN_VARIANTS): the agent reads the text
-    as it always did; the human transcript shows no card for them."""
+def _roster_facts(org: Org, nid: str) -> dict[str, Any]:
+    """The roster and credit facts `context.org_state` records beside the
+    block's text. Walks the node table (`children`)."""
     n = org.nodes.get(nid) or {}
     kids = [k for k in org.children(nid) if org.nodes[k]["state"] == "live"] \
         if nid in org.nodes else []
@@ -8179,16 +8174,45 @@ def _state_segments(org: Org, nid: str, state_text: str, facts: Mapping[str, Any
         free = float(org.free(nid))
     except Exception:                                          # noqa: BLE001
         free = 0.0
-    snapshot = {
-        "seq": facts.get("seq"), "at": now_iso(),
+    return {
         "reports": [{"id": k, "name": str(org.nodes[k].get("name") or k),
                      "tier": str(org.nodes[k].get("model") or ""),
                      "state": str(org.nodes[k].get("state") or "")} for k in kids],
         "peers": list(sibs),
-        "chart": (str(facts.get("chart")) if facts.get("chart") else None),
-        "chart_ref": facts.get("chart_ref"),
         "credits": {"seat": float(org.seat_cost(nid)) if nid in org.nodes else 0.0,
                     "grant": float(n.get("grant") or 0), "free": free},
+    }
+
+
+def _state_segments(org: Org, nid: str, state_text: str, facts: Mapping[str, Any],
+                    usage_text: str, *, view: Org | None = None
+                    ) -> list[dict[str, Any]]:
+    """The turn's machine-state segments: `context.org_state` (the block's text
+    plus the roster/credit facts it was rendered from) and
+    `context.provider_usage` (the board's text plus its structured rows from
+    turnusage.board_rows — recorded at render, never parsed back). Both are
+    model_only by disposition (HUMAN_HIDDEN_VARIANTS): the agent reads the text
+    as it always did; the human transcript shows no card for them.
+
+    `view`: the shared snapshot the block was rendered from — the roster
+    facts read it too, under the same read-only guard, so they match the text
+    and do not walk the turn's own copy (see `_org_state_view`)."""
+    roster = None
+    if view is not None:
+        try:
+            with _shared_read_only(str(org.d.get("slug") or ""), view):
+                roster = _roster_facts(view, nid)
+        except Exception:                                      # noqa: BLE001
+            roster = None
+    if roster is None:
+        roster = _roster_facts(org, nid)
+    snapshot = {
+        "seq": facts.get("seq"), "at": now_iso(),
+        "reports": roster["reports"],
+        "peers": roster["peers"],
+        "chart": (str(facts.get("chart")) if facts.get("chart") else None),
+        "chart_ref": facts.get("chart_ref"),
+        "credits": roster["credits"],
         "notes": [],
     }
     segs = [{"kind": "state", "text": state_text,
@@ -21352,6 +21376,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 # that block popping a second carrier off the queue
                 return _drop_ping(slug, nid)
             o2 = org      # the document the merged transaction committed
+            _state_view = None
             if nid in o2.nodes:
                 # D-181: the live org state rides the turn, not the system
                 # prompt. Built off the doc this turn actually starts from:
@@ -21378,9 +21403,10 @@ def _run_one_turn_recorded(slug: str, nid: str,
                     # walk would decode the whole node table into a copy the
                     # turn then holds until it ends (N1000: ~200 MB per
                     # running turn, 16 turns at once; see _org_state_view)
+                    _state_view = _org_state_view(slug, nid, _adm_seq)
                     state_block = _envelope_state_block(
                         o2, nid, time.time(), env_pending, out=state_facts,
-                        view=_org_state_view(slug, nid, _adm_seq))
+                        view=_state_view)
                     # Keep only the already-loaded doc. Provider
                     # cache/registry locks must never sit underneath a
                     # row lock or DOC_LOCK, and this block is advisory:
@@ -21414,9 +21440,11 @@ def _run_one_turn_recorded(slug: str, nid: str,
                 # their FULL text and facts — never rows, never re-rendered
                 if view_segments is not None and usage_org is not None:
                     view_segments[:0] = _state_segments(
-                        usage_org, nid, state_block, state_facts, usage_block)
-            # turn-locals: the in-flight record's copy is not read again
-            o2 = usage_org = _inf_tx = None
+                        usage_org, nid, state_block, state_facts, usage_block,
+                        view=_state_view)
+            # turn-locals: the in-flight record's copy is not read again, and
+            # the shared snapshot is not held past the block either
+            o2 = usage_org = _inf_tx = _state_view = None
             # a new turn supersedes the previous failure: the durable system
             # row (_log_turn_error) already holds the history, so the banner
             # clears NOW instead of surviving until a later success — it used
