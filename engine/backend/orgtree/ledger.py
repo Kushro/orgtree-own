@@ -731,6 +731,139 @@ def heal_decoded_box(sect: str, box: Any) -> bool:
     return changed
 
 
+#: ORGTREE_TURN_LOG (default OFF until reviewed and flipped): a node's full
+#: `turns` history lives in the `turn_log` dict log (one row per turn, owner =
+#: node id); the node row keeps only its newest TREE_TURNS entries, each with a
+#: turn number `n`, plus `turn_seq` (turns logged so far) and the running sums
+#: the killed-turn estimate needs (`turn_est_cost` / `turn_est_toks`). A ring
+#: entry WITHOUT `n` has not been logged yet: legacy history, or a turn an older
+#: engine appended after a rollback. `convert_turns` logs those in ring order and
+#: trims the ring, so converting is idempotent and a roll-forward loses and
+#: duplicates nothing. Nothing is ever deleted from `turn_log`.
+#: Converting runs in the whole-load heal (committed by its own save) and in
+#: `record_turn` (whose transaction names `turn_log`), never when one row is
+#: decoded on demand: that transaction may not have named the log. Until then
+#: readers count the un-logged entries themselves (`turn_estimate_sums`,
+#: history.py), so the answer is the same either way.
+TURN_LOG = (os.environ.get("ORGTREE_TURN_LOG") or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+def _turn_pair(e: Any) -> tuple[Any, Any] | None:
+    """(cost, toks) when this ring entry counts for the killed-turn estimate —
+    `_charge_killed_turn`'s own filter: priced, with tokens, not killed."""
+    if isinstance(e, dict) and e.get("cost") and e.get("toks") and not e.get("killed"):
+        return (e.get("cost") or 0.0, e.get("toks") or 0)
+    return None
+
+
+#: A running sum that ends EXACTLY where builtin `sum()` over the whole ring
+#: would (CPython 3.12+ adds floats with Neumaier compensation, so a plain
+#: running total drifts in the last bits): ["i", total] while every term was
+#: an int, then ["f", total, compensation]. None: a term was not a number, and
+#: the old whole-ring `sum()` would have raised — so does the estimate.
+_SUM_ZERO: Final[list[Any]] = ["i", 0]
+
+
+def _sum_add(state: Any, x: Any) -> Any:
+    """`state` plus one term, the way builtin_sum_impl adds it."""
+    if not isinstance(state, list) or type(x) not in (int, float, bool):
+        return None
+    if state[0] == "i":
+        if type(x) is not float:
+            return ["i", state[1] + int(x)]
+        return ["f", state[1] + x, 0.0]          # leaves the int path: one plain add
+    f, c = state[1], state[2]
+    if type(x) is not float:
+        return ["f", f + float(x), c]            # an int term: no compensation
+    t = f + x
+    c += ((f - t) + x) if abs(f) >= abs(x) else ((x - t) + f)
+    return ["f", t, c]
+
+
+def _sum_value(state: Any) -> Any:
+    if not isinstance(state, list):
+        raise TypeError("a turn's cost or tokens is not a number")
+    if state[0] == "i":
+        return state[1]
+    f, c = state[1], state[2]
+    return f + c if c and math.isfinite(c) else f
+
+
+def _sum_pairs(cost: Any, toks: Any, entries: Any) -> tuple[Any, Any]:
+    for pair in map(_turn_pair, entries):
+        if pair is not None:
+            cost = _sum_add(cost, pair[0])
+            toks = _sum_add(toks, pair[1])
+    return cost, toks
+
+
+def _turn_log_append(d: Any, nid: str, entry: dict[str, Any]) -> None:
+    from . import store                              # noqa: PLC0415 — cycle
+    store.turn_log_append(d, nid, dict(entry))
+
+
+def convert_turns(d: Any, nid: str, n: Any) -> bool:
+    """Log every ring entry that is not logged yet (no `n`), in ring order,
+    add them to the running sums, trim the ring to the newest TREE_TURNS.
+    True if it changed anything. Idempotent."""
+    if d is None or not isinstance(n, dict):
+        return False
+    ring = n.get("turns")
+    ring = ring if isinstance(ring, list) else []
+    pending = [e for e in ring if isinstance(e, dict) and "n" not in e]
+    if not pending and "turn_seq" in n and len(ring) <= TREE_TURNS:
+        return False
+    seq = int(n.get("turn_seq") or 0)
+    for e in pending:
+        seq += 1
+        e["n"] = seq
+        _turn_log_append(d, nid, e)
+    if "turn_seq" in n:
+        cost, toks = n.get("turn_est_cost"), n.get("turn_est_toks")
+    else:
+        cost, toks = list(_SUM_ZERO), list(_SUM_ZERO)
+    n["turn_est_cost"], n["turn_est_toks"] = _sum_pairs(cost, toks, pending)
+    n["turn_seq"] = seq
+    if len(ring) > TREE_TURNS:
+        n["turns"] = ring[-TREE_TURNS:]
+    return True
+
+
+def record_turn(d: Any, nid: str, n: Any, entry: dict[str, Any]) -> None:
+    """Append one turn to node `nid` — THE ring writer. Off: the old ring
+    append. On: log it, keep the newest TREE_TURNS in the ring, update sums."""
+    if not TURN_LOG:
+        n.setdefault("turns", []).append(entry)
+        return
+    convert_turns(d, nid, n)           # an older engine's appends first
+    seq = int(n.get("turn_seq") or 0) + 1
+    entry["n"] = seq
+    _turn_log_append(d, nid, entry)
+    n["turn_est_cost"], n["turn_est_toks"] = _sum_pairs(
+        n.get("turn_est_cost"), n.get("turn_est_toks"), [entry])
+    n["turn_seq"] = seq
+    ring = n.setdefault("turns", [])
+    ring.append(entry)
+    if len(ring) > TREE_TURNS:
+        del ring[:len(ring) - TREE_TURNS]
+
+
+def turn_estimate_sums(n: Any) -> tuple[Any, Any]:
+    """(Σcost, Σtoks) over every turn the killed-turn estimate counts, equal
+    to the old `sum()` over the whole ring: the running sums of the logged
+    turns plus the ring entries not logged yet — all of the ring on a node
+    never converted. Read whatever the switch says: a converted node's ring
+    is only its tail. Raises TypeError where that `sum()` would have."""
+    ring = (n.get("turns") or []) if isinstance(n, dict) else []
+    if isinstance(n, dict) and "turn_seq" in n:
+        cost, toks = n.get("turn_est_cost"), n.get("turn_est_toks")
+        ring = [e for e in ring if not (isinstance(e, dict) and "n" in e)]
+    else:
+        cost, toks = list(_SUM_ZERO), list(_SUM_ZERO)
+    cost, toks = _sum_pairs(cost, toks, ring)
+    return (_sum_value(cost), _sum_value(toks))
+
+
 def _lazy_rows(nodes: Any) -> bool:
     """Is this node table decoded on demand (heals run per row)?"""
     return bool(getattr(nodes, "lazy_rows", False))
@@ -870,6 +1003,7 @@ NODE_KEYED_SECTIONS: Final[dict[str, tuple[str, str, str]]] = {
     "steered_log": ("rekey", "by_node", "purged"),
     "delivering": ("rekey", "by_node", "purged"),
     "turn_error_log": ("rekey", "by_node", "purged"),
+    "turn_log": ("rekey", "by_node", "purged"),
     "mail_transitions": ("rekey", "by_node", "purged"),
     "steer_attempts": ("rekey", "by_node", "purged"),
     "manual_attempts": ("rekey", "by_node", "purged"),
@@ -1179,6 +1313,9 @@ class Org:
         if not self.d.get("fable_lock") and not _lazy:
             for n in self.nodes.values():
                 n.pop("limit_locked", None)
+        if TURN_LOG and not _lazy:
+            for _tid, _tn in self.nodes.items():
+                convert_turns(self.d, _tid, _tn)
         # org holdings carry RW/RO modes (user ruling — configured on the eye's
         # gear, mirroring per-agent folder access); legacy string lists migrate
         self.d["dirs"] = norm_dirs(self.d.get("dirs"))

@@ -58,7 +58,8 @@ from .fleet_walk import fleet_walk
 from .desktop_native import NativeInventory
 from .ledger import (EXTERN, SYSTEM, USER, LedgerError, Org, expand_mcp,
                      freeze_describes_provider, next_config_seq,
-                     now as now_iso)
+                     now as now_iso, record_turn, turn_estimate_sums)
+from . import ledger as _ledger
 from .schema import (Denial, FrozenInfo, InflightInfo, KioskCfg, MailEntry,
                      NodeDoc, NoticeEntry, TurnStat)
 
@@ -25597,17 +25598,14 @@ def _charge_killed_turn(slug: str, nid: str, out_toks: int,
     with its token count. A node with no priced history records the tokens
     and an honest zero rather than an invented price."""
     try:
-        with halt.txn(slug, **{"nodes": [nid], "sections": ["api_cost_usd"] if on_key else []}) as _cb_tx:  # PG-3e-A
+        with halt.txn(slug, **{"nodes": [nid], "sections": ["api_cost_usd"] if on_key else [],
+                               "logs": ["turn_log"] if _ledger.TURN_LOG else []}) as _cb_tx:  # PG-3e-A
             o2 = _cb_tx.org
             if nid not in o2.nodes:
                 return
             n = o2.node(nid)
-            ring = n.setdefault("turns", [])
-            pairs = [(t.get("cost") or 0.0, t.get("toks") or 0)
-                     for t in ring
-                     if t.get("cost") and t.get("toks") and not t.get("killed")]
-            den = sum(tk for _, tk in pairs)
-            est = round(out_toks * sum(c for c, _ in pairs) / den, 6) \
+            num, den = turn_estimate_sums(n)
+            est = round(out_toks * num / den, 6) \
                 if (out_toks and den) else 0.0
             # `reported` is what the CLI ITSELF published on an earlier result
             # this turn (a multi-message turn killed on its last message), so
@@ -25627,7 +25625,7 @@ def _charge_killed_turn(slug: str, nid: str, out_toks: int,
             if est and not measured:
                 entry["estimated"] = True
             _stamp_ran_as(entry, slug, nid)
-            ring.append(entry)
+            record_turn(o2.d, nid, n, entry)
 
     except Exception:                                            # noqa: BLE001
         pass          # accounting must never turn a killed turn into a crash
@@ -25756,7 +25754,8 @@ def _charge_reported_spend(slug: str, nid: str, paid: float,
 
     Every other lane is byte-for-byte unchanged: `paid`, no stamps, no flag."""
     try:
-        with halt.txn(slug, **{"nodes": [nid], "sections": ["api_cost_usd"] if on_key else []}) as _cb_tx:  # PG-3e-A
+        with halt.txn(slug, **{"nodes": [nid], "sections": ["api_cost_usd"] if on_key else [],
+                               "logs": ["turn_log"] if _ledger.TURN_LOG else []}) as _cb_tx:  # PG-3e-A
             o2 = _cb_tx.org
             if nid not in o2.nodes:
                 return
@@ -25796,7 +25795,7 @@ def _charge_reported_spend(slug: str, nid: str, paid: float,
                         paid_entry["cost_unknown_fields"] = list(unknown)
                     n["cost_usd_unknown"] = True
             _stamp_ran_as(paid_entry, slug, nid)
-            ring.append(paid_entry)
+            record_turn(o2.d, nid, n, paid_entry)
 
     except Exception:                                            # noqa: BLE001
         pass          # accounting must never turn a failed turn into a crash
@@ -26074,7 +26073,8 @@ def _after_turn(slug: str, nid: str, org: Org, res: dict[str, Any],
     spend_total = None
     cache_event: dict[str, Any] | None = None
     if cost or occ or cw or denials or res:
-        with halt.txn(slug, **{"nodes": [nid], "sections": ["api_cost_usd"] if on_key else []}) as _cb_tx:  # PG-3e-A
+        with halt.txn(slug, **{"nodes": [nid], "sections": ["api_cost_usd"] if on_key else [],
+                               "logs": ["turn_log"] if _ledger.TURN_LOG else []}) as _cb_tx:  # PG-3e-A
             o2 = _cb_tx.org
             if nid not in o2.nodes:
                 return
@@ -26239,7 +26239,7 @@ def _after_turn(slug: str, nid: str, org: Org, res: dict[str, Any],
                     cache_attempt = _cache_attempt_as_model(
                         cache_attempt, str(_route_rec.get("model") or ""),
                         pool=str(_route_rec.get("pool") or ""))
-            ring.append(entry)
+            record_turn(o2.d, nid, n, entry)
 
             try:
                 cache_event = _cache_finish_turn(

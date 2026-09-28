@@ -1064,6 +1064,9 @@ def _read_bytes(p: str) -> bytes:
 # QUEUES, not append-only logs: they stay `doc` blobs.
 ROWED: tuple[str, ...] = ("nodes",)
 DICT_LOGS: tuple[str, ...] = ("mail_log", "steered_log", "turn_error_log",
+                              # ORGTREE_TURN_LOG: every turn of a node, the
+                              # node row keeping only its newest few
+                              "turn_log",
                               # the steering attempt journal (perf-redesign
                               # 2026-09-12, coordinator ruling 11:28Z): a
                               # KEYED dict log — see KEYED_DICT_LOGS. 1.28 MB
@@ -2806,7 +2809,10 @@ def heal_epoch() -> str | None:
     if not _heal_epoch_value:
         try:
             with open(ledger.__file__, "rb") as fh:
-                _heal_epoch_value.append(hashlib.sha256(fh.read()).hexdigest()[:24])
+                digest = hashlib.sha256(fh.read())
+            # a switch that changes what a heal does changes the epoch too
+            digest.update(b"turn_log" if ledger.TURN_LOG else b"")
+            _heal_epoch_value.append(digest.hexdigest()[:24])
         except (OSError, TypeError):
             _heal_epoch_value.append(None)
     return _heal_epoch_value[0]
@@ -4537,6 +4543,13 @@ def _write_dict_log(conn: sqlite3.Connection, sect: str, cur: dict[str, Any],
     for owner in sorted(cur._appends):
         rows = cur._appends[owner]
         if not rows:
+            continue
+        if sect == "turn_log":
+            # append-only, each owner's appends serialized by its node lock:
+            # nothing to validate, the rows are only ever added
+            for row in rows:
+                conn.execute("INSERT INTO log_d(sect,owner,at,val) VALUES(?,?,?,?)",
+                             (sect, owner, _at_of(row), _dumps(row)))
             continue
         expected = cur._mail_bounds.get(owner)
         if sect != "mail_log" or expected is None or STORE_BACKEND != "postgres":
@@ -6424,6 +6437,22 @@ def mail_archive_max(d: dict[str, Any], owner: str) -> int | None:
     for row in archive._appends.get(owner, []):
         high = max(high, Org._recv_ordinal(row.get("recv_seq")) or 0)
     return high
+
+
+def turn_log_append(d: dict[str, Any], owner: str, row: Any) -> None:
+    """Append one row to `owner`'s turn_log WITHOUT reading its history: on a
+    lazy document the row is buffered and the save INSERTs it; otherwise it is
+    a plain append."""
+    sec = d.get("turn_log") if "turn_log" in d else None
+    if isinstance(sec, SectionMap) and not dict.__contains__(sec, owner) \
+            and owner not in sec._dropped and owner not in sec._replaced:
+        if owner not in sec._present:
+            sec._present.add(owner)
+            sec._order.append(owner)
+            sec._added.add(owner)
+        sec._appends.setdefault(owner, []).append(row)
+        return
+    cast("dict[str, Any]", d.setdefault("turn_log", {})).setdefault(owner, []).append(row)
 
 
 def mail_archive_append(d: dict[str, Any], owner: str, row: Any) -> bool:

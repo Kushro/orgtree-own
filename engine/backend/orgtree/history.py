@@ -38,6 +38,25 @@ SECTIONS = {
 }
 
 
+
+def _turn_log_rows_from(d: Any, n: Any, node: str) -> list[Any] | None:
+    """A converted node's (ORGTREE_TURN_LOG) complete turn history, oldest
+    first, else None (its ring IS its history). Whatever the switch says
+    now: a converted node's ring holds only its newest turns."""
+    if not (isinstance(n, dict) and "turn_seq" in n):
+        return None
+    log = d.get("turn_log") or {}
+    rows = list(log.get(node) or [])
+    known = {r.get("n") for r in rows if isinstance(r, dict)}
+    # a turn an older engine appended after a rollback is still only in the ring
+    rows += [e for e in n.get("turns") or [] if isinstance(e, dict) and e.get("n") not in known]
+    return rows
+
+
+def _turn_log_rows(org: Any, node: str) -> list[Any] | None:
+    return _turn_log_rows_from(org.d, org.node(node), node)
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
                                       separators=(",", ":")).encode()).hexdigest()[:24]
@@ -111,6 +130,8 @@ def history_page(slug: str, section: str, node: str = "", cursor: str = "", limi
             selected, total, nxt = _list_page(names, state, limit)
             by_name = {Path(p).name: p for p in paths}
             items = [{"file": name, **turnread.load(by_name[name])} for name in selected]
+        elif section == "turns" and (logged := _turn_log_rows(org, node)) is not None:
+            items, total, nxt = _list_page(logged, state, limit)
         elif section in ("turns", "oracle"):
             items, total, nxt = _list_page(org.node(node).get(field) or [], state, limit)
         elif store.STORE_BACKEND == "sqlite":
