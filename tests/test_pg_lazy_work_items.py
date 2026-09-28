@@ -211,15 +211,37 @@ class LazyRows(unittest.TestCase):
         self.assertEqual(self.row()['rev'],19)
 
     def test_runtime_eager_mail_stays_in_snapshot(self):
-        fresh=store.load_org(self.slug)
-        fresh.d['mail']={'a':[{'id':'before','body':'one'}]}
-        store.save_org(fresh)
-        old=store.load_runtime_org(self.slug)
-        fresh=store.load_org(self.slug)
-        fresh.d['mail']['a'].append({'id':'after','body':'two'})
-        store.save_org(fresh)
-        self.assertEqual([m['id'] for m in old.d['mail']['a']],['before'])
-        self.assertEqual([m['id'] for m in store.load_runtime_org(self.slug).d['mail']['a']],['before','after'])
+        # ORGTREE_LAZY_ROWS=0 keeps the whole-load contract: mail is read in
+        # the view's one snapshot
+        with patch.object(store,'LAZY_ROWS',False):
+            fresh=store.load_org(self.slug)
+            fresh.d['mail']={'a':[{'id':'before','body':'one'}]}
+            store.save_org(fresh)
+            old=store.load_runtime_org(self.slug)
+            fresh=store.load_org(self.slug)
+            fresh.d['mail']['a'].append({'id':'after','body':'two'})
+            store.save_org(fresh)
+            self.assertEqual([m['id'] for m in old.d['mail']['a']],['before'])
+            self.assertEqual([m['id'] for m in store.load_runtime_org(self.slug).d['mail']['a']],['before','after'])
+
+    def test_runtime_on_demand_mail_is_fresher_and_counted(self):
+        # ORGTREE_LAZY_ROWS on (the default): a runtime view reads a box when
+        # it is touched and may see a later commit; that is counted, never an
+        # error (n1000 decision #3, "option A")
+        with patch.object(store,'LAZY_ROWS',True):
+            fresh=store.load_org(self.slug)
+            fresh.d['mail']={'a':[{'id':'before','body':'one'}]}
+            store.save_org(fresh)
+            with orgtx.org_tx(self.slug,nodes=['a']):
+                pass                                    # a whole load stamps the heal epoch
+            old=store.load_runtime_org(self.slug)
+            self.assertIsInstance(dict.get(old.d,'mail'),store.LazySplitSection)
+            fresh=store.load_org(self.slug)
+            fresh.d['mail']['a'].append({'id':'after','body':'two'})
+            store.save_org(fresh)
+            before=store.LAZY_ROWS_STATS['post_load_changes']
+            self.assertEqual([m['id'] for m in old.d['mail']['a']],['before','after'])
+            self.assertEqual(store.LAZY_ROWS_STATS['post_load_changes'],before+1)
 
     def test_runtime_escape_hatch_retains_eager_snapshot(self):
         with patch.object(store,'ORGTX_RESCOPE',False):

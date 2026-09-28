@@ -1,7 +1,7 @@
 """ORGTREE_LAZY_ROWS: node rows and split-section owner rows load when touched.
 
 Actual PostgreSQL (disposable, via test_pgstore); the switch is patched ON
-here and stays off in production until its flip. What these prove:
+here (it is ON by default; ORGTREE_LAZY_ROWS=0 turns it off). What these prove:
   * a whole load for a stale heal epoch heals and stamps; after that loads
     read no node or owner row until one is touched;
   * DATA LOSS: rows never decoded are byte-identical after saves around

@@ -2766,13 +2766,14 @@ class NodesMap(dict[str, Any]):
 
 
 # ------------------------------------------------ on-demand node rows (N1000)
-#: ORGTREE_LAZY_ROWS=1 (PostgreSQL + ORGTX_RESCOPE, lazy_work loads only): a
+#: ORGTREE_LAZY_ROWS (ON by default; =0 turns it off. PostgreSQL + ORGTX_RESCOPE,
+#: lazy_work loads only): a
 #: load reads no node rows. A node row is fetched, decoded and healed the
 #: first time it is touched, on the pool connection of the thread — inside
 #: org_tx that is the tx's pinned connection, so it reads at the same READ
 #: COMMITTED view the whole-org load did. A walk over every node fetches the
 #: rest in one statement: that is a FALLBACK, counted in LAZY_ROWS_STATS.
-LAZY_ROWS = os.environ.get("ORGTREE_LAZY_ROWS", "").strip() == "1"
+LAZY_ROWS = os.environ.get("ORGTREE_LAZY_ROWS", "1").strip() != "0"
 LAZY_ROWS_STATS: dict[str, int] = {"loads": 0, "fetches": 0, "rows": 0,
                                    "fallbacks": 0, "epoch_fallbacks": 0,
                                    "decode_heals": 0, "post_load_changes": 0}
