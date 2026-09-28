@@ -83,8 +83,8 @@ class ForegroundPrechecks(unittest.TestCase):
     def test_discovery_rechecks_gate_after_initial_api_precheck(self):
         # Force a commit between agent_call's first gate and its discovery seat read.
         original=halt.blocked
-        def crossing(slug,nid):
-            result=original(slug,nid)
+        def crossing(slug,nid,**kw):
+            result=original(slug,nid,**kw)
             with orgtx.org_tx(slug,nodes=[nid]) as tx:tx.org.node(nid)['halt']=True
             return result
         with patch.object(halt,'blocked',crossing):
