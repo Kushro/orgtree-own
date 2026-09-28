@@ -594,7 +594,11 @@ class AttemptRecordTests(unittest.TestCase):
         does not inherit the request's context. It hands the attempt's tally
         over explicitly; without that, every primary-store contact of a
         hire, retire or staff would be unattributed. This call finishes
-        inside the wait, so all of its contacts belong to this record."""
+        inside the wait, so all of its contacts belong to this record.
+
+        A watchdog `remove` of an unknown id: it stays managed, loads the
+        org on the worker and is refused there. Since d5d5fd6 the watchdog
+        `list` this used to call takes the ordinary path (no worker)."""
         from orgtree import ledger
         slug = 'contacts-managed-org'
         _make_org(slug)
@@ -603,7 +607,7 @@ class AttemptRecordTests(unittest.TestCase):
             store.save_org(org)
         got = self.client.post('/api/agent', headers=OPERATOR, json={
             'org': slug, 'node': 'probe', 'tool': 'orgtree_watchdog',
-            'args': {'action': 'list'}})
+            'args': {'action': 'remove', 'id': 'wd-no-such-dog'}})
         self.assertEqual(got.status_code, 200, got.text)
         self.assertNotEqual(got.json().get('state'), 'running',
                             'the call yielded, so this is not the joined case')
