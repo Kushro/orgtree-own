@@ -36,7 +36,7 @@ MUTANTS = [
      'test_list_skips_the_journal_and_pause_still_uses_it'),
     ('mut-keyed-not-unwrapped', TW,
      "        args = args.get('args') if isinstance(args.get('args'), dict) else {}\n",
-     "",
+     "        pass  # not unwrapped\n",
      'test_keyed_list_is_judged_by_the_call_it_wraps'),
     ('mut-pause-counted-a-read', MCP,
      "MANAGED_WAIT_READ_ACTIONS = {'orgtree_watchdog': frozenset({'list'})}",
