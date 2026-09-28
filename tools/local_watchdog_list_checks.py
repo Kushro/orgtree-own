@@ -75,9 +75,9 @@ try:
         for f in CHANGED:
             (repo / f).write_bytes(subprocess.check_output(['git', 'show', f'{BASE}:{f}'], cwd=repo))
     if PHASE in ('tip', 'base'):
-        # the two probe-backed p02 modules alone: they share one long probe run
-        run(PHASE + '-a', GROUP[:9])
-        run(PHASE + '-b', GROUP[9:])
+        # one module per call (the coordinator's small-run rule)
+        for mod in GROUP:
+            run(PHASE + '-' + Path(mod).stem, [mod])
     elif PHASE in ('latency-tip', 'latency-base'):
         if PHASE == 'latency-base':
             for f in CHANGED[:3]:
