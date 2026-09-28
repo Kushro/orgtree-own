@@ -52,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from serve import share_dir, update_descriptor  # noqa: E402
 from control import BoundedPool, Workload, Feed, free_commit_gb, memory_breach
 from ui_mix import WINDOWS, polls as ui_polls
-from streaming import drive_streams, send_frames
+from streaming import drive_planned, drive_streams, send_frames
 from settlement import settled as mailbox_settled
 
 MARK = re.compile(r"\[\[m(\d+)\]\]")
@@ -162,6 +162,9 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--no-ui", action="store_true")
     p.add_argument("--renderer-hooks", action="store_true")
+    p.add_argument("--stream-catchup-max", type=int, default=8,
+                   help="renderer-hooks plan replay: most overdue frames one agent sends in one "
+                        "request when it has fallen behind (1 = the old one-frame-per-request producer)")
     p.add_argument("--write-oracle", action="store_true")
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--plans-dir", type=Path)
@@ -241,7 +244,7 @@ def main(argv=None) -> int:
                          "chat_window": 8, "changed_events": "120ms coalesced refresh",
                          "limits": "Visible idle views; no clicks, scrolling or hidden-window simulation"},
               "stream_nodes": len(stream_nodes), "stream_hz": args.stream_hz,
-              "stream_mode": args.stream_mode,
+              "stream_mode": args.stream_mode, "stream_catchup_max": args.stream_catchup_max,
               "duration_s": args.duration, "workers": args.workers,
               "warmup_s": args.warmup, "measured_s": measured_duration,
               "phase_boundary": "continuous drivers, sockets and caches; no warmup restart",
@@ -579,20 +582,21 @@ def main(argv=None) -> int:
                         for line in source:
                             job = json.loads(line)
                             jobs[job["node"]].append(job)
-                    async def producer(rows):
+                    async def planned(rows):
+                        now = time.time()
                         for row in rows:
-                            due = t0 + row["t"]
-                            while time.time() < due and not stop.is_set():
-                                await asyncio.sleep(min(.1, max(0, due-time.time())))
-                            if stop.is_set():
-                                return
-                            now = time.time()
                             feed_tracker.emit(row["m"], now)
                             emitted_count[0] += 1
-                            rec.write("markers", {"m": row["m"], "emit": now, "node": row["node"], "due": due})
-                            await send_frames(c, [{k: row[k] for k in ("node", "reset", "text")}],
-                                first_seq=row["m"], emit=now, due=due, started=t0, feed=feed_tracker, rec=rec)
-                    await asyncio.gather(*(producer(rows) for rows in jobs.values()))
+                            rec.write("markers", {"m": row["m"], "emit": now, "node": row["node"],
+                                                  "due": t0 + row["t"]})
+                        await send_frames(c, [{k: row[k] for k in ("node", "reset", "text")} for row in rows],
+                            first_seq=rows[0]["m"], ids=[row["m"] for row in rows], emit=now,
+                            due=t0 + rows[0]["t"], started=t0, feed=feed_tracker, rec=rec)
+                    # Emission ends at the duration, so load.py's final 5 s
+                    # horizon covers every sent marker (attempt 5 sent one
+                    # 0.1 s before the windows closed).
+                    await drive_planned(jobs, planned, started=t0, duration=args.duration, stop=stop,
+                                        max_batch=args.stream_catchup_max)
                 else:
                     await drive_streams(stream_nodes, lambda nodes, first, due: submit(c, nodes, first, due),
                         started=t0, duration=args.duration, hz=args.stream_hz, stop=stop, mode=args.stream_mode)
@@ -863,6 +867,8 @@ def main(argv=None) -> int:
                             "offered_steer_per_s": steer_rate,
                             "ui_requests": len(ui), "stream_markers": emitted_count[0],
                             "stream_markers_failed_submit": feed_tracker.failed,
+                            "stream_markers_planned_not_sent": (config["plans"]["stream"]["requests"] - emitted_count[0]
+                                                                if args.renderer_hooks else None),
                             "stream_markers_not_yet_assessed": len(feed_tracker.pending)},
                "tools": tools_summary, "routes": routes_summary, "feed": feed,
                "steer": {"total_ms": pct(steer_latencies), "errors": steer_errors,
