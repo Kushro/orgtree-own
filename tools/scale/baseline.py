@@ -74,7 +74,7 @@ def require_go(args, source):
                         # the generator still proves BOTH 10x count and bytes.
                         item_chars=128, mail_chars=4096, transcript_chars=128)),
                     disk_gib=2, commit_gib=12, readiness_s=90)
-    if args.preflight_only:
+    if getattr(args, "preflight_only", False):
         # Two tiny seeded orgs only (N=10, N=100): cheap, one small slot, no GO.
         return dict(kind="rows preflight only", commit_gib=12, disk_gib=2,
                     rows_preflight=True, preflight_only=True)
