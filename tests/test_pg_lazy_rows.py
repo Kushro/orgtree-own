@@ -566,6 +566,32 @@ class DeferredDocKeys(unittest.TestCase):
         self.assertNotIn('reservations', doc)
         self.assertNotIn('reservations', self.key_order())
 
+    def test_a_replacement_never_read_survives_a_later_walk(self):
+        # pg-supervisor-a K1: replacing an unfetched key must read it first,
+        # or a walk after the replace fetches the STORED value over it
+        with orgtx.org_tx(self.slug, sections=['watchdogs']) as tx:
+            self.assertFalse(dict.__contains__(tx.org.d, 'watchdogs'))
+            tx.org.d['watchdogs'] = [{'id': 'w7'}]
+            self.assertEqual(json.loads(json.dumps(tx.org.d))['watchdogs'], [{'id': 'w7'}])
+        _, doc = self.rows()
+        self.assertEqual(json.loads(doc['watchdogs']), [{'id': 'w7'}])
+        self.assertEqual(json.loads(doc['reservations']), self.RES)
+
+    def test_a_key_order_with_deferred_keys_in_the_middle_is_kept(self):
+        # pg-supervisor-a K5: the deferred keys sit BETWEEN other keys
+        with orgtx.org_tx(self.slug, sections=['zz_probe']) as tx:
+            tx.org.d['zz_probe'] = {'a': 1}
+        order0 = self.key_order()
+        self.assertIn('watchdogs', order0)
+        self.assertIn('reservations', order0)
+        self.assertLess(order0.index('watchdogs'), order0.index('zz_probe'))
+        with orgtx.org_tx(self.slug, nodes=['n0']) as tx:
+            tx.org.node('n0')['payload']['v'] = 9
+        self.assertEqual(self.key_order(), order0)
+        with orgtx.org_tx(self.slug, sections=['zz_probe']) as tx:
+            tx.org.d['zz_probe']['a'] = 2
+        self.assertEqual(self.key_order(), order0)
+
     def test_an_absent_key_stays_absent(self):
         with orgtx.org_tx(self.slug, sections=['watchdogs']) as tx:
             del tx.org.d['watchdogs']
