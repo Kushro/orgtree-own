@@ -24,12 +24,6 @@ MAX_PUBLISH_FAILURES = 8
 MAX_PUBLISH_AGE_S = 3600
 # Read/control/mail calls stay short and retain their existing response path.
 # These operations can wait on processes, files, provider discovery or smoke runs.
-# The read-only actions of a managed tool. They spawn nothing and wait on
-# nothing, so they keep the ordinary agent-call path: a watchdog `list` used
-# to pay this journal (three fsync'd writes under `_lock`) and a MAX_RUNNING
-# slot for a read of a few rows. Matched exactly as the handlers read it,
-# `str(args.get('action') or '')`.
-READ_ACTIONS = {'orgtree_watchdog': frozenset({'list'})}
 _slots = threading.BoundedSemaphore(MAX_RUNNING)
 _lock = threading.RLock()
 _publish_lock = threading.Lock()
@@ -93,6 +87,14 @@ class _DestinationGone(Exception):
 def tool_name(body):
     name = body.args.get('tool', '') if body.tool == 'orgtree_op_call' else body.tool
     return name if isinstance(name, str) else ''
+
+
+# The read-only actions of a managed tool. They spawn nothing and wait on
+# nothing, so they keep the ordinary agent-call path: a watchdog `list` used
+# to pay this journal (three fsync'd writes under `_lock`) and a MAX_RUNNING
+# slot for a read of a few rows. Matched exactly as the handlers read it,
+# `str(args.get('action') or '')`.
+READ_ACTIONS = {'orgtree_watchdog': frozenset({'list'})}
 
 
 def managed_call(body):
