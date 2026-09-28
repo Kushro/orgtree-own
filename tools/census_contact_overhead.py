@@ -102,6 +102,9 @@ class Bench:
         census.set_enabled(False)
         self.pools = {arm: store._Pool() for arm in ARMS}
         self.slugs = {arm: f"overhead-{arm.replace('_', '-')}" for arm in ARMS}
+        # this bench CREATES org databases, so like every creator it makes
+        # orgs/ first: since slice D (f2007a8) _db_path names it without a mkdir
+        store._orgs_dir()
         for arm in ARMS:
             conn = store._open_conn(store._db_path(self.slugs[arm]), create=True)
             with contextlib.closing(conn):

@@ -524,8 +524,11 @@ class ContactFacets(unittest.TestCase):
                     self.assertEqual((j["backend"], j["http_status"], j["census"]["statements"]), ("json", 200, 0))
                     self.assertIn("file_read:data:org-db:own", j["contact_classes"])
                     mut = j["audit"].get("fs_mutation", {})
-                    self.assertTrue(any(k.startswith("os.mkdir:data:other@orgtree.store:_orgs_dir") for k in mut))
                     renamed = "os.rename:data:org-db:own@orgtree.store:_save_json" in mut
+                    # slice D (f2007a8): loading a JSON org makes no directory; only
+                    # a creator (_save_json, via _orgs_dir) makes a missing orgs/
+                    self.assertEqual(any(k.startswith("os.mkdir:data:other@orgtree.store:_orgs_dir")
+                                         for k in mut), renamed, mut)
                     self.assertEqual(renamed, contract == "mail.user-inbox-read")
                     self.assertEqual("file_write:data:org-db:temp" in j["contact_classes"], renamed)
         # warm reads the row tables too since PG-3d (1b93b0d) put the read mark on
