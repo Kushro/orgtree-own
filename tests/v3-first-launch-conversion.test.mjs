@@ -2,7 +2,7 @@
 // CONVERSION (user decision 38, 2026-09-28: the first v3 start converts a
 // 2.1.12 SQLite data folder to PostgreSQL automatically).
 //
-// The engine side (engine/pg_process.py, engine/service_host.py) belongs to
+// The engine side (pg_process.py and service_host.py under engine) belongs to
 // p03-ws1-pgservice. The contract agreed with it, and pinned here:
 //   * progress phases prefixed `database-convert`, on the ordinary
 //     startup-progress protocol;
