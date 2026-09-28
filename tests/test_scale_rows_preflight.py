@@ -5,7 +5,7 @@ import unittest
 
 import import_provenance  # noqa: F401
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/scale"))
-from rows_preflight import verdict
+from rows_preflight import bytes_verdict, verdict
 
 
 def arm(read, message, tokens=1, harness=5):
@@ -46,6 +46,28 @@ class Verdict(unittest.TestCase):
             verdict({10: arm(0, 90), 100: arm(0, 90)})
         with self.assertRaises(ValueError):
             verdict({10: {"message": {"rows": 4}}, 100: {"message": {"rows": 4}}})
+
+
+def sized(**mb):
+    calls = ("work_items", "chat", "notifications", "org_list", "message")
+    return {c: {"rows": 10, "value_bytes": int(mb.get(c, 1) * 1e6)} for c in calls}
+
+
+class BytesVerdict(unittest.TestCase):
+    def test_flat_rows_but_growing_bytes_fails(self):
+        # node_chat before 1ecc1a9 in a steered-log-heavy seed: rows flat, bytes grow.
+        passed, ratios = bytes_verdict({10: sized(chat=1.0), 100: sized(chat=3.5)})
+        self.assertFalse(passed)
+        self.assertAlmostEqual(ratios["chat"], 3.5)
+
+    def test_moderate_byte_growth_passes(self):
+        # message on 74291b4: 0.40 -> 0.75 MB (1.88x), fixed in rows.
+        passed, _ = bytes_verdict({10: sized(message=0.40), 100: sized(message=0.75)})
+        self.assertTrue(passed)
+
+    def test_zero_bytes_refuses_a_verdict(self):
+        with self.assertRaises(ValueError):
+            bytes_verdict({10: sized(org_list=0), 100: sized()})
 
 
 if __name__ == "__main__":

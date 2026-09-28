@@ -23,6 +23,9 @@ import httpx
 
 SIZES = (10, 100)
 THRESHOLD = 2.0
+#: Value bytes may grow when rows do not (a whole-org read hidden behind a
+#: large per-node log, e.g. node_chat), so bytes are judged too, more loosely.
+BYTES_THRESHOLD = 3.0
 JUDGED = ("work_items", "chat", "notifications", "org_list", "message")
 KIND = "rows-preflight"
 
@@ -35,6 +38,17 @@ def verdict(results, threshold=THRESHOLD):
         if call not in small or call not in large or not small[call]["rows"]:
             raise ValueError(f"rows preflight did no measurable work for {call}")
         ratios[call] = large[call]["rows"] / small[call]["rows"]
+    return all(r <= threshold for r in ratios.values()), ratios
+
+
+def bytes_verdict(results, threshold=BYTES_THRESHOLD):
+    """(passed, per-call value-byte ratios N=100/N=10); refuses zero-byte calls."""
+    small, large = (results[n] for n in SIZES)
+    ratios = {}
+    for call in JUDGED:
+        if not small[call].get("value_bytes"):
+            raise ValueError(f"rows preflight read no value bytes for {call}")
+        ratios[call] = large[call]["value_bytes"] / small[call]["value_bytes"]
     return all(r <= threshold for r in ratios.values()), ratios
 
 
@@ -119,15 +133,26 @@ def arm(ctrl, admin, n):
 def preflight(ctrl, admin):
     results = {n: arm(ctrl, admin, n) for n in SIZES}
     passed, ratios = verdict(results)
+    bytes_passed, byte_ratios = bytes_verdict(results)
     fell = fallbacks(results)
-    passed = passed and not fell
-    summary = dict(passed=passed, threshold=THRESHOLD, ratios=ratios, sizes=SIZES,
+    passed = passed and bytes_passed and not fell
+    # Absolute N=100 size beside each ratio: a flat but huge read stays visible.
+    judged = {call: dict(rows_ratio=round(ratios[call], 2), bytes_ratio=round(byte_ratios[call], 2),
+                         rows_n100=results[SIZES[1]][call]["rows"],
+                         mb_n100=round(results[SIZES[1]][call]["value_bytes"] / 1e6, 2)) for call in JUDGED}
+    print("rows preflight (N=100 vs N=10):")
+    for call, row in judged.items():
+        print(f"  {call:14} rows x{row['rows_ratio']:<5} ({row['rows_n100']} rows)  "
+              f"bytes x{row['bytes_ratio']:<5} ({row['mb_n100']} MB)")
+    summary = dict(passed=passed, threshold=THRESHOLD, bytes_threshold=BYTES_THRESHOLD, ratios=ratios,
+                   byte_ratios=byte_ratios, judged=judged, sizes=SIZES,
                    lazy_rows=os.environ.get("ORGTREE_LAZY_ROWS", ""), lazy_fallbacks=fell,
                    rows={n: {k: v["rows"] for k, v in r.items()} for n, r in results.items()},
                    value_bytes={n: {k: v["value_bytes"] for k, v in r.items()} for n, r in results.items()})
     from baseline import write
     write(ctrl.root / "receipts" / "rows-preflight.json", summary)
     if not passed:
-        raise RuntimeError(f"rows preflight: per-request rows grow with N (N=100/N=10 {ratios}) "
+        raise RuntimeError(f"rows preflight: per-request reads grow with N (N=100/N=10: {judged}; "
+                           f"rows limit x{THRESHOLD}, bytes limit x{BYTES_THRESHOLD}) "
                            f"or judged calls fell back to whole reads ({fell})")
     return summary
