@@ -497,7 +497,7 @@ def org_killswitch(slug: str) -> dict[str, Any] | None:
         return None
 
 
-def blocked(slug: str, nid: str) -> str | None:
+def blocked(slug: str, nid: str, projection: dict | None = None) -> str | None:
     """The unified non-runnable cause: 'halt' when the agent itself carries
     the durable halt, 'killswitch' when its org's latch holds. One predicate,
     asked by every gate in this module, so the org latch covers exactly the
@@ -511,9 +511,13 @@ def blocked(slug: str, nid: str) -> str | None:
     # never extended to the action anyway. What the lock DID do under swarm
     # load was convoy: a snapshot rebuild that fell back to a full parse ran
     # inside it and stalled every write for tens of seconds.
+    # `projection`: a `read_runtime_node(slug, nid, ("killswitch",))` result
+    # the caller already holds from this same request (agent_call's identity
+    # check), so the pre-gate costs no second read.
     try:
-        projection = (store.read_runtime_node(slug, nid, ("killswitch",))
-                      if store.STORE_BACKEND == "postgres" else None)
+        if projection is None:
+            projection = (store.read_runtime_node(slug, nid, ("killswitch",))
+                          if store.STORE_BACKEND == "postgres" else None)
         if projection is None:
             org = store.cached_org(slug)
             n, latch = org.nodes.get(nid), org.d.get("killswitch")

@@ -12239,8 +12239,13 @@ async def _agent_call_route(body: AgentCall, request: Request) -> dict[str, Any]
     return await run_in_threadpool(agent_call, body, request)
 
 
-def _agent_identity(body: AgentCall, request: Request, *, durable: bool = False) -> dict[str, Any]:
-    """Authenticate before creating a managed operation, then again at execution."""
+def _agent_identity(body: AgentCall, request: Request, *, durable: bool = False,
+                    gate: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Authenticate before creating a managed operation, then again at execution.
+
+    `gate`, when given, receives the runtime projection this check read
+    (the caller's node row and the killswitch), so the halt pre-gate that
+    follows in the same call reuses it instead of reading both again."""
     # a sandboxed container's secret pins it to its OWN org — a compromised
     # sandbox cannot act as another org's agents
     identity = getattr(request.state, "agent_identity", None)
@@ -12259,9 +12264,11 @@ def _agent_identity(body: AgentCall, request: Request, *, durable: bool = False)
     # the eager UI cache. Dispatch still repeats seat, halt and killswitch
     # checks on its locked rows; no authorization relies on this preflight.
     try:
-        projection = (store.read_runtime_node(body.org, body.node)
+        projection = (store.read_runtime_node(body.org, body.node, ("killswitch",))
                       if store.STORE_BACKEND == "postgres" else None)
         caller = projection.get("node") if projection is not None else None
+        if gate is not None and caller is not None:
+            gate["projection"] = projection
         if caller is None or any(key not in caller for key in ("state", "generation", "seat_id")):
             org = (store.load_runtime_org(body.org) if store.STORE_BACKEND == "postgres"
                    else store.cached_org(body.org))
@@ -12752,12 +12759,18 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
         if not body.args.get('delivery_id'):
             raise HTTPException(422, 'retryable file delivery requires delivery_id')
         body = body.model_copy(update={'tool': 'orgtree_send_file'})
-    _agent_identity(body, request, durable=body.tool == 'orgtree_send_file')
+    gate: dict[str, Any] = {}
+    _agent_identity(body, request, durable=body.tool == 'orgtree_send_file', gate=gate)
+    seat = (body.org, body.node)
     # ⚠ BEFORE EVERY GATE BELOW, because unwrapping only substitutes the call
     # this request was always making: after it, `body.tool` is the real verb
     # and every authority, capability and policy check below sees THAT.
     body = _op_unwrap(body)
-    _blocked = supervisor.halt.blocked(body.org, body.node)
+    # the identity check's read, not a second one: both are pre-gates, and
+    # the door re-checks halt and killswitch on its locked rows
+    _blocked = supervisor.halt.blocked(
+        body.org, body.node,
+        projection=gate.get("projection") if (body.org, body.node) == seat else None)
     if _blocked == "halt":
         raise HTTPException(409, "agent is halted — tools cannot execute until unhalt")
     if _blocked == "killswitch":
