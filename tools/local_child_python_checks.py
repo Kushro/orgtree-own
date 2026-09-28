@@ -1,6 +1,6 @@
 """Owned focused base/tip runs and mutants for tests/child_python.py
 (child-python-tests-import-the-main-checkout-s-or).
-Usage: local_child_python_checks.py <base sha> <tag> [--skip-base]
+Usage: local_child_python_checks.py <base sha> <tag> <phase: tip|base|mutants>
 
 tip      tests/test_child_python.py + every migrated module
 base     the migrated modules as they are at <base>
@@ -20,8 +20,9 @@ os.environ['ORGTREE_DATA'] = 'C:/Temp/child-python-checks-guard'
 from assert_repo_import import assert_repo_import
 provenance = assert_repo_import(repo)
 BASE = sys.argv[1]
-out = Path('C:/Temp/child-python-checks-' + sys.argv[2])
-out.mkdir()
+PHASE = sys.argv[3]
+out = Path('C:/Temp/child-python-checks-' + sys.argv[2]) / PHASE
+out.mkdir(parents=True)
 helper = repo / 'tests/child_python.py'
 saved_helper = helper.read_bytes()
 NEW = ['tests/test_child_python.py']
@@ -59,13 +60,16 @@ def mutate(old, new):
 
 
 try:
-    run('tip', NEW + MIGRATED)
-    if '--skip-base' not in sys.argv:
+    if PHASE == 'tip':
+        run('tip', NEW + MIGRATED)
+    if PHASE == 'base':
         for f in BASE_FILES:
             (repo / f).write_bytes(subprocess.check_output(['git', 'show', f'{BASE}:{f}'], cwd=repo))
         run('base', MIGRATED)
         for f, data in saved.items():
             (repo / f).write_bytes(data)
+    if PHASE != 'mutants':
+        raise SystemExit(0)
     mutate('            _o._exit(_code)\n', '            pass\n')
     _, logs = run('mut-no-check', NEW)
     assert 'FAIL: test_a_foreign' in logs, 'mut-no-check survived'
