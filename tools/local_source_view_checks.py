@@ -63,7 +63,10 @@ def run(label, modules):
     logs = '\n'.join(m['stderr'] for m in data['modules'])
     (out / (label + '.log')).write_text(cp.stdout + cp.stderr + '\n' + logs, encoding='utf-8')
     for m in data['modules']:
-        assert m['import_provenance'], m
+        # a module that timed out has no provenance record: report it, do not
+        # abandon the other modules (a run with it missing is still no verdict
+        # for that module)
+        assert m['import_provenance'] or m.get('phase') == 'execution_failure', m
         print(label, m.get('module') or m.get('path'), m['tests_ran'], m['exit_code'], flush=True)
     return logs
 
