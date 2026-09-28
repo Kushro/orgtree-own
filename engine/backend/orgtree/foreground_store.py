@@ -147,14 +147,14 @@ def _wanted(values) -> tuple[str, ...]:
     return values
 
 
-# A stored node that jsonb could not round-trip exactly: exponent numbers
-# (1e+16 reads back as an int), negative zero, NaN/Infinity (json.dumps
-# allows them, jsonb refuses them) and \u0000 or surrogate escapes (jsonb
-# refuses). Such a node is served as stored, untrimmed. The patterns match
-# json.dumps output (numbers follow : , or [; escapes are lowercase); a false
-# positive inside a string only costs that node's trim.
-_NOT_JSONB_EXACT = (r'[:,\[]-?[0-9]+(\.[0-9]+)?[eE]|[:,\[]-0\.0[,}\]]|[:,\[]-?(NaN|Infinity)'
-                    r'|\\u0000|\\ud[89ab][0-9a-f]{2}(?!\\ud[c-f])|(?<!\\ud[89ab][0-9a-f]{2})\\ud[c-f]')
+# Every stored node already parses as jsonb: the node_index trigger (migration
+# 0004) casts each written val, so NaN, \u0000 and lone surrogates cannot be
+# stored. What jsonb still does not round-trip exactly is two number forms:
+# exponents (1e+16 would read back as an int) and negative zero. A node holding
+# either is served as stored, untrimmed. The pattern matches json.dumps output
+# (a number follows : , or [); a false positive inside a string only costs
+# that node's trim.
+_NOT_JSONB_EXACT = r'[:,\[]-?[0-9]+(\.[0-9]+)?[eE]|[:,\[]-0\.0[,}\]]'
 
 # Only the newest TREE_TURNS entries of the `turns` ring are read. Everything
 # else in the node is returned unchanged; key order may differ, which no

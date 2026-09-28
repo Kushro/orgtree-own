@@ -50,8 +50,8 @@ class ForegroundTurnsPG(unittest.TestCase):
         org.nodes['boss']['turns'] = turns(40, note='x' * 200)
         org.nodes['busy']['turns'] = turns(300)
         org.nodes['fresh']['turns'] = turns(3)
-        # Values jsonb cannot round-trip exactly; this node must be served as stored.
-        org.nodes['odd']['turns'] = turns(20, big=1e16, neg=-0.0, tiny=1e-7, nul='a\u0000b')
+        # Numbers jsonb cannot round-trip exactly; this node must be served as stored.
+        org.nodes['odd']['turns'] = turns(20, big=1e16, neg=-0.0, tiny=1e-7)
         org.work_create(ledger.USER, 'Visible work', objective='Keep counts exact.', owner='boss')
         store.save_org(ledger.Org(copy.deepcopy(org.d)))
         saved = store.load_org(self.slug)
@@ -75,7 +75,7 @@ class ForegroundTurnsPG(unittest.TestCase):
         self.assertEqual(node['turns'], self.stored['odd']['turns'])
         self.assertIsInstance(node['turns'][0]['big'], float)
         self.assertEqual(str(node['turns'][0]['neg']), '-0.0')
-        self.assertEqual(node['turns'][0]['nul'], 'a\u0000b')
+        self.assertEqual(str(node['turns'][0]['tiny']), '1e-07')
 
     def test_foreground_payload_is_byte_identical_to_the_whole_body_read(self):
         url = f'/api/orgs/{self.slug}/foreground-tree'
