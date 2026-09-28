@@ -166,6 +166,38 @@ class WorkRefsSnapshot(unittest.TestCase):
         self.assertEqual({w['slug']: w['rev'] for w in got}, {'one': 22, 'two': 1})
         self.assertEqual(self.raced('whole'), 1)
 
+    # -- a discarded attempt's rows are dropped (pg-workitems' review, P1/P2) --
+    @staticmethod
+    def forget(slug):
+        """Evict one item from the warm metadata cache (its body is fetched)."""
+        key = workrows.PREFIX + slug
+        for ident in [i for i in store._WORK_ITEM_META if i[-4] == key]:
+            del store._WORK_ITEM_META[ident]
+
+    def test_step2_drops_a_ref_bound_before_the_race(self):
+        # one, two warm (bound as refs at once); three uncached. Before the
+        # body fetch: archive two, update three. The stale ref to two must
+        # not survive into the re-read.
+        self.create('three')
+        self.forget('three')
+        p, fired = self.before(_is_body_fetch,
+                               lambda: (self.archive('two'), self.update('three', 5)))
+        with p:
+            got = self.loaded()
+        self.assertEqual(len(fired), 1)
+        self.assertEqual({w['slug']: w['rev'] for w in got}, {'one': 1, 'three': 5})
+        self.assertEqual(self.raced('relisted'), 1)
+
+    def test_the_whole_read_drops_a_ref_bound_in_step2(self):
+        self.forget('one')                          # two stays warm
+        p, fired = self.before(_is_body_fetch, lambda: self.update('one', 31),
+                               lambda: (self.archive('two'), self.update('one', 32)))
+        with p:
+            got = self.loaded()
+        self.assertEqual(len(fired), 2)
+        self.assertEqual({w['slug']: w['rev'] for w in got}, {'one': 32})
+        self.assertEqual(self.raced('whole'), 1)
+
     # -- not a race: one statement still disagrees ----------------------------
     def test_a_missing_item_row_still_raises(self):
         with store._POOL.acquire(self.slug) as conn:
