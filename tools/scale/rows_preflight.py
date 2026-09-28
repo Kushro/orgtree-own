@@ -8,7 +8,8 @@ counters on, sends the same calls, and refuses to continue when a judged call
 reads more than THRESHOLD times the rows at N=100 than at N=10.
 
 Judged (PRODUCT routes only): one ordinary orgtree_message POST (the primer's
-call), the desk chat read and the docket foreground read that ui_hooks polls.
+call) and reads that ui_hooks polls: the desk chat, the docket foreground, the
+desktop notifications (every 5 s in window 0) and the org list.
 Recorded, not judged: the harness routes /scale/tokens, /scale/workload and
 /scale/settlement (serve.py; they load the whole org on purpose), and the
 foreground tree, whose payload covers the visible agents by design.
@@ -22,7 +23,7 @@ import httpx
 
 SIZES = (10, 100)
 THRESHOLD = 2.0
-JUDGED = ("work_items", "chat", "message")
+JUDGED = ("work_items", "chat", "notifications", "org_list", "message")
 KIND = "rows-preflight"
 
 
@@ -55,7 +56,9 @@ def calls(desc):
         base, target = f"/api/orgs/{desc['org']}", sorted(desc["live_agents"])[0]
         for label, url in (("foreground_tree", base + "/foreground-tree"),
                            ("work_items", base + "/work-items-foreground?backlogged=0&archive_limit=0"),
-                           ("chat", f"{base}/nodes/{target}/chat?last=8")):
+                           ("chat", f"{base}/nodes/{target}/chat?last=8"),
+                           ("notifications", "/api/desktop/notifications"),
+                           ("org_list", "/api/orgs")):
             client.get(url).raise_for_status(); labels.append(label)
         actor = parents.get(target) or next(n for n, p in parents.items() if p == target)
         client.post("/api/agent", json=dict(org=desc["org"], node=actor, tool="orgtree_message",

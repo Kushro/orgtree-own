@@ -10,7 +10,8 @@ from rows_preflight import verdict
 
 def arm(read, message, tokens=1, harness=5):
     return {"tokens": {"rows": tokens}, "settlement": {"rows": harness}, "work_items": {"rows": read},
-            "chat": {"rows": read}, "message": {"rows": message}}
+            "chat": {"rows": read}, "notifications": {"rows": read}, "org_list": {"rows": read},
+            "message": {"rows": message}}
 
 
 class Verdict(unittest.TestCase):
@@ -28,12 +29,17 @@ class Verdict(unittest.TestCase):
     def test_one_growing_call_is_enough_to_fail(self):
         passed, _ = verdict({10: arm(40, 90), 100: arm(40, 900)})
         self.assertFalse(passed)
+        grown = arm(40, 90)
+        grown["notifications"] = {"rows": 238}
+        passed, ratios = verdict({10: arm(40, 90) | {"notifications": {"rows": 69}}, 100: grown})
+        self.assertFalse(passed)
+        self.assertGreater(ratios["notifications"], 2)
 
     def test_harness_and_per_agent_calls_are_not_judged(self):
         passed, ratios = verdict({10: arm(40, 90, tokens=10, harness=97),
                                   100: arm(40, 90, tokens=1000, harness=359)})
         self.assertTrue(passed)
-        self.assertEqual(set(ratios), {"work_items", "chat", "message"})
+        self.assertEqual(set(ratios), {"work_items", "chat", "notifications", "org_list", "message"})
 
     def test_no_measured_work_refuses_a_verdict(self):
         with self.assertRaises(ValueError):
