@@ -4474,6 +4474,9 @@ class Org:
         if tier is not None:
             if tier not in self.d["tiers"]:
                 raise LedgerError(f"unknown tier {tier!r}")
+            if tier != n["model"]:
+                # a version belongs to one tier (see switch_model)
+                cast("dict[str, Any]", n.setdefault("scope", {})).pop("model_version", None)
             n["model"] = tier
         if own_bearer and n["parent"] != actor:
             # user ruling: a self-hired bearer is the node's OWN subordinate —

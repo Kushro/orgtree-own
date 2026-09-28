@@ -121,6 +121,19 @@ class Sonnet55Tests(unittest.TestCase):
         org.switch_model(ledger.USER, "op", "sonnet", busy=False)
         self.assertEqual(org.model_for("op"), SONNET_5)
 
+    def test_rehire_onto_another_tier_resets_the_version(self):
+        org = self.org()
+        org.hire(ledger.USER, None, "opus", 10, "op")
+        org.set_scope(ledger.USER, "op", model_version="5")
+        org.retire(ledger.USER, "op")
+        org.rehire(ledger.USER, "op", tier="sonnet")
+        self.assertEqual(org.model_for("op"), SONNET_5_5)
+        # a rehire on the same tier keeps the pin
+        org.set_scope(ledger.USER, "op", model_version="5")
+        org.retire(ledger.USER, "op")
+        org.rehire(ledger.USER, "op", tier="sonnet")
+        self.assertEqual(org.model_for("op"), SONNET_5)
+
     def test_argv_carries_the_exact_id_on_any_cli(self):
         org = self.org()
         org.hire(ledger.USER, None, "sonnet", 10, "old")
