@@ -596,18 +596,20 @@ class AttemptRecordTests(unittest.TestCase):
         hire, retire or staff would be unattributed. This call finishes
         inside the wait, so all of its contacts belong to this record.
 
-        A watchdog `remove` of an unknown id: it stays managed, loads the
-        org on the worker and is refused there. Since d5d5fd6 the watchdog
-        `list` this used to call takes the ordinary path (no worker)."""
+        The call is a watchdog `remove`, which stays managed: since d5d5fd6
+        the watchdog `list` this used to call takes the ordinary path, with
+        no worker. The dog is seeded with the hire (a process dog; nothing
+        runs it here)."""
         from orgtree import ledger
         slug = 'contacts-managed-org'
         _make_org(slug)
         with store.write_org(slug) as org:
             org.hire(ledger.USER, None, 'haiku', 0, 'probe')
+            dog = org.watchdog_create('probe', 'census-probe', 'process', 'port:1')['id']
             store.save_org(org)
         got = self.client.post('/api/agent', headers=OPERATOR, json={
             'org': slug, 'node': 'probe', 'tool': 'orgtree_watchdog',
-            'args': {'action': 'remove', 'id': 'wd-no-such-dog'}})
+            'args': {'action': 'remove', 'id': dog}})
         self.assertEqual(got.status_code, 200, got.text)
         self.assertNotEqual(got.json().get('state'), 'running',
                             'the call yielded, so this is not the joined case')
