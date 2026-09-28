@@ -1457,14 +1457,30 @@ class OperationContacts(unittest.TestCase):
         # fence-off S5: the reads no longer take DOC_LOCK, so they are no
         # longer served the write-through resident (0 statements while the
         # lock was held). They read the SHARED snapshot instead (org_seq-
-        # guarded): after a save it refreshes, at most what a cold read
-        # costs, and only from the org's own store; it never writes.
+        # guarded): after a save it refreshes, only from the org's own store;
+        # it never writes.
+        # ⚠ FIXED BOUNDS, not "warm <= cold" (lead ruling 2026-09-28 on
+        # fix-the-21-new-python-backend-test-failures-befo): a4b4167 (S-A,
+        # _load_probes) made a COLD load 17 statements cheaper on purpose (26
+        # -> 9 for a preview) while the warm snapshot refresh stayed where it
+        # was (15/21 -> 16/22), so the relative claim lost its basis. Each
+        # bound is the count measured at 9c52e1d (the two previews' warm counts
+        # in two identical runs); either
+        # path growing past it fails. The refresh costing more than a fresh
+        # load is tracked as its own perf item.
+        bounds = {  # variant: (cold, warm)
+            "quick-staff.options": (9, 7), "quick-staff.options-refresh": (0, 0),
+            "quick-staff.preview": (9, 7), "quick-staff.preview:under-assignee": (9, 16),
+            "quick-staff.preview:top-level": (9, 22), "quick-staff.select:replay": (8, 0),
+            "quick-staff.select:under-assignee:replay": (8, 0),
+            "quick-staff.select:top-level:replay": (8, 0)}
+        self.assertEqual(set(bounds), set(reads))
         for variant in reads:
             with self.subTest(variant=variant):
                 warm = self.rows(variant=variant, condition="warm")[0]
                 cold = self.rows(variant=variant, condition="cold")[0]
-                self.assertLessEqual(warm["census"]["statements"],
-                                     cold["census"]["statements"])
+                self.assertLessEqual(cold["census"]["statements"], bounds[variant][0], "cold")
+                self.assertLessEqual(warm["census"]["statements"], bounds[variant][1], "warm")
                 self.assertLessEqual(len(warm["harness"]["stores"]), 1)
                 self.assertEqual(warm["harness"]["writes"], 0)
         for variant in ("quick-staff.options", "quick-staff.preview"):
