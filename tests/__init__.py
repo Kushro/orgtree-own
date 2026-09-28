@@ -23,3 +23,5 @@ sys.modules.setdefault("import_provenance", import_provenance)
 from . import hub_isolation  # noqa: E402
 
 sys.modules.setdefault("hub_isolation", hub_isolation)
+from . import child_python  # noqa: E402
+sys.modules.setdefault("child_python", child_python)

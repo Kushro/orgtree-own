@@ -24,7 +24,11 @@ from tools.migration_harness.formats import LEDGER_DDL, SIDECAR_DDL
 from tools.migration_harness.harness import EnvelopeAdapter, Rehearsal, exclusive
 from tools.migration_harness.legacy import Refused, decode, encode, manifest, plain_tree, read_source
 
+import child_python  # a child Python imports THIS checkout's engine (tests/child_python.py)
+
 REPO = Path(__file__).resolve().parents[1]
+# Children also check where the harness package itself resolves.
+HARNESS_GUARD = child_python.GUARDED + ("tools.migration_harness",)
 IMPORT_STOPS = ("planned", "backup-file", "backed-up", "prepared", "staged", "published", "complete")
 
 
@@ -147,7 +151,8 @@ def checkpoint(actual):
 getattr(Rehearsal(Path(root), checkpoint=checkpoint), action)()
 raise SystemExit(74)
 """
-        run = subprocess.run([sys.executable, "-c", script, str(root), event, action],
+        run = subprocess.run(child_python.argv("-c", script, str(root), event, action,
+                                               checkout=REPO, guarded=HARNESS_GUARD),
                              cwd=REPO, capture_output=True, timeout=30)
         self.assertEqual(run.returncode, 73, run.stderr.decode(errors="replace"))
 
@@ -529,7 +534,8 @@ raise SystemExit(74)
         for scenario, expected in (("ordinary", 0), ("interrupted", 0), ("malformed", 1)):
             with self.subTest(scenario=scenario):
                 env = dict(os.environ, ORGTREE_DATA="intentionally-not-a-fixture")
-                run = subprocess.run([sys.executable, "-m", "tools.migration_harness", "--scenario", scenario],
+                run = subprocess.run(child_python.argv("-m", "tools.migration_harness", "--scenario", scenario,
+                                                       checkout=REPO, guarded=HARNESS_GUARD),
                                      cwd=REPO, env=env, capture_output=True, text=True, timeout=30)
                 self.assertEqual(run.returncode, expected, run.stderr)
                 report = json.loads(run.stdout)

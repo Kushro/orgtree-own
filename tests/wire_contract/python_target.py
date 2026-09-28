@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 
+from .. import child_python
 from .transport import LoopbackTransport, Stdio
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,10 +40,10 @@ def isolated_env(root: Path):
 
 
 def python_command(script):
-    # Embedded runtimes ignore cwd/PYTHONPATH. Pin this checkout explicitly.
-    prelude = "import sys; sys.path[:0] = " + repr(
-        [str(ROOT / "engine" / "backend"), str(ROOT), str(ROOT / "tests")]) + "; "
-    return [sys.executable, "-I", "-B", "-c", prelude + script]
+    # Embedded runtimes ignore cwd/PYTHONPATH: pin this checkout and refuse a
+    # child whose engine resolves anywhere else (tests/child_python.py).
+    return child_python.argv("-c", script, checkout=ROOT, flags=("-I", "-B"),
+                             extra_roots=(ROOT / "tests",))
 
 
 CONTROLS = {"live_identity_bypass", "receipt_admission_bypass", "reversed_gallery",

@@ -13,6 +13,7 @@ import urllib.request
 import urllib.error
 
 import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
+import child_python  # a child Python imports THIS checkout's engine (tests/child_python.py)
 import hub_isolation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -402,16 +403,15 @@ class EngineHTTPTests(unittest.TestCase):
         env.update(ORGTREE_PORT=str(self.port), ORGTREE_AGENT_TOKEN=self.token,
                    ORGTREE_DATA=str(Path(self.tmp.name) / 'data'),
                    HOME=str(Path(self.tmp.name) / 'home'),
-                   USERPROFILE=str(Path(self.tmp.name) / 'home'),
-                   PYTHONPATH=str(ROOT / 'engine' / 'backend'))
+                   USERPROFILE=str(Path(self.tmp.name) / 'home'))
         env.pop('ORGTREE_BASE', None)
         env.pop('ORGTREE_V2_TOKEN', None)
-        denied = subprocess.run([sys.executable, '-c', 'from orgtree import store'],
+        denied = subprocess.run(child_python.argv('-c', 'from orgtree import store', checkout=ROOT),
                                 env=env, capture_output=True, text=True, timeout=15)
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn('explicit independent', denied.stderr)
         code = "from orgtree.mcptool import _post; import json; print(json.dumps(_post({'org':'auth-fixture','node':'caller','tool':'orgtree_chart','args':{}})))"
-        result = subprocess.run([sys.executable, '-c', code], env=env,
+        result = subprocess.run(child_python.argv('-c', code, checkout=ROOT), env=env,
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         kind, body = json.loads(result.stdout)

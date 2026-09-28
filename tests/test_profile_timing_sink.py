@@ -31,6 +31,7 @@ for key in ('ORGTREE_V1_ROOT', 'ORGTREE_V1_DATA_ROOT', 'ORGTREE_V2_PORT'):
     os.environ.pop(key, None)
 
 import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
+import child_python  # a child Python imports THIS checkout's engine (tests/child_python.py)
 
 from engine.launch import load_app  # noqa: E402  (env must be set first)
 app, *_ = load_app()
@@ -436,7 +437,7 @@ class ProfileTimingSinkDisabledByDefaultTests(unittest.TestCase):
             env = {**os.environ, 'ORGTREE_DATA': str(data_dir), 'HOME': str(home_dir),
                    'USERPROFILE': str(home_dir), 'ORGTREE_V2_TOKEN': 'operator'}
             env.pop('ORGTREE_PROFILE_TIMING', None)
-            result = subprocess.run([sys.executable, '-c', script], env=env,
+            result = subprocess.run(child_python.argv('-c', script), env=env,
                                     capture_output=True, text=True, timeout=60,
                                     cwd=str(Path(__file__).resolve().parent.parent))
             self.assertEqual(result.returncode, 0, result.stderr)

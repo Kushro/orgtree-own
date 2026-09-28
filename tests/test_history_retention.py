@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
+import child_python  # a child Python imports THIS checkout's engine (tests/child_python.py)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -132,9 +133,9 @@ class HistoryRetentionTests(unittest.TestCase):
         data, home = root / 'data', root / 'home'
         data.mkdir(exist_ok=True); home.mkdir(exist_ok=True)
         env = dict(os.environ, ORGTREE_DATA=str(data), HOME=str(home), USERPROFILE=str(home),
-                   ORGTREE_STORE=backend, PYTHONPATH=str(REPO / 'engine' / 'backend'),
+                   ORGTREE_STORE=backend,
                    PYTHONIOENCODING='utf-8', ORGTREE_V2='1')
-        result = subprocess.run([sys.executable, '-c', code], cwd=REPO, env=env,
+        result = subprocess.run(child_python.argv('-c', code, checkout=REPO), cwd=REPO, env=env,
                                 capture_output=True, text=True, encoding='utf-8', timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
