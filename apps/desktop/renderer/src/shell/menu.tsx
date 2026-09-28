@@ -10,9 +10,10 @@
 //
 // ⚠ IT IS PRESENT IN ALL FOUR VIEWS. Homepage and Create have no organization
 // and therefore no header action buttons, so for those two windows this menu
-// is the ONLY way to reach Usage and App settings. That is why Usage is an
-// entry here as well as a direct button in an organization window: dropping it
-// from the non-org views would silently remove the usage snapshots the shell
+// is the ONLY way to reach Usage and App settings. Usage is app-wide, so this
+// entry is the only way to open it in EVERY view, organization windows
+// included: the org header's Usage button was removed (user 2026-09-28).
+// Dropping it here would leave no way to reach the usage snapshots the shell
 // is required to preserve.
 //
 // A DEDICATED DROPDOWN RATHER THAN `useContextMenu`. The canonical object menu
