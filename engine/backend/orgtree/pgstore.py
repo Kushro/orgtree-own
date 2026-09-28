@@ -538,13 +538,48 @@ def close_idle() -> None:
         _close_quietly(raw)
 
 
+#: path -> ((file id, size, mtime_ns), org_id) of the marker as last read.
+#: Every connection checkout reads its org's marker (N1000 profile: 11.9 CPU-s
+#: of open + read + JSON parse). A stat that still matches the identity
+#: of the file we read answers from here. A stat that does not match, or
+#: a file that is gone, reads again or answers None, so the answer always
+#: follows the file:
+#:   - the file is deleted or moved to the trash (delete_org): None;
+#:   - the file is replaced (_write_marker, a restore, another org's marker
+#:     moved over it): a new file id, so it is read again;
+#:   - the file is rewritten in place: a new size or mtime, so it is read again.
+#: The one case this cannot see is a same-size in-place rewrite within one
+#: mtime tick of the read it replaces. Nothing in the engine writes a marker
+#: in place (_write_marker always replaces the file).
+#: Plain dict: CPython makes get/set/pop atomic. A race can only cache a
+#: stale identity, and a stale identity just forces a re-read.
+_marker_cache: dict[str, tuple[tuple[int, int, int], int]] = {}
+
+
+def _marker_sig(st: os.stat_result) -> tuple[int, int, int]:
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def read_marker(path: str) -> int | None:
     try:
+        sig = _marker_sig(os.stat(path))
+    except FileNotFoundError:
+        _marker_cache.pop(path, None)
+        return None
+    hit = _marker_cache.get(path)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    try:
         with open(path, "rb") as f:
+            # the identity of the very file whose bytes we read
+            sig = _marker_sig(os.fstat(f.fileno()))
             data = json.loads(f.read().decode("utf-8"))
     except FileNotFoundError:
+        _marker_cache.pop(path, None)
         return None
-    return int(data["org_id"])
+    org_id = int(data["org_id"])
+    _marker_cache[path] = (sig, org_id)
+    return org_id
 
 
 def _write_marker(path: str, slug: str, org_id: int) -> None:
@@ -554,6 +589,7 @@ def _write_marker(path: str, slug: str, org_id: int) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+    _marker_cache.pop(path, None)      # a new file id anyway; belt and braces
 
 
 #: per-slug in-process create locks (review N1). The advisory lock in
