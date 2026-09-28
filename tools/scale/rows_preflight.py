@@ -152,7 +152,8 @@ def arm(ctrl, admin, n, items=ITEMS[0]):
         server = ctrl.spawn([sys.executable, "-I", "-B", str(REPO / "tools/scale/serve.py"),
             "--root", str(root), "--env", "ORGTREE_SCALE_SIMULATED_PROVIDER=1",
             "--env", "ORGTREE_SCALE_SQL_COUNTS=1",
-            *(a for k in ("ORGTREE_LAZY_ROWS", "ORGTREE_CHAT_RUNTIME_VIEW", "ORGTREE_SCALE_SQL_STATEMENTS")
+            *(a for k in ("ORGTREE_LAZY_ROWS", "ORGTREE_CHAT_RUNTIME_VIEW", "ORGTREE_SCALE_SQL_STATEMENTS",
+                       "ORGTREE_TURN_LOG")
               if k in os.environ
               for a in ("--env", f"{k}={os.environ[k]}"))], name + "-serve")
         try:
@@ -219,7 +220,7 @@ def preflight(ctrl, admin):
     passed, failed_steps = decide({"agents": agents, "items": work})
     summary = dict(passed=passed, failed_steps=failed_steps, threshold=THRESHOLD,
                    bytes_threshold=BYTES_THRESHOLD,
-                   sizes=SIZES, items=ITEMS, lazy_rows=os.environ.get("ORGTREE_LAZY_ROWS", ""),
+                   sizes=SIZES, items=ITEMS, lazy_rows=os.environ.get("ORGTREE_LAZY_ROWS", ""), turn_log=os.environ.get("ORGTREE_TURN_LOG", ""),
                    agents_step=agents, items_step=work,
                    # the agents step's fields at top level, as before
                    ratios=agents["ratios"], byte_ratios=agents["byte_ratios"], judged=agents["judged"],
