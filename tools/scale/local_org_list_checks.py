@@ -70,8 +70,14 @@ try:
     target.write_bytes(saved)
     for label, old, new, expected in (
         ('mut-load-all-active-nodes',
-         "        if settings.get('kiosk'):\n",
-         "        if True:\n",
+         "        if settings.get('kiosk'):\n"
+         "            for nid, ordinal, value in raw.execute(\n"
+         "                    \"SELECT n.id,n.ord,n.val FROM node_index i JOIN nodes n ON n.id=i.id \"\n"
+         "                    \"WHERE i.meta->>'state'<>'archived' AND i.meta->>'parent'='' \"\n",
+         "        if True:\n"
+         "            for nid, ordinal, value in raw.execute(\n"
+         "                    \"SELECT n.id,n.ord,n.val FROM node_index i JOIN nodes n ON n.id=i.id \"\n"
+         "                    \"WHERE i.meta->>'state'<>'archived' \"\n",
          ['test_listing_reads_do_not_grow_with_agents']),
         ('mut-no-top-level-filter',
          "\"WHERE i.meta->>'state'<>'archived' AND i.meta->>'parent'='' \"",
