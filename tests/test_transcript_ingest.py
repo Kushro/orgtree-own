@@ -41,6 +41,10 @@ class CaptureTests(unittest.TestCase):
             for i in range(start,start+count):stream.write(json.dumps({'type':'assistant','message':{'content':str(i)}})+'\n')
     def rows(self):
         return records.tail(source_key(store.load_org(self.org.d['slug']),'agent'),1000)[0]
+    def slice_of(self,records_per_slice):
+        """Patch the byte budget to exactly this many of this file's records."""
+        line=len(self.path.read_bytes().splitlines()[0])+1
+        return patch.object(ingest,'SLICE_BYTES',records_per_slice*line)
     def test_new_session_captured_at_failed_turn_boundary_without_any_view(self):
         def body(*a,**k):
             self.write(0,40)
@@ -66,10 +70,11 @@ class CaptureTests(unittest.TestCase):
         self.write(180,20,'a')
         ingest.capture(self.org.d['slug'],'agent')
         self.assertEqual(len(self.rows()),21)
-        ingest.capture(self.org.d['slug'],'agent',backfill=True)
-        self.assertEqual(len(self.rows()),85)
-        ingest.capture(self.org.d['slug'],'agent',backfill=True)
-        ingest.capture(self.org.d['slug'],'agent',backfill=True)
+        with self.slice_of(64):
+            ingest.capture(self.org.d['slug'],'agent',backfill=True)
+            self.assertEqual(len(self.rows()),85,'one slice imports one byte budget of older records')
+            ingest.capture(self.org.d['slug'],'agent',backfill=True)
+            ingest.capture(self.org.d['slug'],'agent',backfill=True)
         self.path.unlink()
         self.assertEqual(len(self.rows()),200)
         self.assertEqual(len({(r[0],r[1]) for r in self.rows()}),200)
@@ -90,8 +95,84 @@ class CaptureTests(unittest.TestCase):
         self.assertFalse(self.backfill())
     def test_pending_history_keeps_the_node_unsettled(self):
         self.write(0,200)
-        self.assertEqual([self.backfill() for _ in range(5)],[True,True,True,True,False])
+        with self.slice_of(64):
+            self.assertEqual([self.backfill() for _ in range(5)],[True,True,True,True,False])
         self.assertEqual(len(self.rows()),200)
+
+    # ---- cold catch-up: byte-sized slices, one identity mint, active first ----
+    def test_default_slice_imports_a_small_history_in_one_visit(self):
+        self.write(0,200)
+        self.assertEqual([self.backfill(),self.backfill()],[True,False])
+        self.assertEqual(len(self.rows()),200)
+        self.assertEqual(len({(r[0],r[1]) for r in self.rows()}),200)
+
+    def test_one_slice_never_reads_more_than_its_budget_plus_one_record(self):
+        self.write(0,200)
+        seen=[]
+        original=records._insert
+        def counted(conn,source,epoch,rows):
+            rows=list(rows);seen.append(sum(len(line)+1 for _,line in rows))
+            return original(conn,source,epoch,rows)
+        line=len(self.path.read_bytes().splitlines()[0])+1
+        with self.slice_of(10), patch.object(records,'_insert',side_effect=counted):
+            while self.backfill():
+                pass
+        self.assertEqual(len(self.rows()),200)
+        self.assertTrue(seen,'control: slices really inserted rows')
+        self.assertLessEqual(max(seen),10*line+line)
+        self.assertGreaterEqual(len(seen),200//11)
+
+    def test_a_record_larger_than_the_budget_still_makes_progress(self):
+        with self.path.open('w',encoding='utf8') as f:
+            for i in range(3):f.write(json.dumps({'type':'assistant','message':{'content':str(i)+'x'*5000}})+'\n')
+        with patch.object(ingest,'SLICE_BYTES',100):
+            results=[self.backfill() for _ in range(4)]
+        self.assertEqual(len(self.rows()),3)
+        self.assertEqual(results[-1],False)
+
+    def test_unbounded_backfill_does_not_count_lifetime_records(self):
+        import contextlib
+        self.write(0,200)
+        statements=[]
+        original=records.database
+        class Proxy:
+            def __init__(self,conn):self.conn=conn
+            def execute(self,sql,*args):
+                statements.append(sql);return self.conn.execute(sql,*args)
+            def executemany(self,sql,*args):return self.conn.executemany(sql,*args)
+            def __getattr__(self,name):return getattr(self.conn,name)
+        @contextlib.contextmanager
+        def observed():
+            with original() as conn:yield Proxy(conn)
+        with self.slice_of(64), patch.object(records,'database',observed):
+            self.backfill();self.backfill()
+        self.assertTrue(any('transcript_records' in sql for sql in statements),'control: backfill ran')
+        self.assertFalse(any('COUNT(*) FROM transcript_records' in sql for sql in statements))
+        self.assertEqual(len(self.rows()),128)
+
+    def test_unminted_node_is_minted_once_to_the_same_identity(self):
+        from orgtree import orgtx, reply_events
+        slug=self.org.d['slug']
+        org=store.load_org(slug)
+        for key in ('transcript_incarnation','reply_incarnation'):
+            org.node('agent').pop(key,None)
+        store.save_org(org)
+        self.write(0,5)
+        calls=[]
+        original=orgtx.org_tx
+        def counted(*a,**k):
+            calls.append((a,k));return original(*a,**k)
+        with patch.object(orgtx,'org_tx',side_effect=counted):
+            self.assertTrue(self.backfill())
+        after=store.load_org(slug)
+        node=after.node('agent')
+        self.assertEqual(node['transcript_incarnation'],after.d['reply_incarnation']+':'+node['reply_incarnation'],
+                         'minted value must be the identity today\'s routine mints')
+        self.assertEqual(node['transcript_incarnation'],reply_events.incarnation(after,'agent'))
+        self.assertLessEqual(len(calls),2,'one reply-identity and one transcript-identity transaction')
+        self.assertEqual(len(self.rows()),5)
+        self.assertEqual(records.tail(json.dumps([node['transcript_incarnation'],node['session_id'],False]),10)[0],
+                         self.rows(),'records land under the minted identity')
     def test_a_changed_prompt_view_sidecar_unsettles_the_node(self):
         self.write(0,3)
         slug=self.org.d['slug'];sid=self.org.node('agent')['session_id']
@@ -133,6 +214,89 @@ class CaptureTests(unittest.TestCase):
              patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
             ingest._sweep(queue);ingest._sweep(queue)
         self.assertEqual(calls,['a','b','c','a','b','c'])
+
+    def fake_state(self,active,archived=()):
+        """A sweep state whose discovery is stubbed: `active` live keys, and
+        `archived` keys handed to capture as discovered history."""
+        state=ingest._SweepState()
+        state.root=str(store.DATA_ROOT)
+        state.orgs.append('x')
+        for nid in active:state.active[('x',nid)]=state.round
+        queue=list(archived)
+        def discover():
+            out=[('x',n) for n in queue];queue.clear();return out
+        state.discover=discover
+        return state
+
+    def test_history_waits_until_every_active_node_is_settled(self):
+        calls=[];unsettled={'a','b'}
+        def fake(slug,nid,**kw):
+            calls.append(nid)
+            with ingest._lock:
+                if nid in unsettled:ingest._settled.pop((slug,nid),None)
+                else:ingest._remember_settled((slug,nid),((),()))
+            return True
+        state=self.fake_state(['a','b','c'],[f'old{i}' for i in range(20)])
+        with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake), \
+             patch.object(ingest,'ARCHIVED_PER_ACTIVE_ROUND',2):
+            self.assertTrue(ingest._sweep(state))
+            self.assertEqual(calls,['a','b','c','old0','old1'],'only the per-round allowance while active is pending')
+            calls.clear();unsettled.clear()
+            ingest._sweep(state)   # this round settles every active node
+            self.assertEqual(calls[:3],['a','b','c'])
+            self.assertEqual(calls[3:],['old2','old3'])
+            calls.clear()
+            ingest._sweep(state)   # the settled round is judged: history is unrestricted
+        self.assertEqual([n for n in calls if n.startswith('old')],[f'old{i}' for i in range(4,20)])
+
+    def test_backfill_work_in_one_tick_is_time_bounded(self):
+        now=[0.0];calls=[]
+        def fake(slug,nid,**kw):
+            calls.append(nid);now[0]+=0.04
+            with ingest._lock:ingest._settled.pop((slug,nid),None)
+            return True
+        state=self.fake_state([str(i) for i in range(20)])
+        with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
+            self.assertTrue(ingest._sweep(state,clock=lambda:now[0]))
+        self.assertEqual(len(calls),4,'0.15 s budget at 0.04 s per capture')
+        self.assertEqual(len(state.hot),16,'the rest waits for the next tick')
+
+    def test_settled_rechecks_keep_the_old_idle_cadence(self):
+        calls=[]
+        def fake(slug,nid,**kw):
+            calls.append(nid)
+            with ingest._lock:ingest._remember_settled((slug,nid),((),()))
+            return True       # an evicted settled node: real check, still settled
+        state=self.fake_state([str(i) for i in range(30)])
+        with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
+            self.assertFalse(ingest._sweep(state))
+        self.assertEqual(len(calls),ingest.IDLE_CHECKS_PER_TICK)
+
+    def test_active_nodes_are_seeded_before_discovery_reaches_them(self):
+        rows=[(f'hist-{i:03d}','archived') for i in range(40)]+[(f'worker-{i:03d}','live') for i in range(5)]
+        def page(slug,after='',limit=8):
+            tail=[row for row in rows if row[0]>after]
+            return {'rows':tail[:limit],'more':len(tail)>limit}
+        active=[(f'worker-{i:03d}',i) for i in range(5)]
+        pages=[]
+        def active_page(slug,after=None,limit=256):
+            pages.append(after)
+            start=0 if after is None else next(i for i,r in enumerate(active) if (r[1],r[0])==after)+1
+            chunk=active[start:start+2]
+            return {'rows':chunk,'more':start+2<len(active)}
+        captured=[]
+        def fake(slug,nid,**kw):
+            captured.append(nid)
+            with ingest._lock:ingest._remember_settled((slug,nid),((),()))
+            return True
+        state=ingest._SweepState()
+        with patch.object(store,'org_slugs',return_value=['x']), \
+             patch.object(store,'read_transcript_nodes_page',side_effect=page), \
+             patch.object(store,'read_active_transcript_nodes',side_effect=active_page), \
+             patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
+            ingest._sweep(state)
+        self.assertEqual(captured[:5],[f'worker-{i:03d}' for i in range(5)],'active first, before any hist-*')
+        self.assertEqual(len(pages),3,'bounded pages of 2 cover 5 active ids')
 
     def test_partial_line_retry_and_same_size_replacement(self):
         self.write(0,3)

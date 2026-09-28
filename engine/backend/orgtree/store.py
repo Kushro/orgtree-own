@@ -5774,6 +5774,33 @@ def read_transcript_nodes_page(slug: str, after: str = "", limit: int = 8):
     return _bounded_read(slug, body)
 
 
+def read_active_transcript_nodes(slug: str, after: tuple | None = None, limit: int = 256):
+    """Bounded keyset page of NON-archived node ids, for active-first capture.
+
+    PostgreSQL only: it reads the node_index_active partial index, so the
+    cost follows the number of active nodes however much history the org
+    has. None means no such index here (SQLite, legacy blob); the caller
+    keeps its id-order discovery. `after` is the last row's (ord, id)."""
+    if STORE_BACKEND != "postgres":
+        return None
+    cap = max(1, min(int(limit), 256))
+    def body(conn):
+        if conn.execute("SELECT 1 FROM doc WHERE key='nodes'").fetchone():
+            return None
+        if after is None:
+            rows = conn.execute(
+                "SELECT id,ord FROM node_index WHERE meta->>'state'<>'archived' "
+                "ORDER BY ord,id LIMIT ?", (cap + 1,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,ord FROM node_index WHERE meta->>'state'<>'archived' "
+                "AND (ord,id)>(?,?) ORDER BY ord,id LIMIT ?",
+                (int(after[0]), str(after[1]), cap + 1)).fetchall()
+        rows = [(str(row[0]), int(row[1])) for row in rows]
+        return {"rows": rows[:cap], "more": len(rows) > cap}
+    return _bounded_read(slug, body)
+
+
 _transcript_source_cache_lock = threading.Lock()
 _TRANSCRIPT_SOURCE_CACHE_LIMIT = 2048
 _transcript_source_cache: collections.OrderedDict[tuple, tuple[int, dict]] = collections.OrderedDict()

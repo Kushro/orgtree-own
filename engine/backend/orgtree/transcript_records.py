@@ -25,6 +25,9 @@ BLOCK = 65536
 #: the resume anchor — enough to cover any plausible in-place tail rewrite
 #: while costing one bounded read per ingest that has new work
 ANCHOR_BYTES = 4096
+#: A backfill window with no record-count limit: only the byte budget (and the
+#: start of the file) bounds it, so no lifetime COUNT(*) is needed to size it.
+UNBOUNDED = 1 << 50
 _schema_lock = threading.Lock()
 _initialized = set()
 #: serializes every recovery-spool operation (append, replay, truncate) so a
@@ -261,10 +264,18 @@ def _signature(stream, stats):
     return hashlib.sha256(first).hexdigest() if first.endswith(b"\n") else ""
 
 
-def _tail(stream, end, count, stats):
-    """Return complete lines ending before end, newest first, and lower bound."""
+def _tail(stream, end, count, stats, budget=None):
+    """Return complete lines ending before end, newest first, and lower bound.
+
+    `budget`, when given, is a one-element list of bytes still allowed in
+    this transaction. It is spent per returned line and stops the walk once
+    exhausted, but never before the first line, so a record larger than the
+    budget still makes progress."""
     pos, carry, found = end, b"", []
-    while pos and len(found) < count:
+
+    def spent():
+        return budget is not None and budget[0] <= 0 and bool(found)
+    while pos and len(found) < count and not spent():
         start = max(0, pos - BLOCK)
         stream.seek(start)
         part = stream.read(pos - start)
@@ -274,15 +285,19 @@ def _tail(stream, end, count, stats):
         # end is always a complete line boundary.
         if data.endswith(b"\n"):
             stop -= 1
-        while len(found) < count:
+        while len(found) < count and not spent():
             split = data.rfind(b"\n", 0, stop)
             if split < 0:
                 break
             found.append((start + split + 1, data[split + 1:stop]))
+            if budget is not None:
+                budget[0] -= stop - split
             stop = split
         carry, pos = data[:stop], start
-    if not pos and carry and len(found) < count:
+    if not pos and carry and len(found) < count and not spent():
         found.append((0, carry))
+        if budget is not None:
+            budget[0] -= len(carry) + 1
     lower = found[-1][0] if found else end
     return found, lower
 
@@ -407,7 +422,7 @@ def _ingest_needed(source: str, path: str, count: int, stats: dict, before) -> b
                             (source,)).fetchone()
         owned = conn.execute("SELECT 1 FROM transcript_owned WHERE source=?", (source,)).fetchone()
         if owned and meta:
-            return bool(meta[3] and _available(conn, source, before) < count
+            return bool(meta[3] and (count >= UNBOUNDED or _available(conn, source, before) < count)
                         and Path(path).is_file())
         try:
             size = os.path.getsize(path)
@@ -415,7 +430,8 @@ def _ingest_needed(source: str, path: str, count: int, stats: dict, before) -> b
             return False          # no file: the write path would return too
         if not meta:
             return True
-        if size != meta[4] or meta[3] and _available(conn, source, before) < count:
+        if size != meta[4] or meta[3] and (count >= UNBOUNDED
+                                           or _available(conn, source, before) < count):
             return True
         anchor = conn.execute("SELECT upper,digest FROM transcript_anchors WHERE source=?",
                               (source,)).fetchone()
@@ -431,12 +447,16 @@ def _ingest_needed(source: str, path: str, count: int, stats: dict, before) -> b
         return False
 
 
-def ingest(source: str, path: str, count: int, stats: dict, *, before=None):
+def ingest(source: str, path: str, count: int, stats: dict, *, before=None, max_bytes=None):
     """Persist new suffixes and enough older records for this requested window.
 
     Invalid/torn final lines stay outside the committed cursor, so completion
     on the next append is retried. No persisted data is removed on rotation.
+    `max_bytes` bounds the OLDER records one call imports (a backfill slice),
+    so one transaction holds the writer lock for a bounded read; new suffixes
+    are unaffected. `count=UNBOUNDED` skips lifetime record counts.
     """
+    budget = [max_bytes] if max_bytes else None
     _drain_spool()
     if not _ingest_needed(source, path, count, stats, before):
         return
@@ -446,14 +466,15 @@ def ingest(source: str, path: str, count: int, stats: dict, *, before=None):
                             (source,)).fetchone()
         owned = conn.execute("SELECT 1 FROM transcript_owned WHERE source=?", (source,)).fetchone()
         def available():
-            return _available(conn, source, before)
+            # an unbounded window only needs "fewer than count": always true
+            return 0 if count >= UNBOUNDED else _available(conn, source, before)
         if owned and meta:
             # The DB writer owns all new records. The old file is consulted
             # only for older ranges predating the changeover.
             have = available()
             if meta[3] and have < count and Path(path).is_file():
                 with open(path, 'rb') as stream:
-                    rows, lower = _tail(stream, meta[3], count - have, stats)
+                    rows, lower = _tail(stream, meta[3], count - have, stats, budget)
                 _insert(conn, source, meta[1], rows)
                 conn.execute("UPDATE transcript_sources SET lower_byte=? WHERE source=?", (lower, source))
             return
@@ -488,7 +509,7 @@ def ingest(source: str, path: str, count: int, stats: dict, *, before=None):
                 stats["bytes_read"] += len(suffix)
                 last = suffix.rfind(b"\n")
                 upper = max(0, size - len(suffix) + last + 1) if last >= 0 else 0
-                rows, lower = _tail(stream, upper, count, stats)
+                rows, lower = _tail(stream, upper, count, stats, budget)
                 _insert(conn, source, epoch, rows)
             elif size > upper:
                 stream.seek(upper)
@@ -501,8 +522,8 @@ def ingest(source: str, path: str, count: int, stats: dict, *, before=None):
                     _insert(conn, source, epoch, [(offset, line.rstrip(b"\r\n"))])
                     upper = stream.tell()
             have = available()
-            if lower and have < count:
-                rows, lower = _tail(stream, lower, count - have, stats)
+            if lower and have < count and not (budget and budget[0] <= 0):
+                rows, lower = _tail(stream, lower, count - have, stats, budget)
                 _insert(conn, source, epoch, rows)
             conn.execute("INSERT OR REPLACE INTO transcript_sources VALUES (?,?,?,?,?,?)",
                          (source, path, epoch, signature, lower, upper))

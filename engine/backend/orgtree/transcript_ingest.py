@@ -14,6 +14,11 @@ the next slice run as before. Only ingestion backs off: stat checks keep the
 same cadence, so no extra sleep delays a newly appended record. At a stable N,
 idle nodes are visited every ceil(N / 8) one-second sleeps plus sweep work;
 busy nodes still get one-second capture and both turn-boundary captures.
+
+Cold catch-up (cold-transcript-ingest-at-n1000): active nodes are queued
+first from the active index, history waits until every active node settled,
+older records come in byte-bounded slices, and while work is pending the
+worker works WORK_BUDGET_S and pauses PENDING_PAUSE_S instead of a second.
 """
 from __future__ import annotations
 
@@ -30,6 +35,26 @@ _fresh: set[str] = set()
 #: Bounded (slug, nid) -> (settled fingerprint, source keys); durable data is untouched.
 _SETTLED_LIMIT = 512
 _settled: dict[tuple[str, str], tuple] = collections.OrderedDict()
+
+# Cold catch-up pacing (cold-transcript-ingest-at-n1000, profiled 2026-09-28:
+# a first visit costs ~0.1 s, a later slice ~4 ms, and the old fixed 1 s sleep
+# was 83% of catch-up time). The worker shares the engine with requests, so
+# it works at most WORK_BUDGET_S per tick and then yields: PENDING_PAUSE_S
+# while a tick left work unsettled, IDLE_PAUSE_S otherwise, exactly as before.
+WORK_BUDGET_S = 0.15
+PENDING_PAUSE_S = 0.05
+IDLE_PAUSE_S = 1.0
+#: Settled nodes re-checked per tick: the old idle cadence of 8 per tick.
+IDLE_CHECKS_PER_TICK = 8
+#: Older-record bytes one backfill transaction may import per source.
+SLICE_BYTES = 256 * 1024
+#: Active ids read per bounded query when seeding the active queue.
+ACTIVE_PAGE = 256
+#: Archived nodes waiting for capture; more are rediscovered next round.
+ARCHIVED_PENDING_LIMIT = 64
+#: Archived captures allowed per active round while active work is pending,
+#: so a node that can never settle cannot starve history for ever.
+ARCHIVED_PER_ACTIVE_ROUND = 8
 
 
 def _remember_settled(key, value):
@@ -122,6 +147,15 @@ def capture(slug, nid, *, beginning=False, backfill=False):
     node = org.node(nid)
     if not node.get('session_id'):
         return False
+    if not node.get('transcript_incarnation'):
+        # Mint the node's identity ONCE, by the same routine and to the same
+        # value as before, then re-read the committed view. A shared snapshot
+        # is never stamped, so without this every identity lookup below
+        # (source_key, its imported twin, views_source) repeated the org_tx
+        # mint until the snapshot reloaded: about 12 per node where 2 do.
+        records.incarnation(org, nid)
+        org = _source_view(slug, nid)
+        node = org.node(nid)
     path = sup.transcript_path_for_node(org, nid)
     imported = imported_history_path(org, nid) if backfill else None
     vpath = sup._prompt_view_path(slug, node['session_id'])
@@ -155,6 +189,7 @@ def capture(slug, nid, *, beginning=False, backfill=False):
         with _lock:
             fresh = source in _fresh
         count = 1
+        max_bytes = None
         if fresh:
             # Registered before the first provider record: capture the entire
             # new file on discovery, then only suffixes on later passes.
@@ -173,13 +208,13 @@ def capture(slug, nid, *, beginning=False, backfill=False):
                 needs_history = records._ingest_needed(
                     source, str(filename), 1, {'bytes_read': 0}, None)
             if needs_history:
-                with records.database() as conn:
-                    have = conn.execute('SELECT COUNT(*) FROM transcript_records WHERE source=?',
-                                        (source,)).fetchone()[0]
-                count = have + 64
+                # A slice is bounded by BYTES, not by +64 records: a file of
+                # many small records no longer needs one visit per 64 of them,
+                # and one transaction still reads at most SLICE_BYTES of it.
+                count, max_bytes = records.UNBOUNDED, SLICE_BYTES
             else:
                 count = 1
-        records.ingest(source, str(filename), count, {'bytes_read': 0})
+        records.ingest(source, str(filename), count, {'bytes_read': 0}, max_bytes=max_bytes)
         with _lock:
             _fresh.discard(source)
     records.ingest_prompt_views(vsource, vpath)
@@ -216,6 +251,35 @@ class _SweepState:
         self.round = 0
         self.active = collections.OrderedDict()
         self.hot = collections.deque()
+        # Active-first bookkeeping: archived keys wait here (bounded) until
+        # a complete active round finds every active node settled.
+        self.archived = collections.deque()
+        self.filled = False
+        self.round_unsettled = False
+        self.active_settled = False
+        self.archive_allowance = 0
+
+    def seed_active(self, slugs):
+        """Put every active node in the queue at the start of a round, from
+        bounded pages of the active index, so capture never waits for
+        id-order discovery to walk past history. Orgs without that index
+        (SQLite, legacy blobs) keep being found by discovery alone."""
+        from . import store
+        for slug in slugs:
+            after = None
+            try:
+                while True:
+                    page = store.read_active_transcript_nodes(slug, after, ACTIVE_PAGE)
+                    if page is None:
+                        break
+                    for nid, _ in page['rows']:
+                        self.active[(slug, nid)] = self.round
+                    if not page['more'] or not page['rows']:
+                        break
+                    after = (page['rows'][-1][1], page['rows'][-1][0])
+            except Exception:
+                # discovery still covers this org; a failure only loses the head start
+                _log.exception('Active transcript seeding failed for %s; discovery continues', slug)
 
     def discover(self):
         from . import store
@@ -226,6 +290,7 @@ class _SweepState:
         if not self.orgs:
             self.round += 1
             self.orgs.extend(store.org_slugs())
+            self.seed_active(list(self.orgs))
         archived = []
         budget = 8
         while self.orgs and budget:
@@ -273,12 +338,26 @@ class _SweepState:
         return archived
 
 
-def _sweep(state):
+def _is_settled_now(key):
+    with _lock:
+        return key in _settled
+
+
+def _sweep(state, *, clock=time.monotonic):
     """Busy capture, active backfill, then bounded historical reconciliation.
 
-    At most eight historical node rows are discovered per tick. Settled
-    archived sources never enter the active queue, but retain stat/signature
-    checks and re-enter ingestion immediately when their slice finds change.
+    Returns True when this tick left backfill work unsettled, so the caller
+    pauses briefly instead of for a whole second.
+
+    Active first: every active node is queued at round start (seed_active),
+    and archived nodes are captured only after a complete active round found
+    all of them settled, apart from a small per-round allowance so one node
+    that can never settle cannot starve history. Backfill work in one tick is
+    bounded by WORK_BUDGET_S; settled re-checks by IDLE_CHECKS_PER_TICK, the
+    old idle cadence. Busy nodes are captured every tick, as before. At most
+    eight historical node rows are discovered per tick. Settled archived
+    sources never enter the active queue, but retain stat/signature checks
+    and re-enter ingestion when their slice finds change.
     """
     from . import supervisor as sup, transcript_records as records
     records._drain_spool()
@@ -286,15 +365,42 @@ def _sweep(state):
         busy = [key for key, value in sup._state.items() if value.get('busy')]
     for slug, nid in busy:
         capture_safely(slug, nid)
-    archived = state.discover()
-    if not state.hot:
-        state.hot.extend(state.active)
-    for _ in range(min(8, len(state.hot))):
+    for key in state.discover():
+        if len(state.archived) < ARCHIVED_PENDING_LIMIT and key not in state.archived:
+            state.archived.append(key)
+    deadline = clock() + WORK_BUDGET_S
+    pending = False
+    checks = 0
+    refilled = False
+    while clock() < deadline:
+        if not state.hot:
+            if refilled:
+                break
+            # The previous round (if any) is complete: judge it, start another.
+            state.active_settled = state.filled and not state.round_unsettled
+            state.filled, state.round_unsettled, refilled = True, False, True
+            state.archive_allowance = ARCHIVED_PER_ACTIVE_ROUND
+            state.hot.extend(state.active)
+            continue
         key = state.hot.popleft()
-        if key in state.active:
-            capture_safely(*key, backfill=True)
-    for key in archived:
+        if key not in state.active:
+            continue
         capture_safely(*key, backfill=True)
+        if _is_settled_now(key):
+            checks += 1
+            if checks >= IDLE_CHECKS_PER_TICK:
+                break
+        else:
+            state.round_unsettled = pending = True
+    while state.archived and clock() < deadline and (
+            state.active_settled or state.archive_allowance > 0):
+        key = state.archived.popleft()
+        if not state.active_settled:
+            state.archive_allowance -= 1
+        capture_safely(*key, backfill=True)
+        # an unfinished archived node continues when discovery next reaches it
+        pending = pending or not _is_settled_now(key)
+    return pending
 
 
 def start():
@@ -309,10 +415,11 @@ def start():
         queue = _SweepState()
         with records.reuse_database():
             while True:
+                pending = False
                 try:
-                    _sweep(queue)
+                    pending = _sweep(queue)
                 except Exception:
                     _log.exception('Transcript capture sweep failed; retrying')
-                time.sleep(1)
+                time.sleep(PENDING_PAUSE_S if pending else IDLE_PAUSE_S)
 
     threading.Thread(target=run, name='transcript-capture', daemon=True).start()

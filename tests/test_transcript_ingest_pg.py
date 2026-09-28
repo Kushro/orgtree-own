@@ -132,6 +132,37 @@ class PostgresTranscriptCapture(fixture.CaptureTests):
         self.assertEqual(found, sorted(org.nodes))
         self.assertEqual(len(found), len(set(found)))
 
+    def test_active_page_reads_only_live_nodes_in_bounded_pages(self):
+        from orgtree import store
+        slug = self.org.d['slug']
+        org = store.load_org(slug)
+        for i in range(30):
+            node = dict(org.node('agent'))
+            node.update(id=f'hist-{i:03d}', state='archived')
+            org.d['nodes'][node['id']] = node
+        for i in range(7):
+            node = dict(org.node('agent'))
+            node.update(id=f'worker-{i:03d}', state='live')
+            org.d['nodes'][node['id']] = node
+        store.save_org(org)
+        expected = sorted(nid for nid, n in store.load_org(slug).nodes.items()
+                          if n.get('state') != 'archived')
+        self.assertGreaterEqual(len(expected), 8, 'control: live nodes exist beside history')
+        found, pages, after = [], 0, None
+        while True:
+            page = store.read_active_transcript_nodes(slug, after, 3)
+            self.assertIsNotNone(page, 'postgres must answer from node_index')
+            self.assertLessEqual(len(page['rows']), 3)
+            pages += 1
+            found.extend(nid for nid, _ in page['rows'])
+            if not page['more']:
+                break
+            after = (page['rows'][-1][1], page['rows'][-1][0])
+        self.assertEqual(sorted(found), expected)
+        self.assertEqual(len(found), len(set(found)))
+        self.assertFalse(any(n.startswith('hist-') for n in found))
+        self.assertEqual(pages, -(-len(expected) // 3))
+
 
 def tearDownModule():
     if ADMIN:
