@@ -230,6 +230,12 @@ def capture(slug, nid, *, beginning=False, backfill=False):
     return True
 
 
+#: capture_safely's result when capture raised. Truthy, like the True it used
+#: to return, so callers that only test truth are unchanged; the worker uses it
+#: to retry a failing node at the idle cadence rather than as pending work.
+CAPTURE_FAILED = 'failed'
+
+
 def capture_safely(slug, nid, **kwargs):
     try:
         return capture(slug, nid, **kwargs)
@@ -239,7 +245,7 @@ def capture_safely(slug, nid, **kwargs):
         _log.exception('Transcript capture failed for %s/%s; source retained for retry', slug, nid)
         with _lock:
             _settled.pop((slug, nid), None)
-        return True
+        return CAPTURE_FAILED
 
 
 class _SweepState:
@@ -263,6 +269,10 @@ class _SweepState:
         # here the worker is back on the idle cadence, however slow re-checks
         # of evicted settled nodes are. Pruned with `active`, so bounded by it.
         self.settled_seen = set()
+        # Active keys whose last capture raised: retried every visit, but never
+        # counted as pending work, so a node that keeps failing (or a database
+        # outage) leaves the worker on the idle cadence. Pruned with `active`.
+        self.failed = set()
         self.last_busy = None
 
     def seed_active(self, slugs):
@@ -342,6 +352,7 @@ class _SweepState:
             for key in [key for key, seen in self.active.items() if seen != self.round]:
                 del self.active[key]
             self.settled_seen &= self.active.keys()
+            self.failed &= self.active.keys()
         return archived
 
 
@@ -355,9 +366,13 @@ def _sweep(state, *, clock=time.monotonic):
 
     Returns True while catch-up work remains, so the caller pauses briefly
     instead of for a whole second: this tick caught up an active node never
-    seen settled, left one unsettled, or active nodes never seen settled are
-    still queued. An archived node left unsettled also counts. Once every
-    active node has been seen settled, ticks return False (idle cadence).
+    seen settled, left one unsettled, or active nodes never seen settled (and
+    not failing) are still queued. An archived node left unsettled also
+    counts. A capture that RAISED is never pending work: it is retried on
+    every visit but counts toward IDLE_CHECKS_PER_TICK like a settled
+    re-check, so a failing node or a database outage keeps the idle cadence
+    and at most that many failures per tick. Once every active node has been
+    seen settled, ticks return False (idle cadence).
 
     Active first: every active node is queued at round start (seed_active),
     and archived nodes are captured only after a complete active round found
@@ -402,7 +417,16 @@ def _sweep(state, *, clock=time.monotonic):
         if key not in state.active:
             continue
         catching_up = key not in state.settled_seen
-        capture_safely(*key, backfill=True)
+        result = capture_safely(*key, backfill=True)
+        if result is CAPTURE_FAILED:
+            # retried next visit at the idle cadence; it still blocks history
+            state.failed.add(key)
+            state.round_unsettled = True
+            checks += 1
+            if checks >= IDLE_CHECKS_PER_TICK:
+                break
+            continue
+        state.failed.discard(key)
         if _is_settled_now(key):
             state.settled_seen.add(key)
             pending = pending or catching_up
@@ -413,16 +437,18 @@ def _sweep(state, *, clock=time.monotonic):
         else:
             state.settled_seen.discard(key)
             state.round_unsettled = pending = True
-    if not pending and any(key not in state.settled_seen for key in state.hot):
-        pending = True   # the budget ran out with never-settled active nodes queued
+    if not pending and any(key not in state.settled_seen and key not in state.failed
+                           for key in state.hot):
+        pending = True   # the tick ended with never-settled active nodes queued
     while state.archived and clock() < deadline and (
             state.active_settled or state.archive_allowance > 0):
         key = state.archived.popleft()
         if not state.active_settled:
             state.archive_allowance -= 1
-        capture_safely(*key, backfill=True)
-        # an unfinished archived node continues when discovery next reaches it
-        pending = pending or not _is_settled_now(key)
+        result = capture_safely(*key, backfill=True)
+        # an unfinished archived node continues when discovery next reaches it;
+        # a failed one is retried then too, and is not pending work
+        pending = pending or (result is not CAPTURE_FAILED and not _is_settled_now(key))
     return pending
 
 

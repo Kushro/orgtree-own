@@ -10,7 +10,7 @@ sys.path.insert(0, str(repo / 'tools'))
 os.environ['ORGTREE_DATA'] = str(repo / '.cold-results/guard-data')
 from assert_repo_import import assert_repo_import
 provenance = assert_repo_import(repo)
-BASE = 'c8cc8f5'
+BASE = '5e99a25'
 out = repo / '.cold-results'
 out.mkdir(exist_ok=True)
 pgroot = Path('C:/Temp/cold-ingest-checks-pg')
@@ -85,6 +85,13 @@ try:
          '            pass\n', ['test_single_slice_catch_up_never_sleeps_a_second_while_work_remains'], MODULES[:1]),
         ('mut-busy-every-tick', ingest_py, '    if state.last_busy is None or now - state.last_busy >= 1.0:',
          '    if True:', ['test_busy_nodes_are_captured_once_per_second_however_short_the_pauses'], MODULES[:1]),
+        ('mut-no-queued-scan', ingest_py, '        pending = True   # the tick ended with never-settled active nodes queued\n',
+         '        pass\n', ['test_catch_up_queued_behind_the_idle_check_cap_stays_pending'], MODULES[:1]),
+        ('mut-failure-is-pending', ingest_py, '            state.round_unsettled = True\n            checks += 1\n',
+         '            state.round_unsettled = True\n            pending = True\n            checks += 1\n',
+         ['test_a_node_that_keeps_failing_returns_to_the_idle_cadence'], MODULES[:1]),
+        ('mut-failure-uncapped', ingest_py, '            checks += 1\n            if checks >= IDLE_CHECKS_PER_TICK:\n                break\n            continue\n',
+         '            continue\n', ['test_a_database_outage_keeps_the_idle_cadence_and_bounded_logging'], MODULES[:1]),
         ('mut-no-mint-once', ingest_py, "    if not node.get('transcript_incarnation'):\n        # Mint",
          "    if False:\n        # Mint", ['test_unminted_node_is_minted_once_to_the_same_identity'], MODULES[:2]),
     ]

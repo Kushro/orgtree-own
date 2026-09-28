@@ -289,6 +289,53 @@ class CaptureTests(unittest.TestCase):
             self.assertFalse(ingest._sweep(state,clock=lambda:now[0]),'all settled: idle cadence again')
             self.assertTrue(0 < len(calls) <= ingest.IDLE_CHECKS_PER_TICK)
 
+    def test_catch_up_queued_behind_the_idle_check_cap_stays_pending(self):
+        """F6: a tick that ends on the settled-check cap before reaching a
+        never-settled node must still report pending."""
+        seen=[str(i) for i in range(10)];unseen=[f'u{i}' for i in range(5)]
+        calls=[]
+        def fake(slug,nid,**kw):
+            calls.append(nid)
+            with ingest._lock:ingest._remember_settled((slug,nid),((),()))
+            return True
+        state=self.fake_state(seen+unseen)
+        state.settled_seen.update(('x',n) for n in seen)
+        with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture_safely',side_effect=fake):
+            self.assertTrue(ingest._sweep(state,clock=lambda:0.0))
+        self.assertEqual(calls,seen[:ingest.IDLE_CHECKS_PER_TICK],'control: the tick ended on the cap')
+
+    def failing_sweeps(self,bad,ticks=40):
+        """Real capture_safely and _sweep; `bad(nid)` decides which captures raise."""
+        good=[str(i) for i in range(12)]
+        state=self.fake_state(good+['bad'])
+        raised=[];now=[0.0];results=[]
+        def capture(slug,nid,**kw):
+            if bad(nid):
+                raised.append(nid);raise RuntimeError('injected capture failure')
+            now[0]+=0.001
+            with ingest._lock:ingest._remember_settled((slug,nid),((),()))
+            return True
+        per_tick=[]
+        with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture',side_effect=capture), \
+             self.assertLogs(ingest._log,level='ERROR'):
+            for _ in range(ticks):
+                before=len(raised)
+                results.append(ingest._sweep(state,clock=lambda:now[0]))
+                per_tick.append(len(raised)-before)
+        return results,per_tick,raised
+
+    def test_a_node_that_keeps_failing_returns_to_the_idle_cadence(self):
+        results,per_tick,raised=self.failing_sweeps(lambda nid:nid=='bad')
+        self.assertTrue(results[0],'control: healthy catch-up is pending')
+        self.assertGreater(len(raised),5,'control: the failing node is really retried')
+        self.assertFalse(any(results[5:]),results)
+
+    def test_a_database_outage_keeps_the_idle_cadence_and_bounded_logging(self):
+        results,per_tick,raised=self.failing_sweeps(lambda nid:True)
+        self.assertGreater(len(raised),20,'control: captures really failed')
+        self.assertLessEqual(max(per_tick),ingest.IDLE_CHECKS_PER_TICK)
+        self.assertFalse(any(results[5:]),results)
+
     def test_busy_nodes_are_captured_once_per_second_however_short_the_pauses(self):
         calls=[];now=[0.0]
         state=self.fake_state([])
