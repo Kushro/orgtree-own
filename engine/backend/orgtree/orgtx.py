@@ -988,11 +988,13 @@ class PgBackend:
             for tx in order:
                 _pause("before_lock", tx)
             try:
-                raw.execute("BEGIN")
                 # LOCAL: dies with this transaction, so a pooled connection
-                # never carries it into a later legacy save (review B3)
-                raw.execute(f"SET LOCAL lock_timeout = '{max(1, int(lock_timeout * 1000))}ms'")
-                raw.execute(f"SET LOCAL idle_in_transaction_session_timeout = "
+                # never carries it into a later legacy save (review B3). One
+                # round trip: no parameters, so the three statements go as
+                # one simple query, in this order, before any lock is taken.
+                raw.execute(f"BEGIN; "
+                            f"SET LOCAL lock_timeout = '{max(1, int(lock_timeout * 1000))}ms'; "
+                            f"SET LOCAL idle_in_transaction_session_timeout = "
                             f"'{int(IDLE_IN_TX_TIMEOUT_S * 1000)}ms'")
                 for tx in order:
                     conn = conns[tx.slug]
