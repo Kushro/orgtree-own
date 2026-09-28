@@ -61,8 +61,11 @@ class OrgList(unittest.TestCase):
             org.hire(lead, lead, 'haiku', 0, f'w{i:03d}', add_dirs=[], tools=NO_TOOLS,
                      org_visibility='self', charter='fixture worker')
         if kiosk:
+            # a real kiosk carries its ceiling; without one the listing takes
+            # the (unchanged) whole-org compatibility path by design
             org.d['kiosk'] = {'enabled': True, 'token': 'kiosk-test-' + slug, 'credits': 5,
-                              'spend_limit': 1.5, 'storage_limit_mb': 10}
+                              'spend_limit': 1.5, 'storage_limit_mb': 10,
+                              'max_scope': org.default_kiosk_ceiling()}
         if shapes:
             org.hire(ledger.USER, None, 'haiku', 0, 'gone')
             org.retire(ledger.USER, 'gone')
@@ -139,6 +142,8 @@ class OrgList(unittest.TestCase):
             return fetch
         from unittest.mock import patch
         with patch.object(store, 'org_slugs', return_value=[slug]), \
+             patch.object(store, '_load_lazy',
+                          side_effect=AssertionError('control: listing fell back to a whole-org load')), \
              patch.multiple(psycopg.Cursor, **{n: wrap(n) for n in original}):
             api.orgs_list(None)
         return seen
