@@ -105,8 +105,9 @@ class SteeredWindow(unittest.TestCase):
         self.assertEqual(len(fetched), 1)
         self.assertLessEqual(fetched[0], 8 + sup._STEERED_WINDOW_SLACK,
                              '310 steered rows exist; the read fetches a bounded tail')
-        total = sum(1 for m in full['messages'])
-        self.assertEqual(total, 8)
+        self.assertEqual(len(full['messages']), 8)
+        self.assertFalse(any(sup._WINDOW_FLOOR in m for m in bounded['messages']),
+                         'the private floor marker never reaches a published row')
 
     def test_window_reaching_the_oldest_fetched_steer_falls_back_exactly(self):
         # every newest row is a steer and no slack: the floor lands inside the
@@ -139,7 +140,7 @@ class SteeredWindow(unittest.TestCase):
         org = store.load_org(self.org.d['slug'])
         entries, total = store.log_owner_tail(org.d, 'steered_log', 'agent', 3)
         self.assertEqual(total, 10)
-        self.assertEqual([e['text'] for e in entries], ['steer 7', 'steer 8', 'steer 9'])
+        self.assertEqual([e['text'] for e in entries], ['steer 21', 'steer 24', 'steer 27'])
 
     def test_older_page_from_the_bounded_cursor_is_unchanged(self):
         self.fixture_rows(old_steers=40)
