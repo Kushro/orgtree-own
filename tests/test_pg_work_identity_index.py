@@ -39,11 +39,16 @@ class _Refused(AssertionError):
     pass
 
 
+#: every attempted archive load, even one a caller catches and reports
+ATTEMPTS = []
+
+
 def _refuse_archive():
     original = store._load_section
 
     def load(slug, sect, snap_logs):
         if sect == ARCHIVE:
+            ATTEMPTS.append(slug)
             raise _Refused('the work archive was loaded')
         return original(slug, sect, snap_logs)
     return patch.object(store, '_load_section', load)
@@ -160,6 +165,7 @@ class OnPostgres(unittest.TestCase):
         store.claim_data_root()
 
     def setUp(self):
+        ATTEMPTS.clear()
         org = store.create_org('wid-' + self._testMethodName)
         self.slug = org.d['slug']
         org.hire(U, None, 'luna', 20, 'boss')
@@ -245,10 +251,16 @@ class OnPostgres(unittest.TestCase):
                               objective='Problem first. Then the solution.')
             wid = made.get('created') or made.get('slug')
             self.assertTrue(wid, made)
-            self.agent(action='update', slug=wid, done_so_far=['one'], working_on_next=[])
-            self.agent(action='evidence', slug=wid, kind='note', ref='r', note='n')
-            self.agent(action='get', slug=wid)
-            self.agent(action='list')
+            results = [
+                self.agent(action='update', slug=wid, done_so_far=['one'], working_on_next=[]),
+                self.agent(action='evidence', slug=wid, kind='note', ref='r', note='n'),
+                self.agent(action='get', slug=wid),
+                self.agent(action='list')]
+        self.assertEqual(ATTEMPTS, [], 'an orgtree_work call loaded the work archive')
+        for r in results:
+            self.assertIsInstance(r, dict)
+            self.assertNotIn('error', r)
+        self.assertEqual(results[2]['item']['done_so_far'], ['one'])
         self.assertTrue(seen, 'identity check never consulted the index')
         self.assertTrue(all(r is not None for r in seen), seen)
 
