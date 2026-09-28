@@ -67,6 +67,18 @@ class ReviewMailScope(unittest.TestCase):
                         owner='owner-a')
         self.assertTrue(second['stale'])
 
+    def test_a_renamed_reviewer_request_still_goes_stale(self):
+        # pg-supervisor-a's case: history keeps the OLD id after a rename, so
+        # only the current reviewer (re-keyed to the new id) covers this box
+        org, slug = fixture()
+        review(org, slug, reviewer='peer-b')
+        req = org.d['mail']['peer-b'][-1]
+        org.rename(USER, 'peer-b', 'peer-bb')
+        org.hire(USER, None, 'haiku', 0, 'peer-d')
+        org.work_update(USER, slug, ['re-seat'], [], status='review', reviewer='peer-d',
+                        owner='owner-a')
+        self.assertTrue(req.get('stale'))
+
     def test_a_folded_history_reads_every_box_as_before(self):
         org, slug = fixture()
         review(org, slug)

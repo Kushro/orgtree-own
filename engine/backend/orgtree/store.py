@@ -2779,6 +2779,14 @@ def _switch_on(value: str | None) -> bool:
 
 
 LAZY_ROWS = _switch_on(os.environ.get("ORGTREE_LAZY_ROWS"))
+#: ORGTREE_LAZY_DOC_KEYS (ON by default; 0/false/off/no turns it off), with on-
+#: demand rows only: these org-wide eager doc keys (one row holding every
+#: agent's records, which an ordinary message never touches) are read on the
+#: first touch instead of on every load. The load learns they EXIST (their key
+#: comes back with no value), so `in`, `get`, `setdefault` and the save behave
+#: exactly as before; an untouched key is neither written nor deleted.
+LAZY_DOC_KEYS = _switch_on(os.environ.get("ORGTREE_LAZY_DOC_KEYS"))
+DEFERRED_DOC_KEYS: frozenset[str] = frozenset({"reservations", "watchdogs"})
 LAZY_ROWS_STATS: dict[str, int] = {"loads": 0, "fetches": 0, "rows": 0,
                                    "fallbacks": 0, "epoch_fallbacks": 0,
                                    "decode_heals": 0, "post_load_changes": 0}
@@ -3430,6 +3438,7 @@ class LazyDoc(dict[str, Any]):
         "_lazy_exposed": set, "_deferred_doc": dict,
         "_receipt_rows": bool, "_receipt_present": bool,
         "_stamp_heal_epoch": bool, "_lazy_keys": set, "_load_snapshot": str,
+        "_unfetched": set,
     }
 
     def __getattr__(self, name: str) -> Any:
@@ -3526,7 +3535,29 @@ class LazyDoc(dict[str, Any]):
             return
         self._pending.setdefault(k, []).append(row)
 
+    def _fetch_unfetched(self, k: str) -> bool:
+        """Read a deferred doc key (ORGTREE_LAZY_DOC_KEYS) on the thread's pool
+        connection — inside org_tx the pinned one — record its baseline and
+        store its value. False when the row went away since the load."""
+        self._unfetched.discard(k)
+        with _POOL.acquire(self._slug) as conn:
+            rows = conn.execute("SELECT key, val, xmin::text FROM doc WHERE key = ?",
+                                (k,)).fetchall()
+        _lazy_count("fetches")
+        _lazy_count("rows", len(rows))
+        _count_post_load(self, k, (r[2] for r in rows))
+        if not rows:
+            return False
+        raw = {k: cast(str, rows[0][1])}
+        self._snap_doc.update(raw)
+        dict.__setitem__(self, k, _assemble(k, raw))
+        return True
+
     def __missing__(self, k: str) -> Any:
+        if k in self._unfetched:
+            if self._fetch_unfetched(k):
+                return dict.__getitem__(self, k)
+            raise KeyError(k)
         if k in self._deferred_doc:
             value = _assemble(k, self._deferred_doc[k])
             del self._deferred_doc[k]
@@ -3645,6 +3676,9 @@ class LazyDoc(dict[str, Any]):
             value = dict.get(self, k)
             if isinstance(value, (LazyNodesMap, LazySplitSection)):
                 value.materialize("whole-document walk")
+        for k in list(self._unfetched):
+            _lazy_fallback(f"{k}: whole-document walk")
+            self._fetch_unfetched(k)
 
     def _unmaterialized(self) -> set[str]:
         return {k for k in (self._present | set(self._pending))
@@ -3687,6 +3721,7 @@ class LazyDoc(dict[str, Any]):
         return (dict.__contains__(self, k)
                 or (isinstance(k, str) and k in self._pending)
                 or (isinstance(k, str) and k in self._deferred_doc)
+                or (isinstance(k, str) and k in self._unfetched)
                 or (isinstance(k, str) and k in LAZY_SECTIONS
                     and k in self._present and k not in self._dropped))
 
@@ -3734,6 +3769,8 @@ class LazyDoc(dict[str, Any]):
                 del self._proj[key]
 
     def __setitem__(self, k: str, v: Any) -> None:
+        if k in self._unfetched:
+            self._fetch_unfetched(k)        # the baseline a replacing save CASes on
         self._deferred_doc.pop(k, None)
         self._drop_proj(k)
         self._dropped.discard(k)
@@ -4060,9 +4097,20 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
             if lazy_rows_ok and epoch is not None and epoch == heal_epoch():
                 # ORGTREE_LAZY_ROWS: no owner row of a split section either
                 # (work rows are read by _load_work_refs as before)
-                raw_doc = dict(conn.execute(
-                    "SELECT key, val FROM doc WHERE strpos(key, ?) = 0",
-                    (SPLIT_SEP,)).fetchall())
+                if LAZY_DOC_KEYS:
+                    # a deferred key's row is listed with no value: it exists
+                    raw_doc = dict(conn.execute(
+                        "SELECT key, CASE WHEN key = ANY(?) THEN NULL ELSE val END "
+                        "FROM doc WHERE strpos(key, ?) = 0",
+                        (list(DEFERRED_DOC_KEYS), SPLIT_SEP)).fetchall())
+                    for k in [k for k, v in raw_doc.items() if v is None]:
+                        if k in DEFERRED_DOC_KEYS:
+                            del raw_doc[k]
+                            d._unfetched.add(k)
+                else:
+                    raw_doc = dict(conn.execute(
+                        "SELECT key, val FROM doc WHERE strpos(key, ?) = 0",
+                        (SPLIT_SEP,)).fetchall())
                 lazy_sections = True
             else:
                 raw_doc = dict(conn.execute(
@@ -4170,7 +4218,7 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
     # anything on disk but missing from the recorded order goes at the end
     order = list(key_order)
     known = set(order)
-    for k in doc_rows:
+    for k in [*doc_rows, *sorted(d._unfetched)]:
         if k not in known:
             order.append(k)
             known.add(k)
@@ -4237,6 +4285,7 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
     # `Org.__init__` cannot read back (`KeyError: 'nodes'`). The first is
     # fail-safe. The second is not. (phase1-audit, 2026-09-04.)
     d._key_order = [k for k in order if k in doc_rows
+                    or k in d._unfetched
                     or k == "nodes"
                     or (k in LAZY_SECTIONS and k in present)
                     or (k == RECEIPT_KEY and d._receipt_present)]
@@ -4960,7 +5009,8 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
     # -- key order -------------------------------------------------------
     if lazy is not None:
         cur_keys = [k for k, _ in items]
-        cur_set = set(cur_keys) | lazy._unmaterialized() | set(lazy._deferred_doc)
+        cur_set = (set(cur_keys) | lazy._unmaterialized() | set(lazy._deferred_doc)
+                   | lazy._unfetched)
         order = [k for k in lazy._key_order if k in cur_set]
         seen = set(order)
         for k in cur_keys:
@@ -6334,7 +6384,7 @@ def eager_sections(d: dict[str, Any]) -> dict[str, Any]:
     that is about to serialise it, never one that is about to mutate it.
     """
     if isinstance(d, LazyDoc):
-        for key in list(d._deferred_doc):
+        for key in [*d._deferred_doc, *d._unfetched]:
             d[key]
     out = {k: dict.__getitem__(d, k) for k in dict.keys(d)
            if k not in LAZY_SECTIONS}

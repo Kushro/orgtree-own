@@ -507,6 +507,85 @@ class NoticesRuntimeView(unittest.TestCase):
         self.assertIn(self.slug, seen)
 
 
+@unittest.skipUnless(f.ADMIN, 'disposable PostgreSQL required: NOT RUN')
+class DeferredDocKeys(unittest.TestCase):
+    """ORGTREE_LAZY_DOC_KEYS: `reservations` / `watchdogs` are read on the
+    first touch. DATA LOSS: an untouched key is neither written nor deleted,
+    a touched one keeps every stored record."""
+    setUpClass = LazyRows.setUpClass
+    raw, rows, epoch = LazyRows.raw, LazyRows.rows, LazyRows.epoch
+    stamp, stats, delta = LazyRows.stamp, LazyRows.stats, LazyRows.delta
+
+    RES = [{'id': 'r1', 'owner': 'n1', 'resource': 'repo', 'state': 'held'}]
+    DOGS = [{'id': 'w1', 'owner': 'n2', 'kind': 'file', 'target': 'x'}]
+
+    def setUp(self):
+        LazyRows.setUp(self)
+        flag = patch.object(store, 'LAZY_DOC_KEYS', True)
+        flag.start()
+        self.addCleanup(flag.stop)
+        with orgtx.org_tx(self.slug, sections=['reservations', 'watchdogs']) as tx:
+            tx.org.d['reservations'] = copy.deepcopy(self.RES)
+            tx.org.d['watchdogs'] = copy.deepcopy(self.DOGS)
+        self.stamp()
+
+    def key_order(self):
+        with self.raw() as raw:
+            return json.loads(raw.execute("SELECT val FROM meta WHERE key='key_order'").fetchone()[0])
+
+    def test_untouched_keys_are_not_read_and_stay_byte_identical(self):
+        _, doc0 = self.rows()
+        order0 = self.key_order()
+        with orgtx.org_tx(self.slug, nodes=['n0']) as tx:
+            self.assertFalse(dict.__contains__(tx.org.d, 'reservations'))
+            self.assertFalse(dict.__contains__(tx.org.d, 'watchdogs'))
+            tx.org.node('n0')['payload']['v'] = 9
+        _, doc1 = self.rows()
+        self.assertEqual(doc1['reservations'], doc0['reservations'])
+        self.assertEqual(doc1['watchdogs'], doc0['watchdogs'])
+        self.assertEqual(self.key_order(), order0)
+        self.assertIn('reservations', order0)
+
+    def test_setdefault_and_get_see_the_stored_records_and_keep_them(self):
+        with orgtx.org_tx(self.slug, sections=['reservations']) as tx:
+            self.assertTrue('reservations' in tx.org.d)
+            box = tx.org.d.setdefault('reservations', [])
+            self.assertEqual(box, self.RES)
+            box.append({'id': 'r2', 'owner': 'n3', 'resource': 'db', 'state': 'held'})
+        _, doc = self.rows()
+        self.assertEqual([r['id'] for r in json.loads(doc['reservations'])], ['r1', 'r2'])
+        view = store.load_runtime_org(self.slug)
+        self.assertEqual(len(view.d.get('watchdogs')), 1)
+
+    def test_replace_and_delete_act_on_the_stored_row(self):
+        with orgtx.org_tx(self.slug, sections=['watchdogs', 'reservations']) as tx:
+            tx.org.d['watchdogs'] = [{'id': 'w9'}]
+            del tx.org.d['reservations']
+        _, doc = self.rows()
+        self.assertEqual(json.loads(doc['watchdogs']), [{'id': 'w9'}])
+        self.assertNotIn('reservations', doc)
+        self.assertNotIn('reservations', self.key_order())
+
+    def test_an_absent_key_stays_absent(self):
+        with orgtx.org_tx(self.slug, sections=['watchdogs']) as tx:
+            del tx.org.d['watchdogs']
+        view = store.load_runtime_org(self.slug)
+        self.assertFalse('watchdogs' in view.d)
+        self.assertIsNone(view.d.get('watchdogs'))
+
+    def test_document_serializers_include_the_deferred_keys(self):
+        view = store.load_runtime_org(self.slug)
+        self.assertFalse(dict.__contains__(view.d, 'reservations'))
+        self.assertEqual(json.loads(json.dumps(view.d))['reservations'], self.RES)
+        view = store.load_runtime_org(self.slug)
+        self.assertEqual(store.eager_sections(view.d)['watchdogs'], self.DOGS)
+
+    def test_the_switch_off_loads_them_eagerly(self):
+        with patch.object(store, 'LAZY_DOC_KEYS', False):
+            view = store.load_runtime_org(self.slug)
+        self.assertTrue(dict.__contains__(view.d, 'reservations'))
+
+
 class SwitchDefault(unittest.TestCase):
     def test_lazy_rows_is_on_unless_explicitly_false(self):
         for v in (None, '', '1', 'true', 'on', 'yes', 'anything'):
@@ -526,6 +605,12 @@ class SwitchDefault(unittest.TestCase):
         if 'ORGTREE_NOTICES_RUNTIME_VIEW' in os.environ:
             self.skipTest('ORGTREE_NOTICES_RUNTIME_VIEW set in this environment: default NOT tested')
         self.assertTrue(dn._RUNTIME_VIEWS)
+
+    def test_the_deferred_doc_keys_default_is_on(self):
+        import os
+        if 'ORGTREE_LAZY_DOC_KEYS' in os.environ:
+            self.skipTest('ORGTREE_LAZY_DOC_KEYS set in this environment: default NOT tested')
+        self.assertTrue(store.LAZY_DOC_KEYS)
 
     def test_the_chat_view_default_is_on(self):
         import os
