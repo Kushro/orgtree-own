@@ -135,5 +135,37 @@ class OnPostgres(unittest.TestCase):
         self.assertEqual(len(stored), 1, 'the refused attempt was rolled back')
 
 
+    def test_a_rerun_send_leaves_its_after_commit_work_once(self):
+        """pg-workitems' landing condition on 5fe069c: step 2 is the first
+        change that routes ordinary sends through the refused-write rerun, so
+        pin that the rerun does not double the post-commit tail. agent_tx
+        resets `after` on every attempt; without that, the refused attempt's
+        hooks (mail_notify) and wake-ups (_drive -> send_message) would run
+        twice after the commit."""
+        rows = self.rows('b')
+        spec = pgdoor.TxSpec(**{k: tuple(v) for k, v in rows.items()})
+        call = SimpleNamespace(tool='test-audience-rerun', org=self.slug, node='a', op_key=None)
+        attempts = []
+        after = pgdoor.After()
+
+        def body(t):
+            attempts.append(1)
+            t.after.then.append(lambda result: None)
+            t.after.drive.append('b')
+            t.org.d['audiences'].append({'grantee': 'b', 'grantor': 'a', 'granted_at': 'now',
+                                         'reason': 'a messaged directly'})
+            return 'sent'
+
+        # the fixture's killswitch row reads as latched to the door's gate,
+        # which is not what this test pins
+        with patch.object(pgdoor, '_gate', lambda org, nid: None):
+            out = pgdoor.agent_tx(call, {'to': 'b'}, body, admit=lambda org, c, a: None,
+                                  file=lambda *args: None, spec=spec, after=after)
+        self.assertEqual(out, 'sent')
+        self.assertEqual(len(attempts), 2, 'control: the first attempt was refused and re-run')
+        self.assertEqual(len(after.then), 1, 'one post-commit hook, not one per attempt')
+        self.assertEqual(after.drive, ['b'], 'the recipient is woken once')
+
+
 if __name__ == '__main__':
     unittest.main()
