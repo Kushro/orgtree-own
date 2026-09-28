@@ -93,7 +93,9 @@ class TurnSums(unittest.TestCase):
             self.assertEqual([type(v) for v in got], [type(v) for v in want], trial)
             self.assertEqual(strip(d.get("turn_log", {}).get("a", [])), hist, trial)
             self.assertEqual(strip(n["turns"]), hist[-ledger.TREE_TURNS:], trial)
-            self.assertEqual(n["turn_seq"], len(hist))
+            # a node that never had a turn stays unstamped
+            self.assertEqual(n.get("turn_seq", 0), len(hist))
+            self.assertEqual("turn_seq" in n, bool(hist))
 
     def test_a_long_ring_then_n_more_turns_through_both_paths(self):
         rnd = random.Random(7)
@@ -153,6 +155,29 @@ class TurnSums(unittest.TestCase):
         ledger.record_turn(d, "a", n, e)
         self.assertEqual([r["i"] for r in d["turn_log"]["a"]], list(range(13)))
         self.assertEqual([r["n"] for r in d["turn_log"]["a"]], list(range(1, 14)))
+
+    def test_a_node_with_no_turns_is_left_alone_until_its_first_turn(self):
+        d, n = {}, {"id": "a"}
+        self.assertFalse(ledger.convert_turns(d, "a", n))
+        self.assertEqual((d, n), ({}, {"id": "a"}))
+        n["turns"] = []
+        self.assertFalse(ledger.convert_turns(d, "a", n))
+        self.assertNotIn("turn_seq", n)
+        e = {"cost": 0.25, "toks": 40}
+        ledger.record_turn(d, "a", n, dict(e))
+        self.assertEqual(n["turn_seq"], 1)
+        self.assertEqual(ledger.turn_estimate_sums(n), old_sums([e]))
+        self.assertEqual(strip(d["turn_log"]["a"]), [e])
+
+    def test_an_unconverted_nodes_entries_are_all_legacy_whatever_keys_they_carry(self):
+        # `n` means "logged" only on a converted node (one with turn_seq)
+        rnd = random.Random(19)
+        legacy = [dict(turn(rnd, i), n=i) for i in range(20)]
+        d, n = {}, {"turns": copy.deepcopy(legacy)}
+        self.assertTrue(ledger.convert_turns(d, "a", n))
+        self.assertEqual([r["i"] for r in d["turn_log"]["a"]], list(range(20)))
+        self.assertEqual([r["n"] for r in d["turn_log"]["a"]], list(range(1, 21)))
+        self.assertEqual(ledger.turn_estimate_sums(n), old_sums(legacy))
 
     def test_the_switch_off_is_the_old_ring_append(self):
         with patch.object(ledger, "TURN_LOG", False):
@@ -277,6 +302,8 @@ class PgTurnLog(unittest.TestCase):
         self.assertEqual(strip(self.log_rows()), self.legacy)
         self.assertEqual([r['n'] for r in self.log_rows()], list(range(1, self.LEGACY + 1)))
         self.assertEqual(ledger.turn_estimate_sums(n), old_sums(self.legacy))
+        # a node with no turns is not rewritten by the heal
+        self.assertNotIn('turn_seq', self.node_row('n0'))
         self.stamp()                                 # a second load heals nothing more
         self.assertEqual(len(self.log_rows()), self.LEGACY)
 

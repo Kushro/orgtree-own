@@ -810,8 +810,13 @@ def convert_turns(d: Any, nid: str, n: Any) -> bool:
         return False
     ring = n.get("turns")
     ring = ring if isinstance(ring, list) else []
-    pending = [e for e in ring if isinstance(e, dict) and "n" not in e]
-    if not pending and "turn_seq" in n and len(ring) <= TREE_TURNS:
+    # Only a converted node (one with `turn_seq`) has logged entries: on any
+    # other node every entry is legacy history, whatever keys it carries.
+    converted = "turn_seq" in n
+    pending = [e for e in ring if isinstance(e, dict) and not (converted and "n" in e)]
+    if not pending and len(ring) <= TREE_TURNS and (converted or not ring):
+        # a node with no turns is left as it is: stamping it would rewrite
+        # every idle node's row once, for nothing (`record_turn` stamps it)
         return False
     seq = int(n.get("turn_seq") or 0)
     for e in pending:
@@ -836,6 +841,8 @@ def record_turn(d: Any, nid: str, n: Any, entry: dict[str, Any]) -> None:
         n.setdefault("turns", []).append(entry)
         return
     convert_turns(d, nid, n)           # an older engine's appends first
+    if "turn_seq" not in n:            # its first turn
+        n["turn_est_cost"], n["turn_est_toks"] = list(_SUM_ZERO), list(_SUM_ZERO)
     seq = int(n.get("turn_seq") or 0) + 1
     entry["n"] = seq
     _turn_log_append(d, nid, entry)
