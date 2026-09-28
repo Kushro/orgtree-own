@@ -115,15 +115,22 @@ class OrgList(unittest.TestCase):
         self.assertEqual(self.listed(slug)['live'], self.reference(slug)[0])
 
     def counted_reads(self, slug):
-        """Rows and value bytes the listing fetched for this org's snapshot."""
+        """Rows and value bytes the listing request itself fetched for this
+        org. Only this thread counts, like the preflight's per-request
+        counters: the storage walk it may start runs in a background thread
+        and reads no node rows (workspace/scratch/sandbox paths only)."""
         import json
+        import threading
         import psycopg
         seen = {'rows': 0, 'bytes': 0}
+        me = threading.get_ident()
         original = {n: getattr(psycopg.Cursor, n) for n in ('fetchone', 'fetchall', 'fetchmany')}
 
         def wrap(name):
             def fetch(self_cur, *a, **k):
                 out = original[name](self_cur, *a, **k)
+                if threading.get_ident() != me:
+                    return out
                 rows = ([out] if out is not None else []) if name == 'fetchone' else out
                 seen['rows'] += len(rows)
                 seen['bytes'] += sum(len(v.encode()) if isinstance(v, str) else len(json.dumps(v, default=str))
