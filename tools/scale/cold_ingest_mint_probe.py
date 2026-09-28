@@ -84,6 +84,50 @@ def main(root):
             ingest.capture(slug, 'worker-000', backfill=True)
         out['events'] = events
         out['org_tx'] = sum(e['event'] == 'org_tx' for e in events)
+        # ---- the profile's shape: many nodes through the real sweep ----
+        org = store.load_org(slug)
+        template = dict(org.node('worker-001'))
+        for i in range(2, 50):
+            org.hire(ledger.USER, None, 'haiku', 0, f'worker-{i:03d}')
+        for i in range(50):
+            node = dict(template)
+            node.update(id=f'hist-{i:03d}', state='archived', session_id=str(uuid.uuid4()),
+                        transcript_incarnation=f'hist-incarnation-{i:012d}')
+            org.d['nodes'][node['id']] = node
+        store.save_org(org)
+        org = store.load_org(slug)
+        for nid in org.nodes:
+            if nid.startswith(('worker-', 'hist-')) and org.node(nid)['session_id'] not in paths:
+                p = root / f'{nid}.jsonl'
+                write_transcript(p, 2 if nid.startswith('hist-') else 180, 131500 if nid.startswith('hist-') else 1460, nid)
+                paths[org.node(nid)['session_id']] = str(p)
+        events.clear()
+        current = [None]
+        real_capture = ingest.capture
+
+        def capture(slug_, nid, **kw):
+            current[0] = nid
+            events.append(dict(event='capture', nid=nid))
+            return real_capture(slug_, nid, **kw)
+        ingest.capture = capture
+        state = ingest._SweepState()
+        with records.reuse_database():
+            for _ in range(80):
+                ingest._sweep(state)
+        per = {}
+        who = None
+        for e in events:
+            if e['event'] == 'capture':
+                who = e['nid']
+                per.setdefault(who, dict(captures=0, org_tx=0, views=[]))['captures'] += 1
+            elif e['event'] == 'org_tx':
+                per[who]['org_tx'] += 1
+            elif e['event'] == 'view':
+                per[who]['views'].append((e['kind'], e['has_inc'], e['doc_reply'], e['node_fields']['reply_incarnation']))
+        out['sweep_org_tx'] = sum(v['org_tx'] for v in per.values())
+        out['sweep_nodes_with_tx'] = {k: v for k, v in per.items() if v['org_tx']}
+        out['sweep_sample'] = {k: per[k] for k in list(per)[:4]}
+        out.pop('events')
         records.close_all()
         pgstore.close_idle()
         prov.write_result(root / 'result.json', out)
