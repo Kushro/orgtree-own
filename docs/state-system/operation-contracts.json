@@ -34073,6 +34073,13 @@
       "source_refs": []
     },
     {
+      "id": "0e67a93fc8ffe1aeecbfc6f147e90209855866d83be2599b00be8087d9466500",
+      "disposition": "pending",
+      "contracts": [],
+      "reason": "Stays pending (P01 W8), beside toolwait.tool_name: toolwait.managed_call unwraps orgtree_op_call to the arguments it carries, and at the agent door that decides whether a managed-wait tool's call journals in the tool_waits sidecar. A managed tool's read-only action (toolwait.READ_ACTIONS: orgtree_watchdog list) takes the ordinary path instead (orgtree-watchdog-list-pays-the-managed-wait-jour, 2026-09-28). It is shared by every POST /api/agent call, and the door stays pending by precedent (S3 decision 1). Owner: P01 (the agent door).",
+      "source_refs": []
+    },
+    {
       "id": "2e36010a8ce0cd14516e2e09d68e6d04ddc3c7e414fdd1d80ef89c5b78f634fb",
       "disposition": "mapped",
       "contracts": [
