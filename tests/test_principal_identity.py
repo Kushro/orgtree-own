@@ -135,6 +135,8 @@ class PrincipalIdentityTests(unittest.TestCase):
         sup._steer_attempts(org, W)['d-steer'] = {'tok': 't-steer', 'at': OLD}
         org.d.setdefault('turn_error_log', {}).setdefault(W, []).append(
             {'at': OLD, 'text': 'fixture error'})
+        # a finished turn, through THE ring writer (turn_log since 2ac1651)
+        ledger.record_turn(org.d, W, org.node(W), {'at': OLD, 'summary': 'fixture turn'})
         org.d.setdefault('notices', {}).setdefault(W, []).append(
             {'at': OLD, 'text': 'fixture notice'})
         org.d.setdefault('mail_log', {}).setdefault(W, []).append(

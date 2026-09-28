@@ -143,6 +143,7 @@ class SeatCredentialTests(unittest.TestCase):
         org.d.setdefault('delivering', {}).setdefault(nid, []).append(
             {'tok': 't-' + nid, 'at': OLD, 'mail': [], 'via': 'turn'})
         org.d.setdefault('turn_error_log', {}).setdefault(nid, []).append({'at': OLD, 'text': nid})
+        store.turn_log_append(org.d, nid, {'n': 1, 'at': OLD, 'summary': nid})
         org.d.setdefault('mail_transitions', {}).setdefault(nid, {})['op-' + nid] = {
             'node': nid, 'operation': 'op-' + nid, 'outcome': 'reclaimed', 'before': {}}
         sup._steer_attempts(org, nid)['d-' + nid] = {'tok': 's-' + nid, 'at': OLD}

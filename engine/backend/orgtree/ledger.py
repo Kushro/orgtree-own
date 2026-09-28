@@ -746,7 +746,9 @@ def heal_decoded_box(sect: str, box: Any) -> bool:
 #: entry WITHOUT `n` has not been logged yet: legacy history, or a turn an older
 #: engine appended after a rollback. `convert_turns` logs those in ring order and
 #: trims the ring, so converting is idempotent and a roll-forward loses and
-#: duplicates nothing. Nothing is ever deleted from `turn_log`.
+#: duplicates nothing. Nothing is ever deleted from `turn_log` except by a user
+#: delete of the node itself, which purges its rows like every other
+#: `on_delete: purged` section (DELETE_PURGE_SECTIONS).
 #: Converting runs in the whole-load heal (committed by its own save) and in
 #: `record_turn` (whose transaction names `turn_log`), never when one row is
 #: decoded on demand: that transaction may not have named the log. Until then
@@ -6016,7 +6018,8 @@ class Org:
     #: section of NODE_KEYED_SECTIONS that `delete` did not already clear.
     #: A row section names its owner in the given field.
     DELETE_PURGE_SECTIONS: Final[dict[str, str | None]] = {
-        "delivering": None, "turn_error_log": None, "mail_transitions": None,
+        "delivering": None, "turn_error_log": None, "turn_log": None,
+        "mail_transitions": None,
         "steer_attempts": None, "manual_attempts": None,
         "op_receipts": "node", "documents": "node", "watchdog_tombs": "owner"}
 
