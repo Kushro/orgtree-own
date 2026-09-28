@@ -51,6 +51,16 @@ def top_level_holds(org):
     return org.audit()['top_level_holds']
 
 
+def _live_count(raw):
+    """Active nodes whose state is 'live', from node_index metadata alone (one
+    row, no node document read). node_index stores coalesce(state, 'live');
+    every node-creating path sets `state` (coordinator ruling on
+    org-list-api-orgs-reads-grow-with-agent-count), so this equals counting
+    `state == 'live'` over the node documents."""
+    return int(raw.execute(
+        "SELECT count(*) FROM node_index i WHERE i.meta->>'state'='live'").fetchone()[0])
+
+
 def _read(slug, public):
     def snapshot(raw, stamp):
         # A pre-row-store node blob has no validated native count projection.
@@ -69,11 +79,8 @@ def _read(slug, public):
             fields = {key: json.loads(val) for key, val in fields.items()}
             if fields.get('slug', slug) != slug:
                 raise CompatibilityRequired('organization identity changed')
-            states = raw.execute(
-                "SELECT n.val::jsonb->'state' FROM node_index i JOIN nodes n ON n.id=i.id "
-                "WHERE i.meta->>'state'<>'archived' ORDER BY i.ord,i.id").fetchall()
             return {'slug': fields.get('slug', slug), 'name': fields.get('name', slug),
-                    'nodes': stamp['node_count'], 'live': sum(state == 'live' for state, in states),
+                    'nodes': stamp['node_count'], 'live': _live_count(raw),
                     'kiosk': True, 'net_slug': fields.get('net_identity'),
                     'created': fields.get('created')}
         if raw.execute('SELECT 1 FROM nodes WHERE public.orgtree_summary_cost_exception(val) LIMIT 1').fetchone():
@@ -82,15 +89,27 @@ def _read(slug, public):
             'SELECT key,val FROM doc WHERE key=ANY(%s)', (list(_ADMIN_KEYS),)).fetchall()}
         if settings.get('slug') != slug:
             raise CompatibilityRequired('organization identity changed')
+        # The listing row needs no node documents: `live` is one count, and
+        # only a kiosk's `held` (top_level_holds: seat cost + grant of the
+        # top-level seats) reads nodes — just those few, and only for a kiosk.
+        # Reading every active node's document made each poll grow with the
+        # org (org-list-api-orgs-reads-grow-with-agent-count).
         nodes = {}
-        for nid, ordinal, value in raw.execute(
-                "SELECT n.id,n.ord,n.val FROM node_index i JOIN nodes n ON n.id=i.id "
-                "WHERE i.meta->>'state'<>'archived' ORDER BY i.ord,i.id").fetchall():
-            node = json.loads(value)
-            node.setdefault('ui_order', float(ordinal))
-            nodes[nid] = node
-        row = store._summary_row(slug, dict(settings, nodes=nodes))
+        if settings.get('kiosk'):
+            for nid, ordinal, value in raw.execute(
+                    "SELECT n.id,n.ord,n.val FROM node_index i JOIN nodes n ON n.id=i.id "
+                    "WHERE i.meta->>'state'<>'archived' AND i.meta->>'parent'='' "
+                    "ORDER BY i.ord,i.id").fetchall():
+                node = json.loads(value)
+                # node_index stores coalesce(parent,''): keep exactly the
+                # nodes Org.children(None) selects (parent is None)
+                if node.get('parent') is not None:
+                    continue
+                node.setdefault('ui_order', float(ordinal))
+                nodes[nid] = node
+        row = store._summary_row(slug, dict(settings, nodes={}))
         row['nodes'] = stamp['node_count']
+        row['live'] = _live_count(raw)
         context = _AdminSummary(settings, nodes, stamp['cost'])
         return row, context
     return foreground_store.read_snapshot(slug, snapshot)
