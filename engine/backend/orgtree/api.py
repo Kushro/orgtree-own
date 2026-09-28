@@ -132,6 +132,15 @@ if TYPE_CHECKING:
     from .schema import DirGrant, KioskCfg as KioskDoc, MailEntry, UserMailEntry
 
 app = FastAPI(title="orgtree", version="1.0.0")
+
+#: uvicorn options for the LOCAL admin listener (the desktop engine in
+#: engine/launch.py, and `main` below). The renderer's org websocket runs over
+#: loopback, where permessage-deflate buys nothing: the N1000 engprof measured
+#: it at 0.083 cores on the event-loop thread, which was already starved.
+#: Chromium always offers the extension, so switching it off here is enough;
+#: the server then does not accept it. The public listener keeps uvicorn's
+#: default, since remote clients may benefit from compression.
+LOCAL_UVICORN_OPTIONS: dict[str, Any] = {"ws_per_message_deflate": False}
 from . import p03_door  # P03 door hook: installs NOTHING unless a marked prototype root is set (p03_door.py)
 p03_door.install(app, store.DATA_ROOT)
 from . import startup
@@ -4736,8 +4745,18 @@ async def claude_usage(force: bool = False) -> dict[str, Any]:
 # /api/usage: the modal may spend an upstream request, the always-on glow may
 # not, and a caller that cannot ask for the expensive behaviour cannot
 # accidentally get it.
-@app.get("/api/usage/peek")
-def claude_usage_peek() -> dict[str, Any]:
+# ⚠ THE FOUR `*/usage/peek` ROUTES ARE `async def` WITH `response_model=None`
+# (N1000 engprof, 2026-09-28). They are 59% of all requests: every open window
+# polls all four. As sync `def`s, each paid one threadpool hop for the handler
+# and a second for response validation, ~145 + 150 ms queued behind the rest
+# of the pool at N1000 (p50 ~230 ms, p95 ~790 ms for a ~1 ms read). Each
+# `peek()` is a cache-only read. It takes its module `_lock` only around
+# in-memory dict reads, and no fetch holds that lock across I/O (the fetches
+# use `_fetch_lock`), so running it on the loop cannot block it. The response
+# bytes are unchanged; tests/test_usage_peek_async.py pins them. A peek that
+# ever gains I/O must go back to `run_in_threadpool`.
+@app.get("/api/usage/peek", response_model=None)
+async def claude_usage_peek() -> dict[str, Any]:
     """Cache-only usage standing for the header glow — see `limits.peek`."""
     return limits.peek()
 
@@ -4754,8 +4773,8 @@ async def codex_usage(force: bool = False) -> dict[str, Any]:
     return await run_in_threadpool(codex_limits.fetch, force)
 
 
-@app.get("/api/codex/usage/peek")
-def codex_usage_peek() -> dict[str, Any]:
+@app.get("/api/codex/usage/peek", response_model=None)
+async def codex_usage_peek() -> dict[str, Any]:           # async: see claude_usage_peek
     """Cache-only Codex usage standing for the header warning glow."""
     return codex_limits.peek()
 
@@ -4772,8 +4791,8 @@ async def antigravity_usage(force: bool = False) -> dict[str, Any]:
     return await run_in_threadpool(antigravity_limits.fetch, force)
 
 
-@app.get("/api/antigravity/usage/peek")
-def antigravity_usage_peek() -> dict[str, Any]:
+@app.get("/api/antigravity/usage/peek", response_model=None)
+async def antigravity_usage_peek() -> dict[str, Any]:     # async: see claude_usage_peek
     """Cache-only Antigravity standing for the header warning glow."""
     return antigravity_limits.peek()
 
@@ -4791,8 +4810,8 @@ async def openrouter_usage(force: bool = False) -> dict[str, Any]:
     return await run_in_threadpool(openrouter_limits.fetch, force)
 
 
-@app.get("/api/openrouter/usage/peek")
-def openrouter_usage_peek() -> dict[str, Any]:
+@app.get("/api/openrouter/usage/peek", response_model=None)
+async def openrouter_usage_peek() -> dict[str, Any]:      # async: see claude_usage_peek
     """Cache-only OpenRouter standing for the header warning glow."""
     from . import openrouter_limits              # noqa: PLC0415
     return openrouter_limits.peek()
@@ -16566,7 +16585,8 @@ def main() -> None:
     # reaches the wider web); the public listener serves nothing but
     # preauthenticated /k/<token> URLs; the bridge listener serves nothing but
     # secret-gated sandbox traffic
-    servers = [uvicorn.Server(uvicorn.Config(app, host=host, port=PORT))]
+    servers = [uvicorn.Server(uvicorn.Config(app, host=host, port=PORT,
+                                             **LOCAL_UVICORN_OPTIONS))]
     if PUBLIC_PORT and policy.allow_public_listener:
         servers.append(uvicorn.Server(uvicorn.Config(
             PublicGateway(app), host="0.0.0.0", port=PUBLIC_PORT)))
@@ -16581,7 +16601,7 @@ def main() -> None:
             BridgeGateway(app), host=sandbox.bridge_bind_host(),
             port=sandbox.BRIDGE_PORT, **bridge_log)))
     if len(servers) == 1:
-        uvicorn.run(app, host=host, port=PORT)
+        uvicorn.run(app, host=host, port=PORT, **LOCAL_UVICORN_OPTIONS)
         return
 
     async def serve_all() -> None:

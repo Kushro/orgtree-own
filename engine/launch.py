@@ -401,8 +401,9 @@ def main() -> None:
     hub.start()
     progress.report("hub-started")
     import uvicorn  # noqa: PLC0415
+    from orgtree.api import LOCAL_UVICORN_OPTIONS  # noqa: PLC0415
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
-                                           access_log=False))
+                                           access_log=False, **LOCAL_UVICORN_OPTIONS))
     async def serve() -> None:
         task = asyncio.create_task(server.serve())
         while not server.started and not task.done():
