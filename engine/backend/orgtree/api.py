@@ -12540,8 +12540,8 @@ def _message_door_before(call: Any, a: dict[str, Any]) -> dict[str, Any]:
     # Recipient prediction reads only node relationships. Attachment handling
     # retains its ordinary coherent snapshot. The locked body re-resolves
     # the destination and refuses/widens when this prediction became stale.
-    snap = (store.load_runtime_org(str(call.org))
-            if store.STORE_BACKEND == "postgres" and not a.get("attachments")
+    runtime = store.STORE_BACKEND == "postgres" and not a.get("attachments")
+    snap = (store.load_runtime_org(str(call.org)) if runtime
             else store.cached_org(str(call.org)))
     dest = snap._resolve_recipient(str(a.get("to", "")), outward=True)
     if dest.startswith("@net:"):
@@ -12574,8 +12574,13 @@ def _message_door_before(call: Any, a: dict[str, Any]) -> dict[str, Any]:
                 "attachments ride mail to the user or @net: "
                 "peers — for local agent recipients use "
                 "orgtree_send_file or paths")
-    return {"dest": dest, "user_atts": user_atts, "net_atts": net_atts,
-            "had_atts": bool(raw_atts)}
+    out = {"dest": dest, "user_atts": user_atts, "net_atts": net_atts,
+           "had_atts": bool(raw_atts)}
+    if runtime:
+        # the door plans the message's rows from this same runtime read
+        # rather than loading the org again (pgdoor.PLAN_SNAPSHOT)
+        out[pgdoor.PLAN_SNAPSHOT] = snap
+    return out
 
 
 def _message_door_body(t: pgdoor.AgentTx) -> dict[str, Any]:

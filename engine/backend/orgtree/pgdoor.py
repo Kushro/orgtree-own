@@ -267,6 +267,11 @@ KIOSK_EXEMPT: "set[str]" = set()
 # different families), and the pre-transaction step per name (F1)
 WHEN: "dict[str, Callable[[dict[str, Any]], bool]]" = {}
 BEFORE: "dict[str, Callable[[Any, dict[str, Any]], dict[str, Any] | None]]" = {}
+# A before-step may hand the door the runtime snapshot it already read under
+# this key: a RUNTIME_SNAPSHOTS spec then plans its rows from that snapshot
+# instead of reading the org a second time. The door pops it; the body never
+# sees it in `pre`.
+PLAN_SNAPSHOT = "_pgdoor_plan_snapshot"
 # a body may widen this many times before the door gives up (each widening is
 # a full rollback and re-run, so a runaway would be a livelock, not a bug)
 MAX_WIDEN = 3
@@ -385,7 +390,8 @@ def _snapshot(slug: str) -> Any:
     return store.cached_org(slug)
 
 
-def _resolve(name: str, slug: str, body: Any, a: dict[str, Any]) -> TxSpec:
+def _resolve(name: str, slug: str, body: Any, a: dict[str, Any],
+             planned: Any = None) -> TxSpec:
     spec = LOCKS.get(name)
     if spec is None:
         raise LedgerError(f"pgdoor: {name!r} has no lock declaration — it "
@@ -396,8 +402,12 @@ def _resolve(name: str, slug: str, body: Any, a: dict[str, Any]) -> TxSpec:
         snapshot = None
     elif name in RUNTIME_SNAPSHOTS and _SEAM.snapshot is None:
         from . import store
-        snapshot = (store.load_runtime_org(slug) if store.STORE_BACKEND == "postgres"
-                    else _snapshot(slug))
+        if store.STORE_BACKEND != "postgres":
+            snapshot = _snapshot(slug)
+        elif planned is not None:
+            snapshot = planned          # the before-step's own runtime read
+        else:
+            snapshot = store.load_runtime_org(slug)
     else:
         snapshot = _snapshot(slug)
     return spec(snapshot, body, a)
@@ -668,7 +678,8 @@ def agent_tx(body: Any, a: dict[str, Any],
     no receipt rode the call), never on a retry, a replay or a rollback —
     `opreceipts.witness` belongs there."""
     pre = _before(body.tool, body.org, body, a, pre)
-    base = spec if spec is not None else _resolve(body.tool, body.org, body, a)
+    planned = pre.pop(PLAN_SNAPSHOT, None)
+    base = spec if spec is not None else _resolve(body.tool, body.org, body, a, planned)
     fn = fn if fn is not None else BODIES.get(body.tool)
     if fn is None:
         raise LedgerError(f"pgdoor: {body.tool!r} has no declared body")
@@ -741,7 +752,8 @@ def op_tx(slug: str, op: str, body: Any, a: dict[str, Any],
     # here, as `org_slug` (the key staffdoor's operator calls already pass)
     a = {**a, "org_slug": a.get("org_slug") or slug}
     pre = _before(op, slug, body, a, pre)
-    base = spec if spec is not None else _resolve(op, slug, body, a)
+    planned = pre.pop(PLAN_SNAPSHOT, None)
+    base = spec if spec is not None else _resolve(op, slug, body, a, planned)
     last: list[After] = []
 
     def step(h: Any, held: TxSpec) -> Any:

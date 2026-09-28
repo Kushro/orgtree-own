@@ -59,6 +59,25 @@ class AgentCallReads(unittest.TestCase):
         self.assertEqual(reads, [(self.slug, 'worker')])
         self.assertEqual(store.load_org(self.slug).node('worker')['last_status']['summary'], 's')
 
+    def test_a_message_reads_the_org_once_before_its_transaction(self):
+        # the before-step's runtime read also plans the message's rows
+        send = lambda n: api.agent_call(api.AgentCall(  # noqa: E731
+            org=self.slug, node='worker', tool='orgtree_message',
+            args={'to': 'boss', 'body': f'hello {n}'}), REQUEST)
+        send(0)                                            # warm
+        loads = []
+        original = store.load_runtime_org
+
+        def counting(slug, *a, **k):
+            loads.append(slug)
+            return original(slug, *a, **k)
+
+        with patch.object(store, 'load_runtime_org', counting):
+            self.assertNotIn('error', send(1))
+        self.assertEqual(loads, [self.slug])
+        inbox = store.load_org(self.slug).d.get('mail', {}).get('boss') or []
+        self.assertIn('hello 1', [m.get('body') for m in inbox])
+
     def test_a_halted_caller_is_refused_by_the_pregate(self):
         self.status()
         with orgtx.org_tx(self.slug, nodes=['worker']) as tx:
