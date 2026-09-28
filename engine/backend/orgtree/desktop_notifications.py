@@ -16,9 +16,14 @@ def _orgs():
     if _RUNTIME_VIEWS and store.STORE_BACKEND == "postgres":
         for slug in store.org_slugs():
             try:
-                yield store.load_runtime_org(slug)
+                org = store.load_runtime_org(slug)
             except LedgerError:
                 continue          # deleted between the listing and the read
+            except Exception as e:                           # noqa: BLE001
+                # one unreadable org must not blank every org's notices
+                store._log(f"notifications: {slug!r} skipped: {type(e).__name__}: {e}")
+                continue
+            yield org
         return
     for _, org in store.list_orgs_with_docs():
         yield org

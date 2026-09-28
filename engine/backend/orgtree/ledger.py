@@ -16741,6 +16741,21 @@ class Org:
                 return str(row["ref"])
         return None
 
+    def _work_review_mail_owners(self, it: WorkItem) -> list[str] | None:
+        """Every node a review request for `it` can have been mailed to: each
+        reviewer its history names, plus the current one. None when the
+        history was folded past WORK_HISTORY_MAX (an older naming may be
+        gone), and the caller must then read every box, as before."""
+        hist = it.get("history") or []
+        if any(isinstance(h, dict) and h.get("kind") == "folded" for h in hist):
+            return None
+        owners = {n for h in hist if isinstance(h, dict) and h.get("op") == "reviewer"
+                  for n in (self._work_actor_node(h.get("to")),) if n}
+        current = self._work_actor_node(it.get("reviewer"))
+        if current:
+            owners.add(current)
+        return sorted(owners)
+
     def _work_mark_review_requests_stale(self, it: WorkItem) -> None:
         """Mark older review-request mail when the item advances.
 
@@ -16754,13 +16769,26 @@ class Org:
         slug = str(it.get("slug") or "")
         sections: list[Iterable[dict[str, Any]]] = []
         mail = self.d.get("mail") or {}
-        if isinstance(mail, dict):
-            sections.extend(cast(Iterable[dict[str, Any]], rows)
-                            for rows in mail.values() if isinstance(rows, list))
         mail_log = self.d.get("mail_log") or {}
-        if isinstance(mail_log, dict):
-            sections.extend(cast(Iterable[dict[str, Any]], rows)
-                            for rows in mail_log.values() if isinstance(rows, list))
+        owners = self._work_review_mail_owners(it)
+        if owners is not None:
+            # a review request is mailed to the reviewer being named, and every
+            # naming is in the item's history: only those boxes can hold one,
+            # so only they are read, not every agent's whole mail history
+            # (N1000 item desk-chat-read-and-other-request-paths-still-loa)
+            for box in (mail, mail_log):
+                if isinstance(box, dict):
+                    for owner in owners:
+                        rows = box.get(owner)
+                        if isinstance(rows, list):
+                            sections.append(cast(Iterable[dict[str, Any]], rows))
+        else:
+            if isinstance(mail, dict):
+                sections.extend(cast(Iterable[dict[str, Any]], rows)
+                                for rows in mail.values() if isinstance(rows, list))
+            if isinstance(mail_log, dict):
+                sections.extend(cast(Iterable[dict[str, Any]], rows)
+                                for rows in mail_log.values() if isinstance(rows, list))
         for rows in sections:
             for row in rows:
                 ev = row.get("ev")

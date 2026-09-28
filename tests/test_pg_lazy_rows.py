@@ -477,6 +477,22 @@ class NoticesRuntimeView(unittest.TestCase):
         mine = [r for r in view['notices'] if r['org'] == self.slug]
         self.assertEqual(sorted(r['kind'] for r in mine), ['agent-frozen', 'question', 'urgent-mail'])
 
+    def test_one_unreadable_org_does_not_blank_the_others(self):
+        from orgtree import desktop_notifications as dn
+        self.seed()
+        store.save_org(store.create_org('broken-' + uuid.uuid4().hex[:8]))   # another org
+        real = store.load_runtime_org
+
+        def flaky(slug, *a, **k):
+            if slug != self.slug:
+                raise RuntimeError('corrupt org')
+            return real(slug, *a, **k)
+        with patch.object(dn, '_RUNTIME_VIEWS', True), \
+                patch.object(store, 'load_runtime_org', flaky):
+            out = dn.notices(limit=10_000)
+        self.assertTrue(out['notices'])
+        self.assertEqual({r['org'] for r in out['notices']}, {self.slug})
+
     def test_notices_use_runtime_views(self):
         from orgtree import desktop_notifications as dn
         self.seed()
@@ -503,6 +519,13 @@ class SwitchDefault(unittest.TestCase):
         if 'ORGTREE_LAZY_ROWS' in os.environ:
             self.skipTest('ORGTREE_LAZY_ROWS set in this environment: default NOT tested')
         self.assertTrue(store.LAZY_ROWS)
+
+    def test_the_notices_view_default_is_on(self):
+        import os
+        from orgtree import desktop_notifications as dn
+        if 'ORGTREE_NOTICES_RUNTIME_VIEW' in os.environ:
+            self.skipTest('ORGTREE_NOTICES_RUNTIME_VIEW set in this environment: default NOT tested')
+        self.assertTrue(dn._RUNTIME_VIEWS)
 
     def test_the_chat_view_default_is_on(self):
         import os
