@@ -26064,10 +26064,16 @@ def _after_turn(slug: str, nid: str, org: Org, res: dict[str, Any],
     if nid not in org.nodes:
         return
     op_id = str(st.get("lifecycle_operation_id") or "")
+    # the turn's lifecycle outcome is WRITTEN in the transaction below: `org`
+    # is the admission copy, whose transaction committed before the provider
+    # ran, so a record made into it was never saved (every turn's completed /
+    # interrupted row was lost — item possible-lost-write-after-turn-records-
+    # the-turn, reproduced on v3 e7ed5d6)
+    lifecycle_row: dict[str, Any] | None = None
     if op_id:
         completed = _turn_observed_success(res, st)
-        lifecycle.record(
-            org.d, operation_id=op_id, kind="turn",
+        lifecycle_row = dict(
+            operation_id=op_id, kind="turn",
             state="completed" if completed else "interrupted",
             at=now_iso(), node=nid,
             settlement="foreground-complete" if completed else "foreground-stopped",
@@ -26233,12 +26239,18 @@ def _after_turn(slug: str, nid: str, org: Org, res: dict[str, Any],
     n_denials, n_approvals = len(raw_denials), len(raw_approvals)
     spend_total = None
     cache_event: dict[str, Any] | None = None
-    if cost or occ or cw or denials or res:
+    if cost or occ or cw or denials or res or lifecycle_row:
+        # the node's row, the org's api_cost_usd only for an on-key turn, and
+        # the list logs it appends to (lock-free appends, see lifecycle.py)
+        _cb_logs = (["turn_log"] if _ledger.TURN_LOG else []) + (
+            ["lifecycle"] if lifecycle_row else [])
         with halt.txn(slug, **{"nodes": [nid], "sections": ["api_cost_usd"] if on_key else [],
-                               "logs": ["turn_log"] if _ledger.TURN_LOG else []}) as _cb_tx:  # PG-3e-A
+                               "logs": _cb_logs}) as _cb_tx:  # PG-3e-A
             o2 = _cb_tx.org
             if nid not in o2.nodes:
                 return
+            if lifecycle_row:
+                lifecycle.record(o2.d, **lifecycle_row)
             n = o2.node(nid)
             # a completed turn ends any network-failure run — the retry
             # counter is CONSECUTIVE by design (user report 2026-08-06) — and
