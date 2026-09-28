@@ -32,6 +32,7 @@ def child(root):
     from orgtree import api, store, supervisor
     phase = ['setup']
     stmts = []
+    last = {}
     orig_exec = psycopg.Cursor.execute
 
     def value_bytes(v):
@@ -51,7 +52,7 @@ def child(root):
         rec = dict(phase=phase[0], sql=' '.join(query.split())[:220], rows=0, bytes=0,
                    params=[str(p)[:60] for p in (params or ())][:4] if isinstance(params, (list, tuple)) else None)
         stmts.append(rec)
-        self._probe_rec = rec
+        last[id(self)] = rec
         return orig_exec(self, query, params, *a, **k)
 
     def wrap_fetch(name):
@@ -59,7 +60,7 @@ def child(root):
 
         def fetch(self, *a, **k):
             out = orig(self, *a, **k)
-            rec = getattr(self, '_probe_rec', None)
+            rec = last.get(id(self))
             if rec is not None:
                 rows = ([out] if out is not None else []) if name in ('fetchone', '__next__') else out
                 rec['rows'] += len(rows)
