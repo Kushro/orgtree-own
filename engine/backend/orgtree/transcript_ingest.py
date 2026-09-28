@@ -123,18 +123,26 @@ class _SourceView:
 
 
 def _source_view(slug, nid):
+    """The capture's source inputs for one node, or None when there is no
+    such node.
+
+    transcript-capture-source-view-falls-back-to-a-f: a node whose identity
+    was not minted yet (every node's first capture) used to load the whole
+    org here, 18.4 CPU-s at N1000. The bounded view serves that case too:
+    the mints (records.incarnation -> reply_events.incarnation) read only
+    the slug, the org's and the node's reply ids and the node's own
+    transcript id, which the view carries from one statement; they persist
+    through their own org_tx and never stamp a shared view (_shared_snapshot),
+    and capture re-reads the view after minting. A missing `model` or
+    `generation` is missing from the whole Org too (no load heal adds them).
+    Only a root the bounded read cannot answer at all (the JSON backend, or
+    `nodes` stored as one blob) still needs the whole Org."""
     from . import store
     doc = store.read_transcript_source(slug, nid)
     if doc is not None:
-        node = doc['nodes'][nid]
-        if not node.get('session_id'):
-            return _SourceView(doc)  # capture returns before path/identity resolution
-        # Source naming and legacy identity initialization remain owned by
-        # their existing routines. Never let a partial view enter a mint.
-        if (doc.get('reply_incarnation') and node.get('transcript_incarnation')
-                and node.get('reply_incarnation') and node.get('model')
-                and node.get('session_id') and 'generation' in node):
-            return _SourceView(doc)
+        return _SourceView(doc)
+    if store.node_row_exists(slug, nid) is False:
+        return None
     return store.cached_org(slug)
 
 
@@ -150,6 +158,8 @@ def capture(slug, nid, *, beginning=False, backfill=False):
     # Resolve only source identity/path inputs. Legacy documents still use
     # their existing normalized Org and locked identity initialization.
     org = _source_view(slug, nid)
+    if org is None:
+        return False            # no such node (removed since it was queued)
     node = org.node(nid)
     if not node.get('session_id'):
         return False
@@ -161,6 +171,8 @@ def capture(slug, nid, *, beginning=False, backfill=False):
         # mint until the snapshot reloaded: about 12 per node where 2 do.
         records.incarnation(org, nid)
         org = _source_view(slug, nid)
+        if org is None:
+            return False
         node = org.node(nid)
     path = sup.transcript_path_for_node(org, nid)
     imported = imported_history_path(org, nid) if backfill else None

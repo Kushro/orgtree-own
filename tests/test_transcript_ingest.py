@@ -492,20 +492,112 @@ class CaptureTests(unittest.TestCase):
         self.assertNotIn('work_items', doc)
         self.assertLess(len(json.dumps(doc)), 2000)
 
-    def test_source_projection_missing_identity_uses_legacy_resolution(self):
+    # -- transcript-capture-source-view-falls-back-to-a-f --------------------
+    # A node's first capture (no transcript/reply identity minted yet) used to
+    # load the whole org; the bounded view now serves it, with identical output.
+
+    @staticmethod
+    def _old_source_view(slug, nid):
+        """ingest._source_view as it was before the fix (v3 1232253)."""
+        doc = store.read_transcript_source(slug, nid)
+        if doc is not None:
+            node = doc['nodes'][nid]
+            if not node.get('session_id'):
+                return ingest._SourceView(doc)
+            if (doc.get('reply_incarnation') and node.get('transcript_incarnation')
+                    and node.get('reply_incarnation') and node.get('model')
+                    and node.get('session_id') and 'generation' in node):
+                return ingest._SourceView(doc)
+        return store.cached_org(slug)
+
+    def _fresh_org(self):
+        """A real-shaped org whose node has never been captured: no reply or
+        transcript identity minted (a plain hire, as at N1000)."""
+        org = store.create_org('fresh-' + uuid.uuid4().hex[:8])
+        org.hire(ledger.USER, None, 'haiku', 0, 'agent')
+        org.node('agent')['charter'] = 'real-shaped payload ' * 200
+        store.save_org(org)
+        node = store.load_org(org.d['slug']).node('agent')
+        self.assertTrue(node.get('session_id'), 'control: the node has a conversation')
+        self.assertFalse(node.get('transcript_incarnation'), 'control: nothing minted yet')
+        self.assertFalse(node.get('reply_incarnation'), 'control: nothing minted yet')
+        return org.d['slug']
+
+    def _capture_with(self, view, slug):
+        whole = []
+        original = store.cached_org
+        def counted(value):
+            whole.append(value)
+            return original(value)
+        with patch.object(ingest, '_source_view', view), \
+             patch.object(store, 'cached_org', side_effect=counted):
+            self.assertTrue(ingest.capture(slug, 'agent', backfill=True))
+        org = store.load_org(slug)             # the whole-Org resolver, after the fact
+        key = source_key(org, 'agent')
+        rows = records.tail(key, 1000)[0]
+        node = org.node('agent')
+        return whole, key, [r[2] for r in rows], node, org.d.get('reply_incarnation')
+
+    def test_first_capture_is_identical_on_the_bounded_view(self):
+        self.write(0, 6)
+        slug_old, slug_new = self._fresh_org(), self._fresh_org()
+        whole_old, key_old, bodies_old, node_old, org_old = self._capture_with(
+            self._old_source_view, slug_old)
+        whole_new, key_new, bodies_new, node_new, org_new = self._capture_with(
+            ingest._source_view, slug_new)
+        self.assertTrue(whole_old, 'control: the old path loaded the whole org')
+        self.assertEqual(whole_new, [], 'the bounded view needs no whole Org')
+        self.assertEqual(len(bodies_old), 6)
+        self.assertEqual(bodies_new, bodies_old)
+        for node, org_id, key in ((node_old, org_old, key_old), (node_new, org_new, key_new)):
+            # captured under the identity the whole-Org resolver computes, and
+            # that identity is the persisted reply ids, minted once
+            self.assertEqual(node['transcript_incarnation'], org_id + ':' + node['reply_incarnation'])
+            self.assertEqual(json.loads(key), [node['transcript_incarnation'], node['session_id'], False])
+
+    def test_an_unminted_node_is_captured_without_any_whole_org_load(self):
+        self.write(0, 3)
+        slug = self._fresh_org()
+        with patch.object(store, 'cached_org', side_effect=AssertionError('whole Org')):
+            self.assertTrue(ingest.capture(slug, 'agent', backfill=True))
+            self.assertTrue(ingest.capture(slug, 'agent'))
+        self.assertEqual(len(records.tail(source_key(store.load_org(slug), 'agent'), 1000)[0]), 3)
+
+    def test_source_projection_missing_identity_stays_bounded(self):
+        # was ..._uses_legacy_resolution: a view missing an identity field
+        # fell back to cached_org; it is now served as is (mints use it)
         slug = self.org.d['slug']
         doc = store.read_transcript_source(slug, 'agent')
         doc['nodes']['agent'].pop('transcript_incarnation', None)
-        original = store.cached_org
+        with patch.object(store, 'read_transcript_source', return_value=doc), \
+             patch.object(store, 'cached_org', side_effect=AssertionError('whole Org')):
+            view = ingest._source_view(slug, 'agent')
+        self.assertEqual(view.node('agent')['session_id'], self.org.node('agent')['session_id'])
+        self.assertNotIn('transcript_incarnation', view.node('agent'))
+
+    def test_a_missing_node_is_nothing_to_capture(self):
+        # before: a whole-org load, then KeyError -> capture failure and retry
+        slug = self.org.d['slug']
+        with patch.object(store, 'cached_org', side_effect=AssertionError('whole Org')):
+            self.assertIsNone(ingest._source_view(slug, 'no-such-node'))
+            self.assertFalse(ingest.capture(slug, 'no-such-node', backfill=True))
+            self.assertFalse(ingest.capture_safely(slug, 'no-such-node'))
+
+    def test_a_root_the_bounded_read_cannot_answer_still_uses_the_whole_org(self):
+        # the JSON backend, or `nodes` stored as one blob: read_transcript_source
+        # and node_row_exists both answer None
+        slug = self.org.d['slug']
         calls = []
+        original = store.cached_org
         def legacy(value):
             calls.append(value)
             return original(value)
-        with patch.object(store, 'read_transcript_source', return_value=doc), \
+        with patch.object(store, 'read_transcript_source', return_value=None), \
+             patch.object(store, 'node_row_exists', return_value=None), \
              patch.object(store, 'cached_org', side_effect=legacy):
-            self.assertEqual(ingest._source_view(slug, 'agent').node('agent')['session_id'],
-                             self.org.node('agent')['session_id'])
+            view = ingest._source_view(slug, 'agent')
         self.assertEqual(calls, [slug])
+        self.assertEqual(view.node('agent')['session_id'], self.org.node('agent')['session_id'])
 
     def test_source_projection_preserves_sandbox_and_bound_account(self):
         slug = self.org.d['slug']
