@@ -160,8 +160,8 @@ class OnPostgres(unittest.TestCase):
         store.claim_data_root()
 
     def setUp(self):
-        self.slug = f._fresh_org('wid-' + self._testMethodName)
-        org = store.load_org(self.slug)
+        org = store.create_org('wid-' + self._testMethodName)
+        self.slug = org.d['slug']
         org.hire(U, None, 'luna', 20, 'boss')
         for n in range(3):
             org.work_create('boss', f'Live item {n}', objective='Problem. Solution.')
