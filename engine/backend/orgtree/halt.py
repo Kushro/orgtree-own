@@ -112,8 +112,13 @@ def _covers(tx: orgtx.OrgTx, nodes: frozenset[str], sections: frozenset[str],
     # an owner row (`section\x1fowner`) is also covered when the enclosing
     # transaction holds its whole split container FOR UPDATE — the same rule
     # org_tx's own write check applies (store.split_section_of)
+    # A custody-receipt owner (`mail_transitions\x1fowner`) is not a split
+    # row, and is covered by the whole receipt section the same way -- which
+    # is what an unconverted org's transaction holds (orgtx._receipt_scope)
     missing += [f"section {s!r}" for s in sections - tx.lock_sections
-                if store.split_section_of(s) not in tx.lock_sections]
+                if store.split_section_of(s) not in tx.lock_sections
+                and not (s.startswith(store.RECEIPT_KEY + store.SPLIT_SEP)
+                         and store.RECEIPT_KEY in tx.lock_sections)]
     missing += [f"shared node {n!r}" for n in
                 share_nodes - tx.lock_nodes - tx.share_nodes]
     missing += [f"shared section {s!r}" for s in

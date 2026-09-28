@@ -4890,8 +4890,10 @@ def _write_receipts(conn: sqlite3.Connection, lazy: LazyDoc | None, v: Any,
                     receipts: list[tuple[Any, Any]] | None) -> None:
     """Write only the receipt rows `v` changed, in the save's transaction.
 
-    Recorded as a write of doc key `mail_transitions`, so an org_tx still
-    needs that section's exclusive lock (orgtx._check) and caches refresh it.
+    Recorded per written owner as `mail_transitions` + SPLIT_SEP + owner, so
+    an org_tx needs that owner's lock or the whole section's
+    (orgtx._disallowed); caches map the name back to `mail_transitions`
+    (SaveChanges.changed_keys).
     Nothing is adopted here: a rollback must leave every edit pending."""
     from . import receiptmapping, receiptwriter
     slug = lazy._slug if lazy is not None else ""
@@ -4905,7 +4907,7 @@ def _write_receipts(conn: sqlite3.Connection, lazy: LazyDoc | None, v: Any,
         conn.use()                                    # type: ignore[attr-defined]
         receiptwriter.apply(conn.raw, conn.org_id, plan)   # type: ignore[attr-defined]
         if changes is not None:
-            changes.doc_upserts.append(RECEIPT_KEY)
+            changes.doc_upserts.extend(RECEIPT_KEY + SPLIT_SEP + o for o in sorted(plan.owners))
     if receipts is not None:
         receipts.append((v, plan))
 

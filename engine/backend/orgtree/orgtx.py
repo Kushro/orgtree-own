@@ -470,6 +470,12 @@ def _disallowed(tx: OrgTx, changes: SaveChanges) -> tuple[tuple[str, str], ...]:
             continue        # PG-3d: an empty split container, under an owner lock
         if k in created:
             continue        # PG-0b: an always-present row the save created, still cleared
+        if k.startswith(_RECEIPT_OWNER):
+            # custody receipts: that owner's lock or the whole section's --
+            # never another owner's (n1000-burst-27-of-messages-fail-with-locktimeout)
+            if k not in tx.lock_sections and store.RECEIPT_KEY not in tx.lock_sections:
+                bad.append(("section", k))
+            continue
         if k not in tx.lock_sections \
                 and store.split_section_of(k) not in tx.lock_sections:
             bad.append(("section", k))
@@ -648,6 +654,7 @@ class SeamBackend:
             for tx in order:
                 ids: list[str] = []
                 self.locks.acquire(owner, (tx.slug, "org", _ORG_KEY), tx.whole, lock_timeout)
+                _receipt_scope(tx, False)          # receipt rows are PostgreSQL-only
                 if tx.all_nodes:
                     if not tx.whole:
                         self.locks.acquire(owner, (tx.slug, "node", _ALL_NODES_KEY), True,
@@ -765,6 +772,7 @@ class JsonBackend:
         with store.DOC_LOCK:                       # held by _run already: re-entrant
             for tx in order:
                 _pause("before_lock", tx)
+                _receipt_scope(tx, False)              # receipt rows are PostgreSQL-only
             for tx in order:
                 _pause("after_lock", tx)
             for tx in order:
@@ -853,6 +861,39 @@ def _pg_error(e: BaseException) -> BaseException:
 
 
 #: the row a lock-plan entry names, per kind (S-F: run inside _lock_block)
+#: a custody-receipt owner's lock name: (RECEIPT_KEY, owner) joined like a
+#: split owner row -- but receipts are NOT doc rows (store.split_section_of
+#: does not know them): see `_lock_block` and `_disallowed`
+_RECEIPT_OWNER = store.RECEIPT_KEY + store.SPLIT_SEP
+
+def _receipt_scope(tx: OrgTx, converted: bool) -> None:
+    """Per-owner receipt locks are real only for an org whose receipts are
+    ROWS (store.RECEIPT_ROWS and a converted org): each owner is its own row,
+    locked by the custody writer's key. An unconverted org keeps
+    `mail_transitions` as ONE doc blob that every receipt write rewrites, so
+    a transaction that declared owners takes the whole section FOR UPDATE
+    instead, exactly as before (n1000-burst-27-of-messages-fail-with-
+    locktimeout, coordinator ruling 2026-09-28 08:01Z). Decided under the org
+    pseudo-row, which conversion excludes."""
+    owners = {s for s in tx.lock_sections | tx.share_sections if s.startswith(_RECEIPT_OWNER)}
+    if not owners or converted:
+        return
+    whole = bool(owners & tx.lock_sections)
+    tx.lock_sections = (tx.lock_sections - owners) | ({store.RECEIPT_KEY} if whole else set())
+    tx.share_sections = tx.share_sections - owners - ({store.RECEIPT_KEY} if whole else set())
+    if not whole:
+        tx.share_sections = tx.share_sections | {store.RECEIPT_KEY}
+
+
+def _receipts_converted(raw: Any) -> bool:
+    """Is this org's receipt store rows (checked on the tx's connection, under
+    the org pseudo-row)? Off unless ORGTREE_RECEIPT_ROWS is on."""
+    if not store.RECEIPT_ROWS:
+        return False
+    return raw.execute("SELECT 1 FROM meta WHERE key = %s",
+                       (store._META_RECEIPT_ROWS,)).fetchone() is not None   # pyright: ignore[reportPrivateUsage]
+
+
 _LOCK_ROW_SQL = {"node": "SELECT 1 FROM nodes WHERE id = {}",
                  "section": "SELECT 1 FROM doc WHERE key = {}",
                  "log": "SELECT 1 FROM log_d WHERE sect = {} AND owner = {}"}
@@ -882,6 +923,15 @@ def _lock_block(raw: Any, org_id: int,
     lines: list[str] = []
     for kind, name, exclusive in entries:
         fn = "pg_advisory_xact_lock" if exclusive else "pg_advisory_xact_lock_shared"
+        if kind == "section" and name.startswith(_RECEIPT_OWNER):
+            # a receipt owner has no doc row to lock: take the custody
+            # writer's own per-owner key (receiptwriter.apply), so its later
+            # take at save is reentrant and a second tx on the owner QUEUES
+            # here instead of failing late at the writer's version check
+            lines.append(sql.SQL("PERFORM {}(hashtext({}), hashtext({}));").format(
+                sql.SQL(fn), sql.Literal(f"org_{int(org_id)}"),
+                sql.Literal("receipt-owner:" + name[len(_RECEIPT_OWNER):])).as_string(raw))
+            continue
         lines.append(sql.SQL("PERFORM {}({}, hashtext({}));").format(
             sql.SQL(fn), sql.Literal(int(org_id)),
             sql.Literal(f"{kind}:{name}")).as_string(raw))
@@ -958,6 +1008,7 @@ class PgBackend:
                     # rows (p01 review B1).
                     if pgstore.read_marker(store._db_path(tx.slug)) != conn.org_id:  # pyright: ignore[reportPrivateUsage]
                         raise LedgerError(f"no such org: {tx.slug!r}")
+                    _receipt_scope(tx, _receipts_converted(raw))
                     if tx.all_nodes:
                         if not tx.whole:
                             raw.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
@@ -1185,11 +1236,11 @@ def _section_names(x: Iterable[str | tuple[str, str]] | None, what: str
                                  "(section, owner)")
             rows.add(n)
             continue
-        if len(n) != 2 or n[0] not in store.SPLIT_SECTIONS \
+        if len(n) != 2 or n[0] not in (*store.SPLIT_SECTIONS, store.RECEIPT_KEY) \
                 or not isinstance(n[1], str) or not n[1] \
                 or store.SPLIT_SEP in n[1]:
             raise ValueError(f"{what}: {n!r} must be (section, owner) with "
-                             f"section in {sorted(store.SPLIT_SECTIONS)!r}")
+                             f"section in {sorted((*store.SPLIT_SECTIONS, store.RECEIPT_KEY))!r}")
         rows.add(n[0] + store.SPLIT_SEP + n[1])
         parents.add(n[0])
     return frozenset(rows), frozenset(parents)

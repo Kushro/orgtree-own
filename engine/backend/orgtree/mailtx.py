@@ -145,10 +145,11 @@ def retract_rows(nid: str) -> dict[str, list[Any]]:
 
 
 def confirm_rows(nid: str) -> dict[str, list[Any]]:
-    """Confirming a delivered batch: the delivery journal, the reclaim
-    receipts (`mail_transitions`) and the node row (its `mail_drain` demand
-    and `halt_queue`)."""
-    return {"nodes": [nid], "sections": [("delivering", nid), "mail_transitions"]}
+    """Confirming a delivered batch: the delivery journal, the node's OWN
+    reclaim receipts (`("mail_transitions", nid)`: the custody owner lock, not
+    the org-wide section every delivery used to queue on) and the node row
+    (its `mail_drain` demand and `halt_queue`)."""
+    return {"nodes": [nid], "sections": [("delivering", nid), ("mail_transitions", nid)]}
 
 
 def inbound_rows(recipients: Iterable[str]) -> dict[str, list[Any]]:
@@ -164,7 +165,7 @@ def inbound_rows(recipients: Iterable[str]) -> dict[str, list[Any]]:
 def reclaim_rows(nid: str) -> dict[str, list[Any]]:
     """Folding undelivered batches back: the journal and reclaim receipts,
     the pending boxes and notices they return to, and the node row."""
-    return {"nodes": [nid], "sections": [("delivering", nid), "mail_transitions",
+    return {"nodes": [nid], "sections": [("delivering", nid), ("mail_transitions", nid),
                                          ("mail", nid), ("notices", nid)]}
 
 
