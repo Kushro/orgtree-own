@@ -71,7 +71,7 @@ def cold() -> str:
 
 class DigestCache(unittest.TestCase):
     def setUp(self) -> None:
-        self.p = patch.object(supervisor, 'scratch_dir', lambda slug, nid: str(CWD))
+        self.p = patch.object(supervisor, 'scratch_dir', lambda slug, nid, **_: str(CWD))
         self.p.start()
         CWD.mkdir(parents=True, exist_ok=True)
         write(HOME / '.claude' / 'CLAUDE.md', 'user notes @imp.md\n')
