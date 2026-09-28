@@ -70,7 +70,7 @@ class SaveProbe(unittest.TestCase):
 
     def test_a_changed_item_is_still_projected(self):
         self.settled()
-        self.add(self.item(status='blocked', blocked_reason='x'))
+        self.add(dict(self.item(), status='blocked', blocked_reason='x'))
         result, seen = self.counted_refresh()
         self.assertTrue(result)
         self.assertGreater(len(seen), 2)
