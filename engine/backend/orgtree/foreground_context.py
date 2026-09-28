@@ -30,6 +30,9 @@ SETTINGS = tuple('''slug name workspace dirs max_top_grant default_top_grant com
  external_inbox_multi_holder _migrations _actors_typed whole_grants_v1
  headless max_children max_depth created version'''.split())
 CURRENT_LISTS = ('audiences', 'audience_requests', 'user_inbox', 'watchdogs', 'watchdog_tombs')
+# a whole list section; `BETWEEN` keeps ix_log_l in the generic plan
+# (store._SECT_RANGE, tests/test_pg_generic_plan_sections.py)
+_LIST_ROWS_SQL = 'SELECT val FROM log_l WHERE sect BETWEEN %s AND %s ORDER BY seq'
 
 
 def _compatible(settings, nodes):
@@ -220,7 +223,7 @@ def build(raw, slug: str, graph: dict, *, header: bool = True,
         for sect in CURRENT_LISTS:
             if sect not in blobs:
                 blobs[sect] = [json.loads(row[0]) for row in raw.execute(
-                    'SELECT val FROM log_l WHERE sect=%s ORDER BY seq', (sect,)).fetchall()]
+                    _LIST_ROWS_SQL, (sect, sect)).fetchall()]
         for sect in owner_sections:
             legacy = blobs.get(sect) or {}
             selected = {}

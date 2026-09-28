@@ -2015,7 +2015,7 @@ class SectionMap(dict[str, Any]):
                 try:
                     for owner, seq, val in conn.execute(
                             "SELECT owner, seq, val FROM log_d "
-                            "WHERE sect=? ORDER BY seq", (self._sect,)):
+                            f"WHERE {_SECT_RANGE} ORDER BY seq", (self._sect, self._sect)):
                         owner = cast(str, owner)
                         if owner in wanted:
                             grouped[owner].append((cast(int, seq), cast(str, val)))
@@ -3802,7 +3802,7 @@ class LazyDoc(dict[str, Any]):
             with _POOL.acquire(self._slug) as conn:
                 raw = [r[0] for r in conn.execute(
                     f"SELECT json_extract(val,{paths}) FROM log_l "
-                    f"WHERE sect=? ORDER BY seq", (k,))]
+                    f"WHERE {_SECT_RANGE} ORDER BY seq", (k, k))]
             rows = [dict(zip(fields, json.loads(v))) for v in raw]
         self._proj[key] = rows
         return rows
@@ -4094,8 +4094,8 @@ def _owners_of(conn: sqlite3.Connection, sect: str, *,
         return owners
     seen = set(owners)
     for (o,) in conn.execute(
-            "SELECT owner FROM log_d WHERE sect=? GROUP BY owner ORDER BY MIN(seq)",
-            (sect,)):
+            f"SELECT owner FROM log_d WHERE {_SECT_RANGE} GROUP BY owner ORDER BY MIN(seq)",
+            (sect, sect)):
         if o not in seen:
             owners.append(cast(str, o))
             seen.add(o)
@@ -4113,8 +4113,8 @@ def _read_dict_log(conn: sqlite3.Connection, sect: str, slug: str = ""
     owners = _owners_of(conn, sect)
     snaps: dict[str, list[tuple[int, str]]] = {o: [] for o in owners}
     for owner, seq, val in conn.execute(
-            "SELECT owner, seq, val FROM log_d WHERE sect=? ORDER BY seq",
-            (sect,)).fetchall():
+            f"SELECT owner, seq, val FROM log_d WHERE {_SECT_RANGE} ORDER BY seq",
+            (sect, sect)).fetchall():
         snaps.setdefault(cast(str, owner), []).append(
             (cast(int, seq), cast(str, val)))
     out = SectionMap(slug, sect, owners)
@@ -4134,8 +4134,8 @@ def _read_dict_log(conn: sqlite3.Connection, sect: str, slug: str = ""
 def _read_list_log(conn: sqlite3.Connection, sect: str
                    ) -> tuple[list[tuple[int, str]], AppendLog]:
     rows = [(cast(int, seq), cast(str, val)) for seq, val in conn.execute(
-        "SELECT seq, val FROM log_l WHERE sect=? ORDER BY seq",
-        (sect,)).fetchall()]
+        f"SELECT seq, val FROM log_l WHERE {_SECT_RANGE} ORDER BY seq",
+        (sect, sect)).fetchall()]
     return rows, AppendLog((json.loads(val) for _, val in rows), rows=rows)
 
 
@@ -4171,18 +4171,48 @@ def _load_section(slug: str, sect: str, snap_logs: dict[str, Any]) -> Any:
         return al
 
 
+#: GENERIC-PLAN-SAFE SECTION FILTERS (N1000 attempt 5, 2026-09-28: readiness
+#: 88 s -> 1552 s). psycopg prepares a statement on its 5th run, and PostgreSQL
+#: then may plan it once for ANY parameter. log_d/log_l hold a handful of
+#: sections of very different sizes, so the generic estimate for `sect=$1`
+#: is "a large share of the table". It then plans a sequential scan, or a
+#: primary-key walk filtered on sect. For an empty or small section that
+#: reads the WHOLE table: 0.2-0.7 s on a 0.9 GB log_d and 1.5-3.7 s live,
+#: and it grows with every inactive turn kept in history. Two shapes keep
+#: the (sect, ...) index in the generic plan, and both are portable to SQLite:
+#:   presence: `SELECT sect ... WHERE sect>=? ORDER BY sect LIMIT 1`, then
+#:     compare. The first index entry at or after the name is the only
+#:     cheap plan, whatever the estimate, so this never reads more than one
+#:     index page per section.
+#:   a whole section: `sect BETWEEN ? AND ?` with the name passed twice. A
+#:     bounded range is estimated small, so the index is used. The cost
+#:     then follows the section's own rows, not the table's size.
+#: Pinned by tests/test_pg_generic_plan_sections.py (generic-plan EXPLAIN).
+_SECT_RANGE = "sect BETWEEN ? AND ?"
+
+
+def _log_has(conn: Any, table: str, sect: str) -> bool:
+    """Does log table ``table`` (log_d or log_l) hold a row of ``sect``?"""
+    row = conn.execute(f"SELECT sect FROM {table} WHERE sect>=? ORDER BY sect LIMIT 1",
+                       (sect,)).fetchone()
+    return row is not None and row[0] == sect
+
+
 #: S-A (pg-per-call-cost): `_load_lazy`'s existence probes in ONE statement.
-#: One `SELECT <i> WHERE EXISTS (...)` term per log section, joined by UNION
-#: ALL: each term stops at its first row (the old `LIMIT 1` probe, same index),
-#: and the integer literal names the section by its position in
-#: `_PROBE_SECTS` (a literal, not a parameter: PostgreSQL cannot type a bare
-#: `SELECT $1`). Portable across SQLite and PostgreSQL.
+#: One term per log section, joined by UNION ALL. Each term reads the first
+#: index entry at or after the section name (see above) and keeps the term
+#: when that entry IS the section. The integer literal names the section by
+#: its position in `_PROBE_SECTS` (a literal, not a parameter: PostgreSQL
+#: cannot type a bare `SELECT $1`). Each section is bound twice, see
+#: `_PROBE_PARAMS`. Portable across SQLite and PostgreSQL.
 _PROBE_SECTS: tuple[str, ...] = DICT_LOGS + LIST_LOGS
 _PRESENCE_SQL: str = " UNION ALL ".join(
-    [f"SELECT {i} WHERE EXISTS (SELECT 1 FROM log_d WHERE sect=?)"
+    [f"SELECT {i} WHERE (SELECT sect FROM log_d WHERE sect>=? ORDER BY sect LIMIT 1)=?"
      for i in range(len(DICT_LOGS))]
-    + [f"SELECT {len(DICT_LOGS) + j} WHERE EXISTS (SELECT 1 FROM log_l WHERE sect=?)"
+    + [f"SELECT {len(DICT_LOGS) + j} WHERE "
+       f"(SELECT sect FROM log_l WHERE sect>=? ORDER BY sect LIMIT 1)=?"
        for j in range(len(LIST_LOGS))])
+_PROBE_PARAMS: tuple[str, ...] = tuple(s for sect in _PROBE_SECTS for s in (sect, sect))
 #: ...and the meta rows a load reads, in one `IN (...)` read
 #: written by receiptstore.convert in the conversion transaction
 _META_RECEIPT_ROWS = "receipt_rows"
@@ -4213,7 +4243,7 @@ def _load_probes(conn: sqlite3.Connection
     metas: dict[str, Any] = {cast(str, k): v for k, v in
                              conn.execute(_LOAD_META_SQL, _LOAD_META_PARAMS).fetchall()}
     hits = {_PROBE_SECTS[int(r[0])] for r in
-            conn.execute(_PRESENCE_SQL, _PROBE_SECTS).fetchall()}
+            conn.execute(_PRESENCE_SQL, _PROBE_PARAMS).fetchall()}
     present = {s for s in DICT_LOGS
                if s in hits or metas.get(_META_OWNERS + s) is not None}
     present.update(s for s in LIST_LOGS if s in hits)
@@ -4650,7 +4680,7 @@ def _write_dict_log(conn: sqlite3.Connection, sect: str, cur: dict[str, Any],
     if not isinstance(cur, SectionMap) or snap is None:
         # Plain-dict save/migration/full section replacement: exact whole
         # section reconciliation, as before.
-        conn.execute("DELETE FROM log_d WHERE sect=?", (sect,))
+        conn.execute(f"DELETE FROM log_d WHERE {_SECT_RANGE}", (sect, sect))
         new_snap: dict[str, list[tuple[int, str]]] = {}
         for owner, value in cur.items():
             entries = owner_entries(owner, value)
@@ -4758,17 +4788,17 @@ def _write_list_log(conn: sqlite3.Connection, sect: str, cur: list[Any],
                     snap: list[tuple[int, str]] | None
                     ) -> list[tuple[int, str]]:
     return _write_log_rows(
-        conn, "log_l", "sect=?", (sect,),
+        conn, "log_l", _SECT_RANGE, (sect, sect),
         "INSERT INTO log_l(sect, at, val) VALUES(?,?,?)", (sect,), cur, snap,
         incremental=cur if isinstance(cur, AppendLog) else None)
 
 
 def _drop_lazy_rows(conn: sqlite3.Connection, sect: str) -> None:
     if sect in DICT_LOGS:
-        conn.execute("DELETE FROM log_d WHERE sect=?", (sect,))
+        conn.execute(f"DELETE FROM log_d WHERE {_SECT_RANGE}", (sect, sect))
         conn.execute("DELETE FROM meta WHERE key=?", (_META_OWNERS + sect,))
     else:
-        conn.execute("DELETE FROM log_l WHERE sect=?", (sect,))
+        conn.execute(f"DELETE FROM log_l WHERE {_SECT_RANGE}", (sect, sect))
 
 
 def _write_lazy(conn: sqlite3.Connection, sect: str, value: Any,
@@ -6157,8 +6187,9 @@ def read_user_inbox(slug: str) -> dict[str, Any]:
                         # Historical non-rowed storage keeps exactly its old semantics.
                         result[name] = json.loads(blobs[section])[-50:]
                     else:
-                        rows = conn.execute("SELECT val FROM log_l WHERE sect=? "
-                                            "ORDER BY seq DESC LIMIT 50", (section,)).fetchall()
+                        rows = conn.execute(f"SELECT val FROM log_l WHERE {_SECT_RANGE} "
+                                            "ORDER BY sect DESC, seq DESC LIMIT 50",
+                                            (section, section)).fetchall()
                         result[name] = [json.loads(row[0]) for row in reversed(rows)]
                 conn.execute("COMMIT")
                 return result
@@ -7309,12 +7340,10 @@ def _assemble_snapshot(slug: str, prev: Org) -> tuple[Org, int] | None:
                             fresh_doc.update(rows)
                         elif k in LAZY_SECTIONS:
                             if k in DICT_LOGS:
-                                if conn.execute("SELECT 1 FROM log_d WHERE sect=? "
-                                                "LIMIT 1", (k,)).fetchone() \
+                                if _log_has(conn, "log_d", k) \
                                         or _meta_get(conn, _META_OWNERS + k) is not None:
                                     fresh_present.add(k)
-                            elif conn.execute("SELECT 1 FROM log_l WHERE sect=? "
-                                              "LIMIT 1", (k,)).fetchone():
+                            elif _log_has(conn, "log_l", k):
                                 fresh_present.add(k)
                     _ta = time.perf_counter()
                     if structural:
@@ -7625,14 +7654,10 @@ def _advance_resident(slug: str, d: LazyDoc) -> bool:
                         else:
                             d._snap_doc.pop(k, None)
                             if k in DICT_LOGS:
-                                present = bool(conn.execute(
-                                    "SELECT 1 FROM log_d WHERE sect=? LIMIT 1",
-                                    (k,)).fetchone()) or _meta_get(
+                                present = _log_has(conn, "log_d", k) or _meta_get(
                                         conn, _META_OWNERS + k) is not None
                             else:
-                                present = bool(conn.execute(
-                                    "SELECT 1 FROM log_l WHERE sect=? LIMIT 1",
-                                    (k,)).fetchone())
+                                present = _log_has(conn, "log_l", k)
                             if present:
                                 d._present.add(k)
                             else:
