@@ -6372,6 +6372,49 @@ def mail_archive_append(d: dict[str, Any], owner: str, row: Any) -> bool:
     return True
 
 
+def log_owner_tail(d: dict[str, Any], sect: str, owner: str,
+                   limit: int) -> tuple[list[Any], int] | None:
+    """The newest `limit` entries of ONE owner's append-only log section, as a
+    reader ordering by timestamp ranks them (entry `at`, then append order),
+    together with that owner's total entry count: one bounded PostgreSQL
+    statement, without materialising the owner. Entries come back in append
+    (seq) order.
+
+    None means only the resident/full path is exact, and the caller must use
+    it: not the PostgreSQL row store, the section held whole, this owner
+    already loaded, replaced, dropped or carrying unsaved appends, or a
+    transaction open on this org on this thread. `at` orders exactly as
+    Python's str comparison of `str(entry.get("at") or "")` does for string
+    timestamps (C collation; NULL, i.e. a missing or non-string `at`, first).
+    """
+    if STORE_BACKEND != "postgres" or not isinstance(d, LazyDoc):
+        return None
+    if (getattr(_orgtx_local, "pinned", None) or {}).get(d._slug) is not None:
+        return None
+    if sect in d._snap_doc or sect in d._dropped:
+        return None
+    section = d.get(sect)
+    if (not isinstance(section, SectionMap) or dict.__contains__(section, owner)
+            or owner in section._dropped or owner in section._replaced
+            or section._appends.get(owner)):
+        return None
+    if owner not in section._present:
+        return [], 0
+    cap = max(1, int(limit))
+
+    def body(conn: sqlite3.Connection) -> list[tuple[int, str, int]]:
+        return [(int(seq), str(val), int(total)) for seq, val, total in conn.execute(
+            "SELECT seq, val, count(*) OVER () FROM log_d WHERE sect=? AND owner=? "
+            "ORDER BY COALESCE(at, '') COLLATE \"C\" DESC, seq DESC LIMIT ?",
+            (sect, owner, cap)).fetchall()]
+    rows = _bounded_read(d._slug, body)
+    if rows is None:
+        return None
+    total = rows[0][2] if rows else 0
+    rows.sort(key=lambda row: row[0])
+    return [json.loads(val) for _, val, _ in rows], total
+
+
 def log_append(d: dict[str, Any], sect: str, row: Any) -> None:
     """Append one row to an append-only log section of an org document.
 

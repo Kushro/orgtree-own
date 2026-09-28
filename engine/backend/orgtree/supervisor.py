@@ -2923,10 +2923,42 @@ def _emit_committed_steer(org: Org, nid: str, saved: Mapping[str, Any]) -> None:
 
 def _synthetic_chat_rows(org: Org, nid: str) -> list[dict[str, Any]]:
     rows = [_steered_chat_row(e) for e in (org.d.get("steered_log") or {}).get(nid, [])]
-    for e in (org.d.get("turn_error_log") or {}).get(nid, []):
-        rows.append({"role": "system", "text": "⚠ " + (e.get("text") or ""),
-                     "tools": [], "ts": e.get("at"), "turn_error": True})
-    return rows
+    return rows + _turn_error_chat_rows(org, nid)
+
+
+def _turn_error_chat_rows(org: Org, nid: str) -> list[dict[str, Any]]:
+    return [{"role": "system", "text": "⚠ " + (e.get("text") or ""),
+             "tools": [], "ts": e.get("at"), "turn_error": True}
+            for e in (org.d.get("turn_error_log") or {}).get(nid, [])]
+
+
+#: steered rows fetched beyond the visible window, so assistant reconciliation
+#: dropping a few rows cannot pull an unfetched older steer into the window
+_STEERED_WINDOW_SLACK = 16
+#: private marker on the oldest fetched steered row during a bounded assembly;
+#: removed before any row is identified or published
+_WINDOW_FLOOR = "_window_floor"
+
+
+def _synthetic_chat_tail(org: Org, nid: str,
+                         window: int) -> tuple[list[dict[str, Any]], int] | None:
+    """The synthetic rows that can reach the newest `window` rows of a
+    timestamp-ordered merge, and the total synthetic row count.
+
+    A node's steered_log keeps every mid-turn message it was ever sent, so the
+    windowed desk read must not load all of it (desk-chat-read-loads-the-
+    agent-s-whole-steered-m). Only the newest `window` steered rows by (ts,
+    append order) can rank inside the window; the store returns those plus
+    slack in one bounded statement. turn_error rows are appended after, as in
+    `_synthetic_chat_rows`. None: use `_synthetic_chat_rows` (not the PG row
+    store, or the owner is resident/modified in this Org)."""
+    from . import store
+    tail = store.log_owner_tail(org.d, "steered_log", nid, window + _STEERED_WINDOW_SLACK)
+    if tail is None:
+        return None
+    entries, total = tail
+    errors = _turn_error_chat_rows(org, nid)
+    return [_steered_chat_row(e) for e in entries] + errors, total + len(errors)
 
 
 def _visible_unresolved(source: dict[str, Any], org: Org, nid: str,
@@ -3029,11 +3061,42 @@ def resolve_chat_event(org: Org, nid: str, ref: Mapping[str, Any]
 
 def _assemble_chat(org: Org, nid: str, last: int | None,
                    hold_back: bool, dynamic: dict[str, Any],
-                   source: dict[str, Any]) -> dict[str, Any]:
+                   source: dict[str, Any], *, window: int | None = None) -> dict[str, Any]:
+    """`window`: the caller keeps only the newest `window` rows (read_window).
+    With it, a monotonic merge with nothing withheld reads only the synthetic
+    rows that can rank there; `_synthetic_omitted` in the result counts the
+    older ones left out, which every returned `seq` already includes."""
     base = cast("list[dict[str, Any]]", source["messages"])
     withheld = _visible_unresolved(source, org, nid, hold_back)
-    synthetic = _synthetic_chat_rows(org, nid)
+    tail = (_synthetic_chat_tail(org, nid, window)
+            if window and last is None and source.get("monotonic") and not withheld
+            else None)
+    if tail is not None:
+        out = _assemble_chat_rows(org, nid, last, hold_back, dynamic, source,
+                                  withheld, tail[0], tail[1] - len(tail[0]), window)
+        if out is not None:
+            return out
+    return cast("dict[str, Any]", _assemble_chat_rows(
+        org, nid, last, hold_back, dynamic, source, withheld,
+        _synthetic_chat_rows(org, nid), 0, None))
+
+
+def _assemble_chat_rows(org: Org, nid: str, last: int | None, hold_back: bool,
+                        dynamic: dict[str, Any], source: dict[str, Any],
+                        withheld: set[int], synthetic: list[dict[str, Any]],
+                        omitted: int, window: int | None) -> dict[str, Any] | None:
+    """`_assemble_chat` over a given synthetic list. With `omitted` older
+    synthetic rows left out, returns None unless every row of the caller's
+    window provably ranks above all of them (the oldest fetched synthetic row
+    stays below the window), so the caller can redo it with the full list."""
+    base = cast("list[dict[str, Any]]", source["messages"])
     total = len(base) - len(withheld) + len(synthetic)
+    if omitted:
+        # Mark the oldest-ranked fetched steered row: reconciliation copies
+        # rows, so it is found again by this key, never by identity.
+        steered = [i for i, m in enumerate(synthetic) if m.get("steered") or m.get("steer_fold")]
+        floor = min(steered, key=lambda i: (str(synthetic[i].get("ts") or ""), i))
+        synthetic[floor] = {**synthetic[floor], _WINDOW_FLOOR: True}
 
     want = last if last is not None and last > 0 else None
     if source.get("monotonic"):
@@ -3076,7 +3139,14 @@ def _assemble_chat(org: Org, nid: str, last: int | None,
     selected = assistant_messages.reconcile(assistant_messages.scope(org, nid), selected)
     if want is not None:
         selected = selected[-want:]
-    seq0 = max(0, total - len(selected))
+    if omitted:
+        # The oldest-ranked fetched steered row must sit below the window: then
+        # every omitted (older) steered row does too, and the window is exact.
+        position = next((j for j, m in enumerate(selected) if m.get(_WINDOW_FLOOR)), None)
+        if position is None or position >= len(selected) - cast(int, window):
+            return None
+        selected[position] = {k: v for k, v in selected[position].items() if k != _WINDOW_FLOOR}
+    seq0 = max(0, total - len(selected)) + omitted
     messages = []
     for i, row in enumerate(selected):
         event_id = _stable_event_id(org, nid, row)
@@ -3112,6 +3182,8 @@ def _assemble_chat(org: Org, nid: str, last: int | None,
                            _evidence=live_evidence)
 
     out = dynamic
+    if omitted:
+        out["_synthetic_omitted"] = omitted
     out["prompts_withheld"] = len(withheld)
     out["live"] = live
     # Assistant snapshots are already rows in the conversation. Their old
