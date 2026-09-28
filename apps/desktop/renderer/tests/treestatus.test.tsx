@@ -123,6 +123,10 @@ test('no second tree fetch was added', () => {
   const app = src('App.tsx')
   // the whole signal rides the one coalesced fetch; a second poller would be
   // a second source of truth about the same thing
-  assert.equal([...app.matchAll(/getTree\(/g)].length, 1,
-    'getTree is called in exactly one place')
+  // since 36dfe60 App reads the tree through getAppTree (the selected
+  // foreground view, falling back to getTree); count every tree reader
+  assert.equal([...app.matchAll(/\bget(?:App|Selected)?Tree\(/g)].length, 1,
+    'the tree is read in exactly one place')
+  assert.equal([...app.matchAll(/\bgetAppTree\(/g)].length, 1,
+    'and that place is getAppTree')
 })

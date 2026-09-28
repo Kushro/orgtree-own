@@ -249,8 +249,13 @@ test('§5 the ticket-reply and presentation-reply composers cannot have the '
   // `slug?: string` — from a parent that renders them only behind a truthy
   // `slug &&` guard, so under `strict: true` neither undefined nor a
   // compile-time-absent value can reach their reply box.
+  // Since 2111052 the docket's reply box lives in FullDocketPane, and
+  // DocketPane is a loader that takes exactly FullDocketPane's props.
+  const docket = src('canvas/docket.tsx')
+  assert.match(docket, /function DocketPane\(props: ComponentProps<typeof FullDocketPane>\)/,
+    'DocketPane takes the props of FullDocketPane, so it inherits the required slug')
   for (const [file, fn] of [
-    ['canvas/docket.tsx', 'DocketPane'],
+    ['canvas/docket.tsx', 'FullDocketPane'],
     ['canvas/gallery.tsx', 'DocPane'],
   ] as const) {
     const text = src(file)

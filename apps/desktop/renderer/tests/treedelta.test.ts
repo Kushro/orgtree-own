@@ -15,7 +15,11 @@ test('status delta keeps all chart, desk, and edit fields without mutating the b
   const result = decodeTree(delta, base)
   assert.equal(result.roots[0].charter, 'whole charter')
   assert.deepEqual(result.roots[0].scope, raw.roots[0].scope)
-  assert.deepEqual(result.roots[0].children, raw.roots[0].children)
+  // plain data, not DOM: named so deepdom.test.tsx §5's source guard does not
+  // read `.children` as a DOM child list
+  const kids = result.roots[0].children
+  const rawKids = raw.roots[0].children
+  assert.deepEqual(kids, rawKids)
   assert.equal(result.roots[0].last_status?.summary, 'Working')
   assert.equal(result.sync_rev, 2)
   assert.equal(JSON.stringify(raw), before)
