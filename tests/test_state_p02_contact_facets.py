@@ -368,8 +368,9 @@ class ContactFacets(unittest.TestCase):
             with self.subTest(contract=contract):
                 cold = self.exact(contract, "migration:legacy-json", "cold")
                 h = cold["harness"]
-                # 73 since PG-3d's per-owner split of mail/delivering/notices (4408075)
-                self.assertEqual((h["writes"], h["writes"] - h["writes_in_transaction"]), (73, 1))
+                # 73 since PG-3d's per-owner split of mail/delivering/notices (4408075);
+                # 77 since b40ea3e added the lazy work_scope_log table
+                self.assertEqual((h["writes"], h["writes"] - h["writes_in_transaction"]), (77, 1))
         for contract in routes:
             with self.subTest(contract=contract):
                 refused = self.exact(contract, "migration:refused", "cold")
@@ -473,10 +474,10 @@ class ContactFacets(unittest.TestCase):
                     r = self.exact("mail.human-send", "mail.human-send" + suffix, condition)
                     self.assertEqual((r["http_status"], r["unknown_contacts"]), (200, []))
                     # PG-3d: a send runs on one org_tx that reads its declared rows in
-                    # the transaction, so a warm send reads the row tables too; only
-                    # a session command (no mail) stays on the shared snapshot
-                    want = ["meta", "nodes"] if condition == "warm" and suffix == ":session-command" else self.FULL
-                    self.assertEqual(self.read(r), want)
+                    # the transaction, so a warm send reads the row tables too. Since
+                    # fence-off S2 (29b550d) a session command does the same: its
+                    # deep-reach notices commit on mailtx.send_rows, not store.write_org
+                    self.assertEqual(self.read(r), self.FULL)
                     if suffix == ":attachment":
                         self.assertTrue(r["audit"].get("stat"))
                     if suffix == ":reply-to-chat-event":
@@ -994,6 +995,13 @@ class ContactFacets(unittest.TestCase):
                 "quick-staff.preview:under-assignee", "quick-staff.preview:top-level",
                 "quick-staff.select:replay", "quick-staff.select:under-assignee:replay",
                 "quick-staff.select:top-level:replay")
+    # fence-off S5 (9dcd1e7) moved staffing_options and quick_staff_preview off
+    # DOC_LOCK onto org_read, the committed document, so a warm options or
+    # preview read loads from the store instead of the resident document.
+    # Fixed upper bounds, measured at v3 9c52e1d (as in test_p02_operation_contacts,
+    # lead ruling 2026-09-28 on fix-the-21-new-python-backend-test-failures-befo).
+    QS_WARM_BOUND = {"quick-staff.options": 7, "quick-staff.preview": 7,
+                     "quick-staff.preview:under-assignee": 16, "quick-staff.preview:top-level": 22}
     QS_SELECT = {"quick-staff.select": (None, 1), "quick-staff.select:under-assignee": ("qs-under", 2),
                  "quick-staff.select:top-level": ("qs-top", 2)}
 
@@ -1010,7 +1018,9 @@ class ContactFacets(unittest.TestCase):
                     self.assertEqual((r["census"]["records"], self.written(r), r["harness"]["writes"]), (1, [], 0))
                     self.assertEqual((r["agents"]["logical"], r["agents"]["physical_written"]), ({}, []))
                     self.assertEqual(r["wakes"], {"send_message": 0, "mail_notify": 0})
-                    if condition == "warm" or variant == "quick-staff.options-refresh":
+                    if variant in self.QS_WARM_BOUND and condition == "warm":
+                        self.assertLessEqual(r["census"]["statements"], self.QS_WARM_BOUND[variant])
+                    elif condition == "warm" or variant == "quick-staff.options-refresh":
                         self.assertEqual(r["census"]["statements"], 0)      # the resident document; no store
             for variant, (stem, sparks) in self.QS_SELECT.items():
                 with self.subTest(variant=variant, condition=condition):
@@ -1042,9 +1052,9 @@ class ContactFacets(unittest.TestCase):
 
     def test_work_reads_load_the_whole_org_fresh_and_stay_in_this_org(self):
         for contract, variant in self.WORK_READS:
-            # 26/24 (were 25/23): every load now probes the `lifecycle` list log,
-            # which PG-3d made a log_l section (4ca96a2)
-            for condition, statements in (("cold", 26), ("warm", 24)):
+            # 8/6 (were 26/24): a4b4167 (S-A) reads an org load's meta and
+            # existence probes in two statements (_load_probes), not ~20
+            for condition, statements in (("cold", 8), ("warm", 6)):
                 with self.subTest(variant=variant, condition=condition):
                     r = self.exact(contract, variant, condition)
                     h, agents = r["harness"], r["agents"]
