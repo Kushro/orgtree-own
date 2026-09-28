@@ -89,9 +89,9 @@ try:
          '        pass\n', ['test_catch_up_queued_behind_the_idle_check_cap_stays_pending'], MODULES[:1]),
         ('mut-failure-is-pending', ingest_py, '            state.round_unsettled = True\n            checks += 1\n',
          '            state.round_unsettled = True\n            pending = True\n            checks += 1\n',
-         ['test_a_node_that_keeps_failing_returns_to_the_idle_cadence'], MODULES[:1]),
-        ('mut-failure-uncapped', ingest_py, '            checks += 1\n            if checks >= IDLE_CHECKS_PER_TICK:\n                break\n            continue\n',
-         '            continue\n', ['test_a_database_outage_keeps_the_idle_cadence_and_bounded_logging'], MODULES[:1]),
+         ['test_a_node_that_keeps_failing_backs_off_and_returns_to_the_idle_cadence'], MODULES[:1]),
+        ('mut-no-backoff', ingest_py, '    return entry is not None and now < entry[1]\n',
+         '    return False\n', ['test_a_database_outage_backs_off_with_bounded_exceptions_and_wakeups'], MODULES[:1]),
         ('mut-no-mint-once', ingest_py, "    if not node.get('transcript_incarnation'):\n        # Mint",
          "    if False:\n        # Mint", ['test_unminted_node_is_minted_once_to_the_same_identity'], MODULES[:2]),
     ]

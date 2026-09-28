@@ -304,37 +304,57 @@ class CaptureTests(unittest.TestCase):
             self.assertTrue(ingest._sweep(state,clock=lambda:0.0))
         self.assertEqual(calls,seen[:ingest.IDLE_CHECKS_PER_TICK],'control: the tick ended on the cap')
 
-    def failing_sweeps(self,bad,ticks=40):
-        """Real capture_safely and _sweep; `bad(nid)` decides which captures raise."""
+    def failing_sweeps(self,bad,seconds=120.0):
+        """Real capture_safely and _sweep, driven like the worker loop (the
+        pause after each tick is the one start() would sleep) for `seconds`
+        of simulated time; `bad(nid)` decides which captures raise. Busy
+        node 'busy' is captured by the once-per-second busy path too."""
         good=[str(i) for i in range(12)]
         state=self.fake_state(good+['bad'])
-        raised=[];now=[0.0];results=[]
+        raised=[];now=[0.0];results=[];logged=[0]
         def capture(slug,nid,**kw):
+            now[0]+=0.001
             if bad(nid):
                 raised.append(nid);raise RuntimeError('injected capture failure')
-            now[0]+=0.001
             with ingest._lock:ingest._remember_settled((slug,nid),((),()))
             return True
         per_tick=[]
-        with patch.dict(sup._state,{},clear=True), patch.object(ingest,'capture',side_effect=capture), \
-             self.assertLogs(ingest._log,level='ERROR'):
-            for _ in range(ticks):
+        with patch.dict(sup._state,{('x','busy'):{'busy':True}},clear=True), \
+             patch.object(ingest,'capture',side_effect=capture), \
+             patch.object(ingest._log,'exception',side_effect=lambda *a,**k:logged.__setitem__(0,logged[0]+1)):
+            while now[0]<seconds:
                 before=len(raised)
                 results.append(ingest._sweep(state,clock=lambda:now[0]))
                 per_tick.append(len(raised)-before)
-        return results,per_tick,raised
+                now[0]+=ingest.PENDING_PAUSE_S if results[-1] else ingest.IDLE_PAUSE_S
+        return results,per_tick,raised,logged[0]
 
-    def test_a_node_that_keeps_failing_returns_to_the_idle_cadence(self):
-        results,per_tick,raised=self.failing_sweeps(lambda nid:nid=='bad')
+    def backoff_attempts(self,seconds):
+        """Attempts a node makes in `seconds` under the backoff schedule."""
+        t,n,fails=0.0,0,0
+        while t<seconds:
+            n+=1;fails+=1;t+=min(ingest.BACKOFF_MAX_S,ingest.BACKOFF_BASE_S*2**(fails-1))
+        return n
+
+    def test_a_node_that_keeps_failing_backs_off_and_returns_to_the_idle_cadence(self):
+        results,per_tick,raised,logged=self.failing_sweeps(lambda nid:nid=='bad')
         self.assertTrue(results[0],'control: healthy catch-up is pending')
-        self.assertGreater(len(raised),5,'control: the failing node is really retried')
+        self.assertGreaterEqual(raised.count('bad'),3,'control: the failing node is really retried')
+        self.assertLessEqual(raised.count('bad'),self.backoff_attempts(120.0)+1)
+        self.assertEqual(logged,len(raised),'one log line per failed attempt')
         self.assertFalse(any(results[5:]),results)
+        self.assertLessEqual(len(results),130,'wakeups stay at the idle cadence')
 
-    def test_a_database_outage_keeps_the_idle_cadence_and_bounded_logging(self):
-        results,per_tick,raised=self.failing_sweeps(lambda nid:True)
-        self.assertGreater(len(raised),20,'control: captures really failed')
-        self.assertLessEqual(max(per_tick),ingest.IDLE_CHECKS_PER_TICK)
+    def test_a_database_outage_backs_off_with_bounded_exceptions_and_wakeups(self):
+        results,per_tick,raised,logged=self.failing_sweeps(lambda nid:True)
+        nodes=len(set(raised))
+        self.assertEqual(nodes,14,'control: every node, busy included, really failed')
+        self.assertLessEqual(max(per_tick),ingest.IDLE_CHECKS_PER_TICK+1)
+        self.assertLessEqual(len(raised),nodes*(self.backoff_attempts(120.0)+1),
+                             'each node fails once per backoff step, not once per tick')
+        self.assertEqual(logged,len(raised))
         self.assertFalse(any(results[5:]),results)
+        self.assertLessEqual(len(results),130,'wakeups stay at the idle cadence')
 
     def test_busy_nodes_are_captured_once_per_second_however_short_the_pauses(self):
         calls=[];now=[0.0]
