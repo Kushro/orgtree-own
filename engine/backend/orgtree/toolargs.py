@@ -67,12 +67,16 @@ def refusal(tool: str, schema: Mapping[str, Any] | None,
             hint = _suggest(str(key), declared)
             problems.append(f"unknown field `{key}`"
                             + (f" — did you mean `{hint}`?" if hint else ""))
-        for key in schema.get("required") or ():
-            if args.get(key) is None:
-                problems.append(f"required field `{key}` is missing")
-    if tool in BODY_TOOLS and "required field `body` is missing" not in problems:
+    # ⚠ NO GENERIC `required` CHECK. A card's `required` list is advice to the
+    # model, not the handler's rule: orgtree_status lists `summary` yet the
+    # backend records a status without one, and refusing it here broke
+    # tests/test_wire_contract.py. Only the mail body — the defect this module
+    # exists for — is enforced; other missing fields stay the backend's call.
+    if tool in BODY_TOOLS:
         body = args.get("body")
-        if not isinstance(body, str) or not body.strip():
+        if body is None:
+            problems.append("required field `body` is missing")
+        elif not isinstance(body, str) or not body.strip():
             problems.append("`body` is empty — put the text of the mail in "
                             "`body`")
     if not problems:

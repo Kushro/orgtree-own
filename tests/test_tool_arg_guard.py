@@ -136,6 +136,13 @@ class ClientRefuses(unittest.TestCase):
         self.assertIn('unknown field `urgnt` — did you mean `urgent`?', err)
         self.assertIn('unknown field `zzz`', err)
 
+    def test_a_field_the_card_calls_required_is_left_to_the_backend(self):
+        # orgtree_status's card lists `summary` as required, but the backend
+        # records a status without one (tests/test_wire_contract.py pins it)
+        out = json.loads(mcptool.tool_call('orgtree_status', {'status': 'idle'}))
+        self.assertNotIn('error', out)
+        self.assertEqual(len(self.wire.posts), 1)
+
     def test_unknown_field_on_another_tool_is_refused(self):
         err = self.refused('orgtree_status', {'status': 'done', 'summry': 'x'})
         self.assertIn('did you mean `summary`?', err)
