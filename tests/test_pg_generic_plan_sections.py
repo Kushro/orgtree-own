@@ -205,6 +205,11 @@ class GenericPlanSections(unittest.TestCase):
                     store._drop_lazy_rows(conn, TINY_D)
                     store._drop_lazy_rows(conn, TINY_L)
                     self.assertFalse(store._log_has(conn, 'log_d', TINY_D))
+                    # only that section: its neighbours in index order survive
+                    self.assertTrue(store._log_has(conn, 'log_d', 'steered_log'))
+                    self.assertTrue(store._log_has(conn, 'log_d', 'mail_log'))
+                    self.assertTrue(store._log_has(conn, 'log_l', 'events'))
+                    self.assertTrue(store._log_has(conn, 'log_l', 'notice_log'))
                 finally:
                     conn.execute('ROLLBACK')
         self.check(self.record(run), 3)
