@@ -4,6 +4,7 @@ desk-chat-read-loads-the-agent-s-whole-steered-m: the windowed read must not
 load an agent's whole lifetime steered log, and must return exactly what the
 full read returns (rows, ids, seq, has_older, cursor).
 """
+import json
 import os
 import unittest
 import uuid
@@ -99,6 +100,8 @@ class SteeredWindow(unittest.TestCase):
         self.assertFalse(any(sup._WINDOW_FLOOR in m for m in bounded['messages']))
 
     def test_cost_does_not_grow_with_the_steered_log(self):
+        """Rows RETURNED stay bounded; the server-side scan is pinned by
+        test_server_reads_a_bounded_index_range_at_1x_and_10x."""
         self.fixture_rows(old_steers=300)
         bounded, fetched, full = self.reads()
         self.assertEqual(self.comparable(bounded), self.comparable(full))
@@ -138,9 +141,97 @@ class SteeredWindow(unittest.TestCase):
         org.d['steered_log']['agent'] = []       # replaced, unsaved
         self.assertIsNone(store.log_owner_tail(org.d, 'steered_log', 'agent', 8))
         org = store.load_org(self.org.d['slug'])
-        entries, total = store.log_owner_tail(org.d, 'steered_log', 'agent', 3)
-        self.assertEqual(total, 10)
+        entries, older = store.log_owner_tail(org.d, 'steered_log', 'agent', 3)
+        self.assertTrue(older)
         self.assertEqual([e['text'] for e in entries], ['steer 21', 'steer 24', 'steer 27'])
+        org = store.load_org(self.org.d['slug'])
+        entries, older = store.log_owner_tail(org.d, 'steered_log', 'agent', 10)
+        self.assertFalse(older, 'exactly 10 steers: none older than the tail')
+        self.assertEqual(len(entries), 10)
+
+    def test_unsaved_appends_and_other_sections_use_the_full_path(self):
+        self.fixture_rows()
+        org = store.load_org(self.org.d['slug'])
+        section = org.d.get('steered_log')
+        self.assertIsInstance(section, store.SectionMap)
+        section._appends['agent'] = [{'at': stamp(59, 59), 'text': 'unsaved', 'level': 'steered'}]
+        self.assertIsNone(store.log_owner_tail(org.d, 'steered_log', 'agent', 8),
+                          'a buffered, unsaved append is not in SQL yet')
+        org = store.load_org(self.org.d['slug'])
+        self.assertIsNone(store.log_owner_tail(org.d, 'mail_log', 'agent', 8),
+                          'only sections with a tail index are served')
+        self.assertIsNotNone(store.log_owner_tail(org.d, 'steered_log', 'agent', 8),
+                             'control: the same fresh Org is served for steered_log')
+
+    def test_out_of_order_at_equals_the_full_read(self):
+        """transcript-db-review-astra's probe: steers appended LATER with OLDER
+        timestamps must not displace the newest-by-time steers (the SQL ranks
+        by `at`, then append order, like the merge)."""
+        self.write([self.rec(2 * i) for i in range(30)])
+        self.steer([(stamp(0, 2 * i + 1), f'recent steer {i}') for i in range(15, 30)])
+        self.steer([(f'2026-09-10T11:{k // 60:02d}:{k % 60:02d}Z', f'late-appended old steer {k}')
+                    for k in range(60)])
+        bounded, fetched, full = self.reads()
+        self.assertEqual(self.comparable(bounded), self.comparable(full))
+        self.assertTrue(any('recent steer' in m['text'] for m in bounded['messages']), 'control')
+        self.assertEqual(fetched[:1], [8 + sup._STEERED_WINDOW_SLACK], 'bounded path really used')
+
+    def plan_nodes(self, limit):
+        """The executed plan of log_owner_tail's OWN statement and parameters."""
+        slug = self.org.d['slug']
+        captured = []
+        original = store._bounded_read
+
+        class Explaining:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def execute(self, sql, params=()):
+                if sql == store._LOG_TAIL_SQL:
+                    captured.append(self.conn.execute(
+                        'EXPLAIN (ANALYZE, FORMAT JSON) ' + sql, params).fetchall())
+                return self.conn.execute(sql, params)
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+        def bounded(slug_, body):
+            def wrapped(conn):
+                conn.execute('ANALYZE log_d')   # production tables are auto-analyzed
+                return body(Explaining(conn))
+            return original(slug_, wrapped)
+        org = store.load_org(slug)
+        with patch.object(store, '_bounded_read', side_effect=bounded):
+            entries, _ = store.log_owner_tail(org.d, 'steered_log', 'agent', limit)
+        self.assertEqual(len(entries), limit, 'control: the real call ran')
+        self.assertEqual(len(captured), 1, 'control: its statement was explained')
+        plan = captured[0][0][0]
+        plan = json.loads(plan) if isinstance(plan, str) else plan
+        nodes = []
+
+        def walk(node):
+            nodes.append(node)
+            for child in node.get('Plans', []):
+                walk(child)
+        walk(plan[0]['Plan'])
+        return nodes
+
+    def test_server_reads_a_bounded_index_range_at_1x_and_10x(self):
+        limit = 8 + sup._STEERED_WINDOW_SLACK
+        scanned = {}
+        for old in (300, 3000):
+            self.setUp()
+            self.fixture_rows(old_steers=old)
+            nodes = self.plan_nodes(limit)
+            kinds = [n['Node Type'] for n in nodes]
+            self.assertNotIn('Sort', kinds, kinds)
+            self.assertNotIn('WindowAgg', kinds, kinds)
+            self.assertNotIn('Seq Scan', kinds, kinds)
+            scans = [n for n in nodes if n['Node Type'] in ('Index Scan', 'Index Only Scan')]
+            self.assertEqual([n.get('Index Name') for n in scans], ['ix_log_d_steered_tail'], kinds)
+            scanned[old] = scans[0]['Actual Rows']
+            self.assertLessEqual(scanned[old], limit + 1)
+        self.assertEqual(scanned[300], scanned[3000], f'rows scanned must be flat 1x vs 10x: {scanned}')
 
     def test_older_page_from_the_bounded_cursor_is_unchanged(self):
         self.fixture_rows(old_steers=40)

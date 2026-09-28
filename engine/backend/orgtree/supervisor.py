@@ -2941,24 +2941,24 @@ _WINDOW_FLOOR = "_window_floor"
 
 
 def _synthetic_chat_tail(org: Org, nid: str,
-                         window: int) -> tuple[list[dict[str, Any]], int] | None:
+                         window: int) -> tuple[list[dict[str, Any]], bool] | None:
     """The synthetic rows that can reach the newest `window` rows of a
-    timestamp-ordered merge, and the total synthetic row count.
+    timestamp-ordered merge, and whether older steered rows were left out.
 
     A node's steered_log keeps every mid-turn message it was ever sent, so the
     windowed desk read must not load all of it (desk-chat-read-loads-the-
     agent-s-whole-steered-m). Only the newest `window` steered rows by (ts,
     append order) can rank inside the window; the store returns those plus
-    slack in one bounded statement. turn_error rows are appended after, as in
+    slack in one index-bounded statement (O(window) rows read on the server
+    too, however long the log). turn_error rows are appended after, as in
     `_synthetic_chat_rows`. None: use `_synthetic_chat_rows` (not the PG row
     store, or the owner is resident/modified in this Org)."""
     from . import store
     tail = store.log_owner_tail(org.d, "steered_log", nid, window + _STEERED_WINDOW_SLACK)
     if tail is None:
         return None
-    entries, total = tail
-    errors = _turn_error_chat_rows(org, nid)
-    return [_steered_chat_row(e) for e in entries] + errors, total + len(errors)
+    entries, older = tail
+    return [_steered_chat_row(e) for e in entries] + _turn_error_chat_rows(org, nid), older
 
 
 def _visible_unresolved(source: dict[str, Any], org: Org, nid: str,
@@ -3064,8 +3064,10 @@ def _assemble_chat(org: Org, nid: str, last: int | None,
                    source: dict[str, Any], *, window: int | None = None) -> dict[str, Any]:
     """`window`: the caller keeps only the newest `window` rows (read_window).
     With it, a monotonic merge with nothing withheld reads only the synthetic
-    rows that can rank there; `_synthetic_omitted` in the result counts the
-    older ones left out, which every returned `seq` already includes."""
+    rows that can rank there; `_synthetic_omitted` in the result is 1 when
+    older steered rows were left out (at least one exists), so the caller's
+    has_older stays exact. The returned `seq` then numbers only the rows read:
+    read_window's transcript_records.order assigns every row's final seq."""
     base = cast("list[dict[str, Any]]", source["messages"])
     withheld = _visible_unresolved(source, org, nid, hold_back)
     tail = (_synthetic_chat_tail(org, nid, window)
@@ -3073,7 +3075,7 @@ def _assemble_chat(org: Org, nid: str, last: int | None,
             else None)
     if tail is not None:
         out = _assemble_chat_rows(org, nid, last, hold_back, dynamic, source,
-                                  withheld, tail[0], tail[1] - len(tail[0]), window)
+                                  withheld, tail[0], int(tail[1]), window)
         if out is not None:
             return out
     return cast("dict[str, Any]", _assemble_chat_rows(
@@ -3085,8 +3087,8 @@ def _assemble_chat_rows(org: Org, nid: str, last: int | None, hold_back: bool,
                         dynamic: dict[str, Any], source: dict[str, Any],
                         withheld: set[int], synthetic: list[dict[str, Any]],
                         omitted: int, window: int | None) -> dict[str, Any] | None:
-    """`_assemble_chat` over a given synthetic list. With `omitted` older
-    synthetic rows left out, returns None unless every row of the caller's
+    """`_assemble_chat` over a given synthetic list. With `omitted` (older
+    synthetic rows were left out), returns None unless every row of the caller's
     window provably ranks above all of them (the oldest fetched synthetic row
     stays below the window), so the caller can redo it with the full list."""
     base = cast("list[dict[str, Any]]", source["messages"])
@@ -3146,7 +3148,7 @@ def _assemble_chat_rows(org: Org, nid: str, last: int | None, hold_back: bool,
         if position is None or position >= len(selected) - cast(int, window):
             return None
         selected[position] = {k: v for k, v in selected[position].items() if k != _WINDOW_FLOOR}
-    seq0 = max(0, total - len(selected)) + omitted
+    seq0 = max(0, total - len(selected))
     messages = []
     for i, row in enumerate(selected):
         event_id = _stable_event_id(org, nid, row)

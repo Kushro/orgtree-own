@@ -18,7 +18,8 @@ pgroot = out / 'pg'
 tool = 'E:/Libraries/Desktop/orgtree/artifacts/p03-tools/pg-custodian-e4f3c8f.exe'
 pgbin = 'E:/Libraries/Desktop/orgtree/artifacts/p03-postgresql/18.6-4/bin'
 names = ['engine/backend/orgtree/supervisor.py', 'engine/backend/orgtree/store.py',
-         'engine/backend/orgtree/chat_window.py']
+         'engine/backend/orgtree/chat_window.py',
+         'engine/backend/orgtree/pg_migrations/0016_steered_log_tail.sql']
 paths = [repo / n for n in names]
 saved = {p: p.read_bytes() for p in paths}
 NEW = ['tests/test_chat_steered_window_pg.py']
@@ -72,14 +73,24 @@ try:
     base_env = dict(os.environ, ORGTREE_TEST_PG_ADMIN_URL=pg('urls')['urls']['P03_PG_ADMIN_URL'])
     run('tip', NEW + EXISTING)
     run('tip-lazy-rows', NEW, extra_env={'ORGTREE_LAZY_ROWS': '1'})
-    for path in paths:
+    for path in paths[:3]:
         path.write_bytes(subprocess.check_output(['git', 'show', BASE + ':' + path.relative_to(repo).as_posix()], cwd=repo))
+    paths[3].unlink()   # the migration does not exist at base
     run('base', EXISTING)
     restore()
-    supervisor_py, store_py, window_py = paths
+    supervisor_py, store_py, window_py, migration_sql = paths
     for label, path, old, new, expected in (
-        ('mut-unbounded-tail', store_py, '            (sect, owner, cap)).fetchall()]',
-         '            (sect, owner, 10 ** 9)).fetchall()]', ['test_cost_does_not_grow_with_the_steered_log']),
+        ('mut-huge-store-limit', store_py, '            _LOG_TAIL_SQL, (owner, cap + 1)).fetchall()]',
+         '            _LOG_TAIL_SQL, (owner, 10 ** 9)).fetchall()]',
+         ['test_server_reads_a_bounded_index_range_at_1x_and_10x']),
+        ('mut-order-by-seq-only', store_py,
+         r'''"ORDER BY COALESCE(at, '') COLLATE \"C\" DESC, seq DESC LIMIT ?")''',
+         '"ORDER BY seq DESC LIMIT ?")', ['test_out_of_order_at_equals_the_full_read']),
+        ('mut-no-tail-index', migration_sql,
+         "(owner, (COALESCE(at, '''') COLLATE \"C\") DESC, seq DESC)",
+         '(owner, seq)', ['test_server_reads_a_bounded_index_range_at_1x_and_10x']),
+        ('mut-appends-guard', store_py, '            or section._appends.get(owner)):\n', '            ):\n',
+         ['test_unsaved_appends_and_other_sections_use_the_full_path']),
         ('mut-no-window-guard', supervisor_py,
          '        if position is None or position >= len(selected) - cast(int, window):\n            return None\n',
          '        if position is None:\n            return None\n',

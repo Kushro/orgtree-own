@@ -6372,13 +6372,23 @@ def mail_archive_append(d: dict[str, Any], owner: str, row: Any) -> bool:
     return True
 
 
+#: Sections whose owner tail has an index matching `_LOG_TAIL_SQL` (see
+#: pg_migrations/0016_steered_log_tail.sql); any other section answers None.
+LOG_TAIL_SECTIONS = frozenset({"steered_log"})
+#: Served by ix_log_d_steered_tail: an index scan that stops after LIMIT rows,
+#: however many rows the owner has. The literal section keeps the partial
+#: index usable; the ORDER BY expression is the index expression verbatim.
+_LOG_TAIL_SQL = ("SELECT seq, val FROM log_d WHERE sect='steered_log' AND owner=? "
+                 "ORDER BY COALESCE(at, '') COLLATE \"C\" DESC, seq DESC LIMIT ?")
+
+
 def log_owner_tail(d: dict[str, Any], sect: str, owner: str,
-                   limit: int) -> tuple[list[Any], int] | None:
+                   limit: int) -> tuple[list[Any], bool] | None:
     """The newest `limit` entries of ONE owner's append-only log section, as a
     reader ordering by timestamp ranks them (entry `at`, then append order),
-    together with that owner's total entry count: one bounded PostgreSQL
-    statement, without materialising the owner. Entries come back in append
-    (seq) order.
+    and whether the owner has older entries: one index-bounded PostgreSQL
+    statement that reads `limit + 1` rows, without materialising the owner.
+    Entries come back in append (seq) order.
 
     None means only the resident/full path is exact, and the caller must use
     it: not the PostgreSQL row store, the section held whole, this owner
@@ -6386,8 +6396,10 @@ def log_owner_tail(d: dict[str, Any], sect: str, owner: str,
     transaction open on this org on this thread. `at` orders exactly as
     Python's str comparison of `str(entry.get("at") or "")` does for string
     timestamps (C collation; NULL, i.e. a missing or non-string `at`, first).
+    Only LOG_TAIL_SECTIONS are served.
     """
-    if STORE_BACKEND != "postgres" or not isinstance(d, LazyDoc):
+    if (STORE_BACKEND != "postgres" or not isinstance(d, LazyDoc)
+            or sect not in LOG_TAIL_SECTIONS):
         return None
     if (getattr(_orgtx_local, "pinned", None) or {}).get(d._slug) is not None:
         return None
@@ -6399,20 +6411,18 @@ def log_owner_tail(d: dict[str, Any], sect: str, owner: str,
             or section._appends.get(owner)):
         return None
     if owner not in section._present:
-        return [], 0
+        return [], False
     cap = max(1, int(limit))
 
-    def body(conn: sqlite3.Connection) -> list[tuple[int, str, int]]:
-        return [(int(seq), str(val), int(total)) for seq, val, total in conn.execute(
-            "SELECT seq, val, count(*) OVER () FROM log_d WHERE sect=? AND owner=? "
-            "ORDER BY COALESCE(at, '') COLLATE \"C\" DESC, seq DESC LIMIT ?",
-            (sect, owner, cap)).fetchall()]
+    def body(conn: sqlite3.Connection) -> list[tuple[int, str]]:
+        return [(int(seq), str(val)) for seq, val in conn.execute(
+            _LOG_TAIL_SQL, (owner, cap + 1)).fetchall()]
     rows = _bounded_read(d._slug, body)
     if rows is None:
         return None
-    total = rows[0][2] if rows else 0
-    rows.sort(key=lambda row: row[0])
-    return [json.loads(val) for _, val, _ in rows], total
+    older = len(rows) > cap
+    rows = sorted(rows[:cap], key=lambda row: row[0])
+    return [json.loads(val) for _, val in rows], older
 
 
 def log_append(d: dict[str, Any], sect: str, row: Any) -> None:

@@ -472,7 +472,7 @@ def read_window(org, nid: str, want: int, *, hold_back=True):
     # Assemble the bounded projection before slicing, so withheld prompts do
     # not count as older visible rows and create an endless load-older loop.
     out = sup._assemble_chat(org, nid, None, hold_back, dynamic, source, window=want)
-    # rows older than the window that the bounded synthetic read left out
+    # older steered rows the bounded synthetic read left out (1 = some exist)
     visible_count = len(out['messages']) + out.pop('_synthetic_omitted', 0)
     out['messages'] = out['messages'][-want:]
     from . import transcript_records
