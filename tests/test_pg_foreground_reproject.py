@@ -180,6 +180,45 @@ class ReprojectPG(unittest.TestCase):
         self.assertEqual(kept.json()['header']['name'], 'renamed with a node change')
         self.assertEqual(kept.content, self.fresh().content)
 
+    # review-astra's F3b-3 gap probes (review f6): two reachable stale paths.
+    def test_status_a_b_a_equals_a_full_build(self):
+        # The byte reuse compares against entry['rows']; the status patch must
+        # move them to B, or A == stale-A reuses B's bytes.
+        org = store.load_org(self.slug)
+        org.nodes['peer']['last_status'] = {'status': 'working', 'summary': 'A'}
+        store.save_org(org)
+        first = self.fresh()
+        org = store.load_org(self.slug)
+        org.nodes['peer']['last_status'] = {'status': 'working', 'summary': 'B'}
+        store.save_org(org)
+        with patch.object(fg, 'select_foreground', side_effect=AssertionError('rebuilt')):
+            b = self.get(first.headers['etag'])          # status patch, same runtime
+        self.assertEqual(b.status_code, 200, b.text)
+        org = store.load_org(self.slug)
+        org.nodes['peer']['last_status'] = {'status': 'working', 'summary': 'A'}
+        store.save_org(org)
+        self.runtime = ['second']
+        with patch.object(fg, 'select_foreground', side_effect=AssertionError('rebuilt')):
+            self.get(b.headers['etag'])                  # status + runtime: reproject
+        kept = self.cached()
+        self.assertEqual(kept.json()['nodes']['peer']['last_status']['summary'], 'A')
+        self.assertEqual(kept.content, self.fresh().content)
+
+    def test_grant_only_change_updates_funding(self):
+        # A grant-only change advances with the kept doc inputs: the funding
+        # rows must follow, or the parent's `free` stays stale.
+        first = self.fresh()
+        org = store.load_org(self.slug)
+        org.nodes['peer']['grant'] = 30
+        store.save_org(org)
+        with patch.object(fg, 'select_foreground', side_effect=AssertionError('rebuilt')):
+            self.get(first.headers['etag'])              # node-only advance, kept inputs
+        kept = self.cached()
+        fresh = self.fresh()
+        self.assertNotEqual(first.json()['nodes']['boss'].get('free'),
+                            fresh.json()['nodes']['boss'].get('free'), 'grant change moved nothing: probe inert')
+        self.assertEqual(kept.content, fresh.content)
+
 
 if __name__ == '__main__':
     unittest.main()
