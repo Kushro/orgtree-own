@@ -1740,8 +1740,10 @@ class OperationContacts(unittest.TestCase):
             [r] = self.rows(variant="catalogue.list-orgs", condition=condition)
             self.assertIn(self.F_STMT, r["expected_unknown"])
             self.assertGreater(r["harness"]["statement_stores"].get("data:org-db:foreign", 0), 0)
+            # a4b4167 (S-A): a load reads its meta rows and existence probes in
+            # _load_probes (two statements), no longer through _meta_get
             self.assertEqual(set(r["harness"]["foreign_statement_sites"]),
-                             {"orgtree.store:_load_lazy", "orgtree.store:_meta_get"})
+                             {"orgtree.store:_load_lazy", "orgtree.store:_load_probes"})
 
     def test_lifecycle_third_agent_control_is_flagged(self):
         control = self.rows(variant=self.LC_CONTROL)[0]
@@ -2199,7 +2201,7 @@ class OperationContacts(unittest.TestCase):
             with self.subTest(variant=r["variant"], condition=r["condition"]):
                 self.assertEqual(foreign > 0, r["variant"] in self.EX_FOREIGN)
         [r] = self.rows(variant="exchange.orgs-list", condition="warm")
-        self.assertLessEqual({"orgtree.store:_load_lazy", "orgtree.store:_meta_get"},
+        self.assertLessEqual({"orgtree.store:_load_lazy", "orgtree.store:_load_probes"},  # a4b4167
                              set(r["harness"]["foreign_statement_sites"]))
         self.assertGreater(r["harness"]["statement_stores"]["data:org-db:foreign"], 100)
         for condition in ("cold", "warm"):
