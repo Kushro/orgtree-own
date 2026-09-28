@@ -2,7 +2,13 @@
 import random
 import threading
 import unittest
-from tools.scale.control import BoundedPool, Feed, Workload, memory_breach
+import subprocess
+import sys
+from unittest.mock import patch
+
+import psutil
+
+from tools.scale.control import BoundedPool, Feed, Workload, guarded_wait, memory_breach
 
 
 class ScaleControlTests(unittest.TestCase):
@@ -51,6 +57,26 @@ class ScaleControlTests(unittest.TestCase):
         finally:
             pool.shutdown()
         self.assertEqual(pool.counts["worker_errors"], 1)
+
+    def test_guarded_wait_survives_a_child_that_exits_during_children(self):
+        # mem-leak-probe's heavy repro (2026-09-28): the seed child exited
+        # between poll() and children(), and NoSuchProcess escaped.
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"])
+        def gone(self, recursive=False):
+            raise psutil.NoSuchProcess(proc.pid)
+        with patch.object(psutil.Process, "children", gone),                 patch("tools.scale.control.free_commit_gb", return_value=100.0):
+            self.assertEqual(guarded_wait(proc), 0)
+
+    def test_guarded_wait_survives_a_child_already_gone(self):
+        proc = subprocess.Popen([sys.executable, "-c", "raise SystemExit(3)"])
+        proc.wait()
+        real = psutil.Process
+        def process(pid=None):
+            if pid == proc.pid:
+                raise psutil.NoSuchProcess(pid)
+            return real() if pid is None else real(pid)
+        with patch("psutil.Process", process),                 patch("tools.scale.control.free_commit_gb", return_value=100.0):
+            self.assertEqual(guarded_wait(proc), 3)
 
     def test_low_commit_and_combined_size_stop_even_with_small_engine(self):
         gb = 2 ** 30

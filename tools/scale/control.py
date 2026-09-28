@@ -176,10 +176,18 @@ def guarded_wait(proc, *, floor_gb=10, cap_gb=8, report=None):
     import time
     import psutil
     parent = psutil.Process()
-    child = psutil.Process(proc.pid)
+    # The child can exit at any moment (a quick seed step, 2026-09-28): a
+    # vanished pid is not an error, poll() reports its exit on the next pass.
+    try:
+        child = psutil.Process(proc.pid)
+    except psutil.NoSuchProcess:
+        child = None
     try:
         while proc.poll() is None:
-            family = [child] + child.children(recursive=True)
+            try:
+                family = [child] + child.children(recursive=True) if child else []
+            except psutil.NoSuchProcess:
+                family = []
             total = 0
             for process in [parent] + family:
                 try:
@@ -199,7 +207,7 @@ def guarded_wait(proc, *, floor_gb=10, cap_gb=8, report=None):
     finally:
         if proc.poll() is None:
             try:
-                family = child.children(recursive=True)
+                family = child.children(recursive=True) if child else []
             except psutil.NoSuchProcess:
                 family = []
             for process in reversed(family):
