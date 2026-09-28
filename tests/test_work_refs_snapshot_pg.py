@@ -57,10 +57,10 @@ class WorkRefsSnapshot(unittest.TestCase):
             pass
         with store._POOL.acquire(self.slug) as conn:
             self.org_id = conn.org_id
-        self.stats = dict(store.WORK_RACE_STATS)
+        self.stats = dict(getattr(store, 'WORK_RACE_STATS', {}))   # absent at base
 
     def raced(self, what):
-        return store.WORK_RACE_STATS.get(what, 0) - self.stats.get(what, 0)
+        return getattr(store, 'WORK_RACE_STATS', {}).get(what, 0) - self.stats.get(what, 0)
 
     # -- the second connection: commits at once, outside every org_tx ------
     def other(self, action):
