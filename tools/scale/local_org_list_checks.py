@@ -22,7 +22,7 @@ target = repo / 'engine/backend/orgtree/org_summary.py'
 saved = target.read_bytes()
 NEW = ['tests/test_org_list_bounded_pg.py']
 EXISTING = ['tests/test_org_summary_behavior_pg.py', 'tests/test_org_summary_reads_pg.py',
-            'tests/test_org_summary_volume_pg.py', 'tests/test_net_identity.py',
+            'tests/test_org_summary_volume_pg.py',
             'tests/test_ui_read_pool.py', 'tests/test_v3_qualification_ui.py',
             'tests/test_state_org_admin_boundary.py', 'tests/test_state_exchange_boundary.py',
             'tests/test_state_lifecycle_boundary.py', 'tests/test_p02_operation_contacts.py']

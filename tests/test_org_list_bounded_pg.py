@@ -37,6 +37,7 @@ load_app()
 from orgtree import api, ledger, org_summary, store
 
 slugs = []
+NO_TOOLS = {'bash': False, 'web': False, 'edit': False, 'subagents': False, 'mcp': []}
 
 
 @unittest.skipUnless(ADMIN, 'ORGTREE_TEST_PG_ADMIN_URL not set: NOT RUN')
@@ -56,7 +57,9 @@ class OrgList(unittest.TestCase):
         org.hire(ledger.USER, None, 'haiku', 50, 'lead-a')
         org.hire(ledger.USER, None, 'haiku', 40, 'lead-b')
         for i in range(agents):
-            org.hire('lead-a' if i % 2 else 'lead-b', 'lead-a' if i % 2 else 'lead-b', 'haiku', 0, f'w{i:03d}')
+            lead = 'lead-a' if i % 2 else 'lead-b'
+            org.hire(lead, lead, 'haiku', 0, f'w{i:03d}', add_dirs=[], tools=NO_TOOLS,
+                     org_visibility='self', charter='fixture worker')
         if kiosk:
             org.d['kiosk'] = {'enabled': True, 'token': 'kiosk-test-' + slug, 'credits': 5,
                               'spend_limit': 1.5, 'storage_limit_mb': 10}
