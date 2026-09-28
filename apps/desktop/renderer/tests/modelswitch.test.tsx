@@ -248,7 +248,7 @@ configTest('the switch lists every provider family with its ledger seats',
       ['haiku', 'haiku · seat 1'], ['sonnet', 'sonnet · seat 2'],
       ['opus', 'opus · seat 4'], ['fable', 'fable · seat 10'],
       ['luna', 'luna · seat 0.1'], ['terra', 'terra · seat 2'],
-      ['sol', 'sol · seat 2'],
+      ['sol', 'sol · seat 2'], ['astra', 'astra · seat 10'],
       ['flash', 'flash · seat 1'], ['pro', 'pro · seat 2'],
     ])
   })
@@ -288,7 +288,7 @@ configTest('disconnected Codex tiers stay visible and explain why disabled',
       reason: 'not signed in — run `codex login` on this machine',
       status: { installed: true, connected: false, kind: null },
     }) })
-    for (const tier of ['luna', 'terra', 'sol']) {
+    for (const tier of ['luna', 'terra', 'sol', 'astra']) {
       assert.equal(option(el, tier).disabled, true)
       assert.match(option(el, tier).textContent ?? '', /not signed in/)
     }
@@ -301,8 +301,9 @@ configTest('kiosk policy and seat cap disable options instead of hiding them',
     const { el } = await mount({ tree: tree({
       kiosk: { max_tier: 'sonnet' } as TreePayload['kiosk'],
     }) })
-    assert.equal(options(el).length, 9)   // 4 claude + 3 codex + 2 antigravity
-    for (const tier of ['luna', 'terra', 'sol', 'flash', 'pro']) {
+    // Astra is always offered (user 2026-09-24, 9e640fb)
+    assert.equal(options(el).length, 10)   // 4 claude + 4 codex + 2 antigravity
+    for (const tier of ['luna', 'terra', 'sol', 'astra', 'flash', 'pro']) {
       assert.equal(option(el, tier).disabled, true)
       assert.match(option(el, tier).textContent ?? '', /unavailable in kiosk orgs/)
     }
