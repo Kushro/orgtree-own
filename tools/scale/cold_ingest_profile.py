@@ -111,7 +111,13 @@ def main(args):
         out['files'] = dict(active_bytes=sum(os.path.getsize(files / f'{n}.jsonl') for n in active),
                             archived_bytes=sum(os.path.getsize(files / f'{n}.jsonl') for n in archived))
 
-        # ---- phase 1: the real sweep, sleep removed, every capture timed ----
+        def pause(result):
+            # the worker loop's own pause: the new pacing, or the old fixed second
+            if hasattr(ingest, 'PENDING_PAUSE_S'):
+                return ingest.PENDING_PAUSE_S if result else ingest.IDLE_PAUSE_S
+            return 1.0
+
+        # ---- phase 1: the real sweep, every capture timed (paced = real pauses) ----
         timings = {'active': [], 'archived': []}
         first_visit = {'active': [], 'archived': []}
         seen = set()
@@ -135,10 +141,12 @@ def main(args):
             profiler.enable()
             while time.perf_counter() - start < args.phase1_s:
                 t = time.perf_counter()
-                ingest._sweep(state)
+                result = ingest._sweep(state)
                 tick_times.append(time.perf_counter() - t)
+                if args.paced:
+                    time.sleep(pause(result))
                 ticks += 1
-                if ticks % 5 == 0 or ticks < 5:
+                if True:  # every tick, so done times resolve to one tick
                     with records.database() as conn:
                         rows = conn.execute('SELECT source,lower_byte FROM transcript_sources').fetchall()
                     states = {}
@@ -151,7 +159,8 @@ def main(args):
                     for kind, n in kinds.items():
                         total = args.archived if kind == 'archived' else args.active
                         if n >= total and kind not in done_at:
-                            done_at[kind] = dict(tick=ticks, busy_seconds=sum(tick_times))
+                            done_at[kind] = dict(tick=ticks, busy_seconds=sum(tick_times),
+                                                 wall_seconds=time.perf_counter() - start)
                     if len(done_at) == 2:
                         break
             profiler.disable()
@@ -162,7 +171,7 @@ def main(args):
         out['phases']['sweep'] = dict(ticks=ticks, tick=summary(tick_times), done_at=done_at,
             capture_first_visit={k: summary(v) for k, v in first_visit.items()},
             capture_later={k: summary(v) for k, v in timings.items()},
-            note='sleep(1) removed; real sweep would add 1 s per tick')
+            paced=args.paced, note='paced: the worker loop pauses between ticks; unpaced: none')
 
         # ---- phase 2: foreground chat reads, backfill idle vs busy ----
         org2 = store.create_org('cold2-' + uuid.uuid4().hex[:8])
@@ -195,8 +204,10 @@ def main(args):
             state2 = ingest._SweepState()
             with records.reuse_database():
                 while not stop.is_set():
-                    ingest._sweep(state2)
+                    result = ingest._sweep(state2)
                     bg_ticks[0] += 1
+                    if args.paced:
+                        time.sleep(pause(result))
         worker = threading.Thread(target=backfill, daemon=True)
         worker.start()
         time.sleep(1.0)
@@ -223,4 +234,5 @@ if __name__ == '__main__':
     parser.add_argument('--archived', type=int, default=50)
     parser.add_argument('--phase1-s', type=float, default=240)
     parser.add_argument('--reads', type=int, default=60)
+    parser.add_argument('--paced', action='store_true')
     main(parser.parse_args())
