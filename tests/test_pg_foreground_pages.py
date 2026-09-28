@@ -134,6 +134,15 @@ class ForegroundPagesPG(unittest.TestCase):
             conn.raw.execute("UPDATE doc SET val=%s WHERE key='name'", ('"renamed directly"',))
             conn.execute('COMMIT')
         check('direct doc write', funding_reads=0, changed=False)
+        # doc writes the page's cards DO show (effort_effective): the reused
+        # inputs must end with view_revision, through a save and through SQL
+        self.save(lambda org: org.d.__setitem__('default_effort', 'max'))
+        check('saved setting')
+        with store._POOL.acquire(self.slug) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.raw.execute("UPDATE doc SET val=%s WHERE key='default_effort'", ('"low"',))
+            conn.execute('COMMIT')
+        check('direct setting write', funding_reads=0)
         # a runtime-only change: nothing committed, the answer is rebuilt
         self.runtime = ['two']
         with patch.object(foreground_context, 'build', wraps=foreground_context.build) as build:
