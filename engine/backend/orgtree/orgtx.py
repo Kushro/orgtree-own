@@ -1055,6 +1055,15 @@ class PgBackend:
                     try:
                         _billed_save(tx.org, got, tx.op_key is not None)
                     except Exception as e:
+                        # The whole transaction rolls back, but the earlier
+                        # orgs published their change sets before the one real
+                        # COMMIT (and this one may have too). Mark them
+                        # unknown, or a reader proving "every node write since
+                        # is journaled" could count a phantom write (review f5).
+                        # An org that published nothing only rebuilds in full.
+                        for done in order[:i + 1]:
+                            store._publish_changes_unknown(done.slug)   # pyright: ignore[reportPrivateUsage]
+                            store._bump_org_seq(done.slug)              # pyright: ignore[reportPrivateUsage]
                         raise _pg_error(e) from e
                     finally:
                         loc.guard = loc.on_commit = loc.defer_hooks = None
