@@ -32,6 +32,7 @@ import {
   advance, FakeServer, flush, inAct, installFetch, mountView, realClock,
   useFakeClock,
 } from './harness'
+import { compatibilityWorkFixture } from './workcompat.fixture'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
@@ -654,6 +655,7 @@ function mockWork(items: WorkItem[]): { method: string; url: string }[] {
       : String(url).includes('/inbox') ? { pending: [], delivered: [], sent: [] } : {}
     return Promise.resolve({ ok: true, status: 200, headers: new Headers(), json: () => Promise.resolve(body) })
   }) as unknown as typeof fetch
+  globalThis.fetch = compatibilityWorkFixture(globalThis.fetch)
   return calls
 }
 const docketTree = (): TreePayload => ({

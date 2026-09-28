@@ -1,5 +1,6 @@
 import './harness'
 import { fireResize, flush, inAct, mountView, realClock, useFakeClock } from './harness'
+import { compatibilityWorkFixture } from './workcompat.fixture'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
@@ -43,6 +44,7 @@ async function fixture(t: TestContext, count = 1000) {
   globalThis.fetch = (async () => ({ ok: true, status: 200, headers: new Headers(),
     json: async () => ({ items, archived: [], backlogged: [], counts: { active: count, archived: 0, backlogged: 0 } }),
   })) as typeof fetch
+  globalThis.fetch = compatibilityWorkFixture(globalThis.fetch)
   const panel = (jumpTo: string | null = null) => <DocketModal slug="org1" toast={noop} close={noop} tree={TREE} jumpTo={jumpTo} />
   const view = await mountView(panel(), host => host)
   t.after(async () => {

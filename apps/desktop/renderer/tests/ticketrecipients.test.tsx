@@ -1,5 +1,6 @@
 import './harness'
 import { advance, flush, inAct, mountView, realClock, useFakeClock } from './harness'
+import { compatibilityWorkFixture } from './workcompat.fixture'
 import test from 'node:test'
 import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
@@ -42,6 +43,7 @@ async function setup(t: TestContext, items: WorkItem[]) {
         : { items, counts: { attention: 0, active: items.length, archived: 0 }, now: '2026-09-06T12:00:00Z' },
     } as Response
   }) as typeof fetch
+  globalThis.fetch = compatibilityWorkFixture(globalThis.fetch)
   const view = await mountView(<DocketModal slug="org" close={() => {}} tree={{ roots: [], asks: [] } as unknown as TreePayload}
     toast={(lines) => { toasts.push(...(lines ?? [])) }} />, (host) => host)
   t.after(async () => { try { await view.unmount() } finally { realClock() } })
