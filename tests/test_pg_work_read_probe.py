@@ -69,6 +69,25 @@ class SaveProbe(unittest.TestCase):
         self.assertEqual(self.summary()['slug'], 'one')
         self.assertIsNone(self.c.execute(f'SELECT 1 FROM {self.s}.work_list_dirty').fetchone())
 
+    def test_an_uninitialized_list_is_built_on_an_otherwise_quiet_save(self):
+        self.settled()
+        self.c.execute(f'UPDATE {self.s}.work_list_state SET initialized=false WHERE singleton')
+        self.assertIsNone(self.c.execute(f'SELECT 1 FROM {self.s}.work_list_dirty').fetchone())
+        result, _ = self.counted_refresh()
+        self.assertTrue(result)
+        self.assertTrue(self.c.execute(
+            f'SELECT initialized FROM {self.s}.work_list_state WHERE singleton').fetchone()[0])
+        self.assertTrue(worklistmeta.ready(self.c, self.oid))
+
+    def test_an_invalid_index_stops_the_save_after_the_probe(self):
+        self.settled()
+        self.c.execute(f'UPDATE {self.s}.work_index_state SET valid=false WHERE singleton')
+        self.c.execute(f"INSERT INTO {self.s}.work_list_dirty VALUES('one')")
+        result, seen = self.counted_refresh()
+        self.assertFalse(result)
+        self.assertEqual(len(seen), 2, seen)       # no access or list work
+        self.assertIsNotNone(self.c.execute(f'SELECT 1 FROM {self.s}.work_list_dirty').fetchone())
+
     def test_a_changed_item_is_still_projected(self):
         self.settled()
         self.add(dict(self.item(), status='blocked', blocked_reason='x'))
