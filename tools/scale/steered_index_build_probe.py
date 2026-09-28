@@ -52,8 +52,8 @@ def main(args):
                 t = time.perf_counter()
                 conn.execute(
                     "INSERT INTO log_d(sect, owner, at, val) SELECT "
-                    "CASE WHEN g % 100 < %s THEN 'steered_log' ELSE 'mail_log' END, "
-                    "'agent-' || (g % 1000), "
+                    "CASE WHEN g %% 100 < %s THEN 'steered_log' ELSE 'mail_log' END, "
+                    "'agent-' || (g %% 1000), "
                     "to_char(timestamp '2026-01-01' + g * interval '1 second', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), "
                     "repeat('x', 1000) FROM generate_series(1, %s) g",
                     (int(steered_share * 100), total))
