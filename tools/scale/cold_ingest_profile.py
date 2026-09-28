@@ -166,7 +166,9 @@ def main(args):
             profiler.disable()
         ingest.capture = original
         buf = io.StringIO()
-        pstats.Stats(profiler, stream=buf).sort_stats('cumulative').print_stats(45)
+        stats = pstats.Stats(profiler, stream=buf)
+        stats.sort_stats('cumulative').print_stats(45)
+        stats.print_callers(r'\(org_tx\)|\(incarnation\)')
         (root / 'phase1-cprofile.txt').write_text(buf.getvalue(), encoding='utf-8')
         out['phases']['sweep'] = dict(ticks=ticks, tick=summary(tick_times), done_at=done_at,
             capture_first_visit={k: summary(v) for k, v in first_visit.items()},
