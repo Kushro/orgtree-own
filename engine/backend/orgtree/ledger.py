@@ -1031,11 +1031,15 @@ class Org:
         # every existing Sonnet agent keeps running Sonnet 5: it is pinned to
         # version "5" once, when the shipped 5.0 default is upgraded (the
         # trigger cannot fire twice). A custom organization id is never
-        # overwritten and its agents are not pinned; an explicit pin stays.
+        # overwritten and its agents are not pinned. EVERY Sonnet node is
+        # pinned, even one that already carries a version: before 2.1.13 no
+        # Sonnet version could be chosen (set_scope refused one) and a tier
+        # switch never cleared the field, so any version on a Sonnet node is
+        # a leftover from its previous tier (Opus "5.5", "4.8", ...) that
+        # would otherwise now resolve against Sonnet's own versions.
         if _m.get("sonnet") == "claude-sonnet-5":
             for _node in self.nodes.values():
-                if (_node.get("model") == "sonnet"
-                        and not (_node.get("scope") or {}).get("model_version")):
+                if _node.get("model") == "sonnet":
                     _node.setdefault("scope", {})["model_version"] = "5"
             _m["sonnet"] = MODELS["sonnet"]
         # Fold the short-lived GPT-6 tier spelling into Sol/Luna's version
