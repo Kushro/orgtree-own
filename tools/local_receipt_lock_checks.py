@@ -57,7 +57,7 @@ MUTANTS = [
     ('mut-converted-by-flag-alone', 'engine/backend/orgtree/orgtx.py',
      '    return raw.execute("SELECT 1 FROM meta WHERE key = %s",\n',
      '    return True or raw.execute("SELECT 1 FROM meta WHERE key = %s",\n',
-     'test_different_owners_still_serialize_on_the_whole_section (test_receipt_owner_locks_pg.FlagOnUnconvertedOrg'),
+     'test_different_owners_still_serialize_on_the_whole_section (__main__.FlagOnUnconvertedOrg'),
     ('mut-writes-recorded-as-whole', 'engine/backend/orgtree/store.py',
      'changes.doc_upserts.extend(RECEIPT_KEY + SPLIT_SEP + o for o in sorted(plan.owners))',
      'changes.doc_upserts.append(RECEIPT_KEY)',
