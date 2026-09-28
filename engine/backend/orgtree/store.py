@@ -3465,7 +3465,7 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
             preloaded[sect] = value
         receipt = (_receipt_view(conn, slug, bind=receipt_bind and not txn_open)
                    if receipt_marked else None)
-        if receipt_marked and receipt is None:
+        if receipt_marked and slug and receipt is None:   # "" = reconstruct_full
             # marked converted but no conversion record: the doc blob is gone,
             # so the plain path would load an org with no receipts at all
             raise LedgerError(f"{slug!r} is marked as storing custody receipts "
@@ -3589,6 +3589,10 @@ def reconstruct_full(conn: sqlite3.Connection) -> dict[str, Any]:
             conn.use()                      # type: ignore[attr-defined]
             if conn.execute("SELECT 1 FROM receipt_format WHERE singleton").fetchone():
                 receipts = receiptstore.export(conn.raw)   # type: ignore[attr-defined]
+            elif conn.execute("SELECT 1 FROM meta WHERE key=?",
+                              (_META_RECEIPT_ROWS,)).fetchone():
+                raise LedgerError("org is marked as storing custody receipts "
+                                  "as rows but has no receipt_format record")
         finally:
             conn.execute("COMMIT")
     if receipts is not None and receipts[0] and RECEIPT_KEY not in d._key_order:

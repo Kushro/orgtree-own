@@ -99,6 +99,8 @@ class ReceiptStore(unittest.TestCase):
                              ('1',))
         with self.assertRaisesRegex(ledger.LedgerError, 'no receipt_format record'):
             store.load_org(self.slug)
+        with self.assertRaisesRegex(ledger.LedgerError, 'no receipt_format record'):
+            self.full()                  # the export path, too
 
     def test_receipt_functions_put_pg_temp_last_and_the_old_creator_is_not_runtime_callable(self):
         with self.raw() as raw:
