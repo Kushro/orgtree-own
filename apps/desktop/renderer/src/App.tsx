@@ -1292,11 +1292,10 @@ export default function App() {
                       badge={activeDocCount(tree.roots) > 0
                         ? <b className="eye-count">{activeDocCount(tree.roots)}</b> : undefined}
                       onClick={() => toggleSurface('gallery', showGallery, setShowGallery)} />
-                    {!tree.public && <ShellAction label="Usage"
-                      title={usageAlert?.title ?? usageTitle(provPresence)}
-                      className={usageAlert ? 'u-' + usageAlert.sev : undefined}
-                      icon={<DataUsageIcon fontSize="inherit" />}
-                      onClick={toggleUsage} />}
+                    {/* no Usage button here (user 2026-09-28): usage covers
+                        the whole app, not this organization, so it opens only
+                        from the Orgtree menu's "Usage…", with no near-limit
+                        warning anywhere ("we can do without the warning") */}
                     {!tree.public && <ShellAction label="Org settings"
                       icon={<SettingsIcon fontSize="inherit" />}
                       onClick={() => toggleSurface('org-settings', showSettings, setShowSettings)} />}
