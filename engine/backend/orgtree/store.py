@@ -3062,6 +3062,90 @@ def frozen_live_nodes(org: Org) -> Iterator[tuple[str, Any]]:
             yield nid, node
 
 
+def _node_ids_where(org: Org, where: str, params: tuple[Any, ...],
+                    keep: Callable[[Any], bool]) -> list[str]:
+    """Ids of the nodes `keep` accepts, in table order, WITHOUT decoding the
+    rest of the table when it is on on-demand rows: `where` (SQL over the
+    `nodes` table) must accept a SUPERSET of what `keep` accepts; its
+    candidates are fetched in one statement and `keep` decides on each.
+    Rows this document already decoded are judged as they are now (a change
+    made in this transaction counts), a row it deleted never counts, and a
+    node it added and has not saved yet is included when `keep` accepts it.
+    Otherwise (whole rows) this is a plain filtered walk."""
+    nodes = dict.get(cast("dict[str, Any]", org.d), "nodes")
+    if not isinstance(nodes, LazyNodesMap) or nodes._complete:
+        return [nid for nid, n in cast("dict[str, Any]", nodes or {}).items() if keep(n)]
+    with _POOL.acquire(nodes._slug) as conn:
+        ids = [cast(str, r[0]) for r in conn.execute(
+            f"SELECT id FROM nodes WHERE {where} ORDER BY ord", params).fetchall()]
+    held = set(dict.keys(nodes))
+    nodes.prefetch([i for i in ids if i not in held])
+    out = [i for i in ids if i not in nodes._deleted and dict.__contains__(nodes, i)
+           and keep(dict.__getitem__(nodes, i))]
+    # a row decoded before this call that the SQL did not name (changed in
+    # this transaction, or added and not saved yet) may qualify now
+    seen = set(ids)
+    out += [i for i in dict.keys(nodes) if i not in seen and i in held
+            and keep(dict.__getitem__(nodes, i))]
+    return out
+
+
+def section_owners(sec: Any) -> list[str]:
+    """The owner names of a dict-log section, in order, WITHOUT reading any
+    owner's rows: on a row-backed SectionMap the names are metadata, where
+    iterating the map would load every owner's values first."""
+    if isinstance(sec, SectionMap):
+        names = [o for o in sec._order if o in sec._present and o not in sec._dropped]
+        seen = set(names)
+        return names + [o for o in dict.keys(sec) if isinstance(o, str) and o not in seen]
+    return list(sec or {})
+
+
+def live_node_ids(org: Org) -> list[str]:
+    """Ids of the LIVE nodes (`state == "live"`), in table order. On on-demand
+    rows the retired history is never decoded: one server-side query names
+    the live rows and only they are fetched (engine-startup-cost-must-not-
+    grow-with-retired-h). The same answer as filtering `org.nodes.items()`."""
+    # node_index (trigger-kept, one row per node) stores coalesce(state,
+    # 'live'): a superset of `state == "live"`, read without parsing a row
+    return _node_ids_where(
+        org, "id IN (SELECT id FROM node_index WHERE meta->>'state' = 'live')", (),
+        lambda n: isinstance(n, dict) and n.get("state") == "live")
+
+
+def node_ids_with(org: Org, key: str) -> list[str]:
+    """Ids of the nodes, in ANY state, whose row carries `key` with a
+    non-null value, in table order — the candidates of a walk that acts only
+    on nodes holding that field. On on-demand rows only those rows are
+    decoded. Callers still apply their own test to the value."""
+    return _node_ids_where(
+        org, "strpos(val, ?) > 0 AND jsonb_typeof((val::jsonb)->?) IS NOT NULL "
+             "AND jsonb_typeof((val::jsonb)->?) <> 'null'",
+        (json.dumps(key), key, key),
+        lambda n: isinstance(n, dict) and n.get(key) is not None)
+
+
+def node_field_values(org: Org, key: str) -> set[str]:
+    """The distinct string values of top-level field `key` across EVERY node
+    row (any state), as a walk of `org.nodes.values()` would collect them —
+    without decoding the table when it is on on-demand rows: the stored rows
+    answer in one server-side query, and rows this document decoded answer
+    as they are now (a deleted row's value is dropped only if no stored row
+    shares it — the set over-approximates, never under-approximates)."""
+    nodes = dict.get(cast("dict[str, Any]", org.d), "nodes")
+    if not isinstance(nodes, LazyNodesMap) or nodes._complete:
+        return {str(n[key]) for n in cast("dict[str, Any]", nodes or {}).values()
+                if isinstance(n, dict) and isinstance(n.get(key), str)}
+    with _POOL.acquire(nodes._slug) as conn:
+        out = {cast(str, r[0]) for r in conn.execute(
+            "SELECT DISTINCT (val::jsonb)->>? FROM nodes WHERE strpos(val, ?) > 0 "
+            "AND jsonb_typeof((val::jsonb)->?) = 'string'",
+            (key, json.dumps(key), key)).fetchall()}
+    out |= {str(n[key]) for n in dict.values(nodes)
+            if isinstance(n, dict) and isinstance(n.get(key), str)}
+    return out
+
+
 class LazyDocReleased(RuntimeError):
     """A lazy row map was used after its document was released. Not an
     AttributeError on purpose: `getattr(map._doc, ..., None)` would swallow
@@ -4653,7 +4737,8 @@ class _LoadOne:
 
 def _load_lazy(conn: sqlite3.Connection, slug: str,
                preload: Iterable[str] = (), *, txn_open: bool = False,
-               lazy_work: bool = False, receipt_bind: bool = True) -> LazyDoc:
+               lazy_work: bool = False, receipt_bind: bool = True,
+               listing: bool = False) -> LazyDoc:
     """Load eager rows plus an optional coherent set of lazy sections.
 
     Ordinary loads pass no ``preload`` and retain S1's owner-selective lazy
@@ -4669,6 +4754,12 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
     unknown = selected - LAZY_SECTIONS
     if unknown:
         raise ValueError(f"not lazy sections: {sorted(unknown)!r}")
+    # `listing` (with lazy_work): the caller reads a few document keys and
+    # counts rows with SQL, and discards the document without decoding one
+    # node or owner row. Such a load needs no heal, so it stays on on-demand
+    # rows even when the heal epoch is stale (a new build's first start)
+    # instead of decoding the whole org (engine-startup-cost-must-not-grow-
+    # with-retired-h).
     d = LazyDoc(slug)
     preloaded: dict[str, Any] = {}
     preload_snaps: dict[str, Any] = {}
@@ -4711,7 +4802,7 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
         # full switch interval: 709 rows × ~5 ms stolen slices turned this
         # 100 ms load into 18-20 s (measured, 2026-09-19 incident).
         if lazy_work and ORGTX_RESCOPE and STORE_BACKEND == "postgres":
-            if lazy_rows_ok and epoch is not None and epoch == heal_epoch():
+            if lazy_rows_ok and (listing or (epoch is not None and epoch == heal_epoch())):
                 # ORGTREE_LAZY_ROWS: no owner row of a split section either
                 # (work rows are read by _load_work_refs as before)
                 if LAZY_DOC_KEYS:
@@ -4745,6 +4836,9 @@ def _load_lazy(conn: sqlite3.Connection, slug: str,
                 lazy_nodes = True
                 _lazy_count("loads")
                 LAZY_ROWS_STALE_EPOCH.pop(slug, None)
+            elif listing:
+                lazy_nodes = True       # never decoded: see `listing` above
+                _lazy_count("listing_loads")
             else:
                 d._stamp_heal_epoch = heal_epoch() is not None
                 _lazy_count("epoch_fallbacks")
@@ -6377,7 +6471,8 @@ def export_json(slug: str, dest: str | None = None) -> str:
 #                              the public seam
 # =========================================================================
 
-def _scan_orgs(skip: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
+def _scan_orgs(skip: str = "", *, listing: bool = False
+               ) -> Iterator[tuple[str, dict[str, Any]]]:
     """(slug, doc) for every org, ONE read+parse each.
 
     `skip` is a slug the caller ALREADY holds parsed — its file is not
@@ -6418,7 +6513,11 @@ def _scan_orgs(skip: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
             try:
                 _safe_slug(slug)
                 with _POOL.acquire(slug) as conn:
-                    doc = _load_lazy(conn, slug)
+                    if listing and _listing_pg():
+                        doc = _load_lazy(conn, slug, lazy_work=True, listing=True)
+                        doc._listing_counts = _node_counts(conn)
+                    else:
+                        doc = _load_lazy(conn, slug)
             except (LedgerError, sqlite3.Error, ValueError, OSError):
                 continue
             yield slug, doc
@@ -6439,13 +6538,37 @@ def _scan_orgs(skip: str = "") -> Iterator[tuple[str, dict[str, Any]]]:
         yield f[:-5], doc
 
 
+def _listing_pg() -> bool:
+    """May a listing load stay on on-demand rows (see `_load_lazy`)?"""
+    return bool(STORE_BACKEND == "postgres" and LAZY_ROWS and ORGTX_RESCOPE)
+
+
+def _node_counts(conn: sqlite3.Connection) -> tuple[int, int] | None:
+    """(nodes, live) of this org from `node_index` (one row per node, kept
+    by trigger, `state` stored as coalesce(state, 'live')) — no node document
+    read. Every node-creating path sets `state`, so `live` equals counting
+    `state == "live"` over the documents (the coordinator's ruling on
+    org-list-api-orgs-reads-grow-with-agent-count, as org_summary does). None
+    when the org keeps a legacy `nodes` blob: its nodes are counted as read."""
+    if conn.execute("SELECT 1 FROM doc WHERE key='nodes'").fetchone():
+        return None
+    row = conn.execute("SELECT count(*), count(*) FILTER (WHERE meta->>'state' = 'live') "
+                       "FROM node_index").fetchone()
+    return (int(row[0]), int(row[1])) if row else None
+
+
 def _summary_row(stem: str, doc: dict[str, Any]) -> dict[str, Any]:
     """The listing row. Reads only keys `Org.__init__` does not rewrite, so it
     is the same whether the doc has been through `Org()` or not. Reads no
     lazy section."""
-    live = sum(1 for n in doc.get("nodes", {}).values() if n.get("state") == "live")
+    counts = getattr(doc, "_listing_counts", None)
+    if counts is not None:
+        total, live = counts
+    else:
+        live = sum(1 for n in doc.get("nodes", {}).values() if n.get("state") == "live")
+        total = len(doc.get("nodes", {}))
     return {"slug": doc.get("slug", stem), "name": doc.get("name", stem),
-            "nodes": len(doc.get("nodes", {})), "live": live,
+            "nodes": total, "live": live,
             "kiosk": doc.get("kiosk") is not None,
             # the PUBLIC half of the org's hub identity (never the
             # secret) — lets listings mark a local org as also
@@ -6455,8 +6578,22 @@ def _summary_row(stem: str, doc: dict[str, Any]) -> dict[str, Any]:
             "created": doc.get("created")}
 
 
+def doc_keys_view(slug: str) -> dict[str, Any]:
+    """A read-only view of `slug`'s top-level document keys, loaded like a
+    listing (see `_load_lazy`'s `listing`): on PostgreSQL no node or owner row
+    is decoded, stale heal epoch or not. For a caller that reads settings
+    keys only — never read nodes or sections from it. Elsewhere it is the
+    ordinary document."""
+    if row_store() and _listing_pg():
+        with _POOL.acquire(slug) as conn:
+            return _load_lazy(conn, slug, lazy_work=True, listing=True)
+    return load_org(slug).d
+
+
 def list_orgs() -> list[dict[str, Any]]:
-    return [_summary_row(f, doc) for f, doc in _scan_orgs()]
+    # the documents are discarded: on PostgreSQL no node or owner row is
+    # decoded to list them (engine-startup-cost-must-not-grow-with-retired-h)
+    return [_summary_row(f, doc) for f, doc in _scan_orgs(listing=True)]
 
 
 def local_net_slugs(loaded: dict[str, Any] | None = None) -> set[str]:

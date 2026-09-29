@@ -274,9 +274,17 @@ def on_backend_startup(*, dry_run: bool = False) -> dict[str, Any]:
                 # own door, never inside a transaction here); the passive
                 # notices land in ONE row transaction per org over the notified
                 # nodes' mail rows, each node re-checked live under its lock.
-                org = orgtx.org_read(slug)
+                # the live seats, plus any seat holding an armed wake (a
+                # non-live one is dropped below): on on-demand rows no other
+                # row of the retired history is decoded (engine-startup-cost-
+                # must-not-grow-with-retired-h)
+                org = store.load_runtime_org(slug)
+                armed = [k[len(slug) + 1:] for k in wakes if k.startswith(slug + ":")]
                 notice_nids: list[str] = []
-                for nid, node in list(org.nodes.items()):
+                for nid in dict.fromkeys(store.live_node_ids(org) + armed):
+                    node = org.nodes.get(nid)
+                    if node is None:
+                        continue
                     key = f"{slug}:{nid}"
                     # Archived or deleted nodes cannot receive wakes or notices
                     if node.get("state") != "live":

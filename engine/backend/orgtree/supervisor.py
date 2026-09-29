@@ -4636,16 +4636,23 @@ def _transcript_root(org: Org, nid: str | None = None, *,
         node = next((n for n in org.nodes.values()
                      if n.get("session_id") == session_id), None)
     if node and node.get("account"):
-        from . import registry
-        try:
-            account = registry.get_account(str(node["account"]))
-        except registry.UnknownAccount:
-            # A missing binding must never read an ambient account's session.
-            return os.path.join(str(store.DATA_ROOT), 'unavailable-profiles',
-                                hashlib.sha256(str(node['account']).encode()).hexdigest())
-        credential = account["credential"]
-        if account["provider"] == "claude" and credential["kind"] in {"managed", "imported"}:
-            return str(credential["path"])
+        return _account_transcript_root(str(node["account"]))
+    return None
+
+
+def _account_transcript_root(account_id: str) -> str | None:
+    """`_transcript_root` of a node bound to `account_id` (unsandboxed org):
+    it depends on the binding alone."""
+    from . import registry
+    try:
+        account = registry.get_account(account_id)
+    except registry.UnknownAccount:
+        # A missing binding must never read an ambient account's session.
+        return os.path.join(str(store.DATA_ROOT), 'unavailable-profiles',
+                            hashlib.sha256(account_id.encode()).hexdigest())
+    credential = account["credential"]
+    if account["provider"] == "claude" and credential["kind"] in {"managed", "imported"}:
+        return str(credential["path"])
     return None
 
 
@@ -6294,8 +6301,13 @@ def _stamp_wakes_on_save(org: Org) -> None:
     if locked is None and hasattr(nodes, "materialize"):
         # on-demand rows: outside a declared tx every node is in scope. Inside
         # one, an undecoded row is unchanged and its own writer stamped it.
-        nodes.materialize("stamp wakes")        # pyright: ignore[reportAttributeAccessIssue]
-    for nid in list(dict.keys(nodes)):
+        # Only a FROZEN row can need a stamp, so only the rows carrying
+        # `frozen` are decoded, never the whole table (engine-startup-cost-
+        # must-not-grow-with-retired-h: every whole-org save did this).
+        ids = store.node_ids_with(org, "frozen")
+    else:
+        ids = list(dict.keys(nodes))
+    for nid in ids:
         if locked is not None and nid not in locked:
             continue
         n = dict.__getitem__(nodes, nid)
@@ -33198,7 +33210,13 @@ def _reconcile_steer_records(org: Org) -> int:
     every unresolved attempt whose transcript row exists. No RAM, no frames —
     the desk rereads the durable rows."""
     n = 0
-    for nid in list(org.nodes):
+    # the owners that HAVE attempts, not every node: on a lazy document each
+    # node's lookup was one query, retired history included (engine-startup-
+    # cost-must-not-grow-with-retired-h). An owner that is no node is skipped
+    # exactly as before, when only nodes were walked.
+    for nid in store.section_owners(org.d.get("steer_attempts")):
+        if nid not in org.nodes:
+            continue
         atts = (org.d.get("steer_attempts") or {}).get(nid) or {}
         for did, att in list(atts.items()):
             if org.node(nid).get("halt") or not _attempt_open(att):
@@ -35425,7 +35443,15 @@ def _transcript_evidence(org: Org, *, inventory: NativeInventory | None = None) 
     # Registry profiles are equally authoritative transcript stores. Without
     # them startup incorrectly condemns successfully running managed agents.
     try:
-        roots = {_transcript_root(org, nid) for nid in org.nodes}
+        # a node's root depends on its account binding alone, so the roots
+        # of EVERY node (retired history included) come from the distinct
+        # bindings, without decoding every row (engine-startup-cost-must-
+        # not-grow-with-retired-h); a node with no binding has no own root
+        if sbx.is_sandboxed(org):
+            roots = {_transcript_root(org)}
+        else:
+            roots = {_account_transcript_root(a)
+                     for a in store.node_field_values(org, "account") if a}
         for root in roots - {None, _transcript_root(org)}:
             try:
                 seen.update(transcript_index(root, strict=True))
@@ -35438,7 +35464,8 @@ def _transcript_evidence(org: Org, *, inventory: NativeInventory | None = None) 
         from .desktop_native import native_session_path, native_conflicts
         native = {}
         ambiguous = set()
-        for nid, node in org.nodes.items():
+        for nid in store.node_ids_with(org, 'desktop_import'):
+            node = org.nodes[nid]
             binding = (node.get('desktop_import') or {}).get('native_continuity') or {}
             if binding.get('provider') not in {'claude', 'openrouter'}:
                 continue  # Codex rollout is execution state, not a display transcript.
@@ -35851,8 +35878,8 @@ def _reconcile_remote_pids(org: Org) -> dict[str, Any]:
     """FR-01: the recorded remote-control server pid per node that carries a
     `remote_controlled` flag (None when the flag has no pid)."""
     out: dict[str, Any] = {}
-    for nid, n in org.nodes.items():
-        rc = n.get("remote_controlled")
+    for nid in store.node_ids_with(org, "remote_controlled"):
+        rc = org.nodes[nid].get("remote_controlled")
         if rc is not None:
             out[nid] = rc.get("pid") if isinstance(rc, dict) else None
     return out
@@ -35894,7 +35921,8 @@ def _reconcile_block(org: Org, slug: str, *, recovery_observer: Any,
     out: dict[str, Any] = {
         "marked": [], "unrec_by_sup": {}, "rc_popped": {}, "inflight": [],
         "recovery_seats": set(), "switch_wake": [], "account_wake": [],
-        "manual_net": [], "settle": False, "revive": [], "latched": False}
+        "manual_net": [], "settle": False, "revive": [], "latched": False,
+        "live": []}
     marked: list[str] = out["marked"]
 
     @contextlib.contextmanager
@@ -35908,6 +35936,12 @@ def _reconcile_block(org: Org, slug: str, *, recovery_observer: Any,
         except Exception as e:                               # noqa: BLE001
             raise _ReconcileStepFailed(k, e) from e
 
+    # The live seats, named once under this transaction's exclusive hold (no
+    # other transaction can change a node's state meanwhile). Steps 2, 4, 5
+    # and 7 act on live nodes only, so on on-demand rows the retired history
+    # is never decoded (engine-startup-cost-must-not-grow-with-retired-h);
+    # every loop still checks the state itself.
+    live = out["live"] = store.live_node_ids(org)
     try:
         # ── 1. halt recovery
         with _step(1):
@@ -35925,7 +35959,10 @@ def _reconcile_block(org: Org, slug: str, *, recovery_observer: Any,
                 print(f"[orgtree] {slug}: transcript store unreadable — the №31 "
                       f"sweep is skipped (nothing condemned)")
             else:
-                for nid, n in org.nodes.items():
+                # only a live node can be condemned (`_condemnable`) and only
+                # a node holding the pardon can lose it: nothing else is read
+                for nid in dict.fromkeys(live + store.node_ids_with(org, "session_unrun")):
+                    n = org.nodes[nid]
                     if _native_context_hold(org, nid, inventory=inventory) \
                             or _import_recovery_unsettled(org, nid):
                         continue  # Ambiguous/unvalidated import is held, not lost.
@@ -35984,8 +36021,8 @@ def _reconcile_block(org: Org, slug: str, *, recovery_observer: Any,
         # (p01's review, S7 Q4): the only reordering, for a window of
         # milliseconds.
         with _step(3):
-            for nid, n in org.nodes.items():
-                rc = n.pop("remote_controlled", None)
+            for nid in store.node_ids_with(org, "remote_controlled"):
+                rc = org.nodes[nid].pop("remote_controlled", None)
                 if rc is not None:
                     out["rc_popped"][nid] = (rc.get("pid") if isinstance(rc, dict)
                                              else None)
@@ -36003,7 +36040,8 @@ def _reconcile_block(org: Org, slug: str, *, recovery_observer: Any,
         recovery_seats: set[str] = out["recovery_seats"]
         deferred_input: list[str] = []
         with _step(4):
-            for nid, n in org.nodes.items():
+            for nid in live:
+                n = org.nodes[nid]
                 if n.get("halt"):
                     continue
                 if recovery_observer is None and (
@@ -36069,7 +36107,7 @@ def _reconcile_block(org: Org, slug: str, *, recovery_observer: Any,
         # (PG-3e-A: turn end applies a queued switch in a SECOND pass after its
         # marker pop, so a death between the two leaves the switch for here.)
         with _step(5):
-            queued = [k for k, n in org.nodes.items()
+            queued = [k for k in live for n in (org.nodes[k],)
                       if n["state"] == "live"
                       and (n.get("pending_switch") or n.get("pending_account"))]
             for nid in queued:
@@ -36133,7 +36171,7 @@ def _reconcile_block(org: Org, slug: str, *, recovery_observer: Any,
             # kind="notice" entries (orgtree_send_notice) is exactly the state
             # "parked until the next turn", and a restart is not a turn
             out["revive"] = [] if latched else [
-                nid for nid, n in org.nodes.items()
+                nid for nid in live for n in (org.nodes[nid],)
                 if n["state"] == "live" and nid not in marked
                 and nid not in resumed and not n.get("frozen") and not n.get("halt")
                 and not (recovery_observer is None
@@ -36154,7 +36192,7 @@ def reconcile(slug: str, *, active_only: bool = False, recovery_observer=None) -
     # remote-control pid flagged NOW happens here, BEFORE the transaction pops
     # those flags, so the kill still precedes the pop (p01's review, S7 Q4).
     inventory = NativeInventory()
-    _rc_pre = _reconcile_remote_pids(orgtx.org_read(slug))
+    _rc_pre = _reconcile_remote_pids(store.load_runtime_org(slug))
     for _pid in _rc_pre.values():
         _reconcile_kill(_pid)
 
@@ -36212,7 +36250,17 @@ def reconcile(slug: str, *, active_only: bool = False, recovery_observer=None) -
                 net.note_read(slug, blk["manual_net"])
             except Exception:                                # noqa: BLE001
                 pass
-        for dnid in org.nodes:
+        # the nodes whose runtime can hold mail state: the live seats, the
+        # owners of delivery-journal rows, and any seat this pass already
+        # gave runtime state (a halt). The rest of the retired history has
+        # no carrier to settle and is not decoded (engine-startup-cost-
+        # must-not-grow-with-retired-h).
+        with _state_lock:
+            _held = [k for (s, k) in _state if s == slug]
+        for dnid in dict.fromkeys(blk["live"] + store.section_owners(org.d.get("delivering"))
+                                  + _held):
+            if dnid not in org.nodes:
+                continue
             rst = state(slug, dnid)
             with _state_lock:
                 mailruntime.resolve_reclaims(org, rst, nid=dnid)
@@ -36407,8 +36455,11 @@ def reconcile(slug: str, *, active_only: bool = False, recovery_observer=None) -
     # no longer names. `drive_unfrozen_by_switch` consumes the marker.
     if not latched:
         try:
-            _o_sw = orgtx.org_read(slug)
-            for _n2, _v2 in _o_sw.nodes.items():
+            # only rows carrying the marker are decoded (engine-startup-cost-
+            # must-not-grow-with-retired-h)
+            _o_sw = store.load_runtime_org(slug)
+            for _n2 in store.node_ids_with(_o_sw, "switch_resume"):
+                _v2 = _o_sw.nodes[_n2]
                 if (_v2.get("switch_resume") and not _v2.get("frozen")
                         and _v2.get("state") == "live"
                         and _n2 not in _sw and _n2 not in resumed):
@@ -36461,7 +36512,9 @@ def reconcile(slug: str, *, active_only: bool = False, recovery_observer=None) -
     # retained commands/carriers have durable intent even without waking mail.
     # S7: a lock-free read (was DOC_LOCK); resume_pending decides under its
     # own transaction
-    pending_halts = [nid for nid, n in orgtx.org_read(slug).nodes.items()
+    _o_hq = store.load_runtime_org(slug)
+    pending_halts = [nid for nid in store.node_ids_with(_o_hq, "halt_queue")
+                     for n in (_o_hq.nodes[nid],)
                      if n.get("halt_queue") and not n.get("halt")]
     for nid in pending_halts:
         halt.resume_pending(slug, nid)

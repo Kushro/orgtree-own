@@ -1449,7 +1449,10 @@ def recover(org) -> bool:
     from . import supervisor as sup
     changed = False
     slug = org.d["slug"]
-    for nid, n in org.nodes.items():
+    # only rows holding a halt: retired history is not decoded (engine-
+    # startup-cost-must-not-grow-with-retired-h)
+    for nid in store.node_ids_with(org, "halt"):
+        n = org.nodes[nid]
         if not n.get("halt"):
             continue
         st = sup.state(slug, nid)

@@ -421,9 +421,13 @@ def discover() -> bool:
             # PG-3d: a lock-free read, and the one-time upgrade as a row
             # transaction on the org's node rows, not DOC_LOCK
             from . import orgtx
-            org = orgtx.org_read(slug)
+            # a runtime read: on on-demand rows only the live seats are
+            # decoded, never the retired history (engine-startup-cost-must-
+            # not-grow-with-retired-h). Both passes below act on live seats
+            # only, so declaring and walking the others did nothing but cost.
+            org = store.load_runtime_org(slug)
             if not org.d.get('mail_drain_version'):
-                declared = list(org.nodes)
+                declared = store.live_node_ids(org)
                 with orgtx.org_tx(slug, nodes=declared, sections=['mail_drain_version'],
                                   share_sections=['mail', 'killswitch']) as tx:
                     up = tx.org
@@ -440,9 +444,10 @@ def discover() -> bool:
                                 if n.get('halt') or up.d.get('killswitch'):
                                     suspend(up, nid)
                         up.d['mail_drain_version'] = 1
-                org = orgtx.org_read(slug)
-            seats = [nid for nid, n in org.nodes.items()
-                     if pending(org, nid) and n['state'] == 'live']
+                org = store.load_runtime_org(slug)
+            # `pending` needs the node's `mail_drain` demand: only those rows
+            seats = [nid for nid in store.node_ids_with(org, 'mail_drain')
+                     if pending(org, nid) and org.nodes[nid]['state'] == 'live']
         except Exception:
             complete = False
             continue
