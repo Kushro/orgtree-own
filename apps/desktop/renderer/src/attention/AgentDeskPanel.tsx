@@ -23,10 +23,11 @@
 // only the button again, the dark scrim over the desk, or Escape close it.
 // Choosing an agent leaves it open, as a click-opened list always did. The
 // desk is its own stacking context (attention.css), so nothing inside the desk
-// can draw over the drawer or the scrim. Open or shut is remembered per
-// organization, as the old toggle was.
+// can draw over the drawer or the scrim. It is NEVER remembered (coordinator
+// ruling 2026-09-29): it starts shut on every load and whenever the panel comes
+// back on screen, so the desk is never found darkened by a drawer nobody opened.
 
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ChevronLeftIcon, ViewListIcon } from '../icons'
 import type { ToastFn, TreePayload } from '../types'
@@ -144,9 +145,10 @@ export function AgentDeskPanel({
   const layout = useAttentionLayout(slug)
   const [query, setQuery] = useState('')
   const [archived, setArchived] = useState(false)
-  const open = layout.listOpen
-  const setOpen = useCallback((v: boolean) =>
-    setAttentionLayout(slug, { listOpen: v }), [slug])
+  const [open, setOpen] = useState(false)
+  // the stage stays mounted while the organization shows the canvas, so going
+  // off screen is what "reopening the view" looks like from in here
+  useEffect(() => { if (!eligible) setOpen(false) }, [eligible])
 
   const rows = useMemo(() => agentRows(map, posOf, { archived, query }),
     [map, posOf, archived, query])

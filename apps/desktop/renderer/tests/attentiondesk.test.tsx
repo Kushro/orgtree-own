@@ -175,10 +175,42 @@ test('§4 choosing an agent keeps the drawer open and the choice sticks', async 
   assert.equal(isOpen(el), true,
     'a list the user deliberately opened is not closed by their next click in it')
   assert.equal(attentionLayout(SLUG).agent, 'beta', 'and the choice is remembered')
-  assert.equal(attentionLayout(SLUG).listOpen, true, 'and so is the drawer being out')
+  assert.equal(attentionLayout(SLUG).listOpen, false,
+    'the drawer being out is NOT remembered (coordinator ruling 2026-09-29)')
   await inAct(() => { toggle(el).click() })
   assert.equal(selectedRow(el), 'beta', 'closing it does not reset the selection')
   await v.unmount()
+})
+
+test('§4b the drawer always starts shut: after a reload, and when the view comes back', async () => {
+  reset()
+  // an older build stored `listOpen: true`; it must not open the drawer
+  setAttentionLayout(SLUG, { listOpen: true })
+  const v = await mountView(panel(), () => '')
+  await settle()
+  assert.equal(isOpen(v.el), false, 'a load starts shut whatever was stored')
+  await inAct(() => { toggle(v.el).click() })
+  assert.equal(isOpen(v.el), true)
+  await v.unmount()
+  const again = await mountView(panel(), () => '')
+  await settle()
+  assert.equal(isOpen(again.el), false, 'a remount (reload) starts shut')
+  await again.unmount()
+
+  // the stage stays mounted while the canvas is showing: leaving the view is
+  // `eligible` going false, and coming back must find the drawer shut
+  const P = (eligible: boolean) => <AgentDeskPanel slug={SLUG} tree={tree()} op={op}
+    toast={() => {}} map={map()} eligible={eligible} />
+  const w = await mountView(P(true), () => '')
+  await settle()
+  await inAct(() => { toggle(w.el).click() })
+  assert.equal(isOpen(w.el), true)
+  await w.render(P(false))
+  await settle()
+  await w.render(P(true))
+  await settle()
+  assert.equal(isOpen(w.el), false, 'coming back to the view finds it shut')
+  await w.unmount()
 })
 
 test('§5 the keyboard opens the drawer through the button and drives it', async () => {
