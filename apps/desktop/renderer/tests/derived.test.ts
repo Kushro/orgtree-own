@@ -441,15 +441,39 @@ test('⑮  the insert-superior splice is atomic with the hire, and the draft '
 
 // --------------------------------------------------------------------- (16)
 test('(16)  open requests render as ONE composed batch card per agent',
-  () => {
+  async () => {
     // FR-14 (user ruling 2026-08-12). Open per-kind rows would resurrect the
     // multi-card state the batch model replaced: the inbox derives its open
     // rows from the NODES' composed `ask` (kind batch), while the raw
     // per-store entries feed only the resolved history.
+    //
+    // Since 2026-09-29 (point 29) the inbox and the Attention view both list
+    // open requests through `openAsks` (canvas/openasks.ts): a held node's own
+    // composed card, and — for an agent the SELECTED v3 tree does not carry,
+    // which has no `node.ask` — the header's open rows composed into the same
+    // one card per agent by `composeBatch`.
     const src = code('App.tsx')
-    assert.ok(/\[\.\.\.nodes\.values\(\)\]\s*\n?\s*\.filter\(\(n\) => n\.ask && askOpen\(n\.ask\)\)/.test(src),
-      'askPending no longer derives from the composed node batches — open '
-      + 'components now render as separate per-kind rows')
+    assert.ok(/const askPending = openAsks\(tree, nodes\.values\(\)\)/.test(src),
+      'askPending no longer derives from openAsks — the inbox and the Attention '
+      + 'view can disagree, and open components can render as per-kind rows')
+    const open = code('canvas/openasks.ts')
+    assert.ok(/askIsOpen\(n\.ask\)/.test(open) && /composeBatch\(node, rows\)/.test(open),
+      'openAsks no longer takes the node batches first and composes the rest per agent')
+    // …and behaviourally: an agent outside the tree with an open question AND a
+    // pending credit request is ONE batch card, not two per-kind rows
+    const { openAsks } = await import('../src/canvas/openasks')
+    const listed = openAsks({ asks: [
+      { id: 'q1', node: 'far', status: 'open', at: '2026-09-29T10:00:00Z', rev: 3,
+        questions: [{ question: 'Ship it?', options: [{ label: 'yes' }] }] },
+      { id: 'c1', node: 'far', kind: 'credit', status: 'pending', at: '2026-09-29T09:00:00Z',
+        rev: 2, old: 10, new: 20, reason: 'more work' },
+    ] as never }, [])
+    assert.equal(listed.length, 1, 'one card for the agent')
+    assert.equal(listed[0]!.kind, 'batch')
+    assert.deepEqual(listed[0]!.tabs!.map((t) => t.kind), ['question', 'credits'])
+    assert.deepEqual(listed[0]!.revs, { ask: 3, credits: 2 },
+      'the per-store CAS stamps the batch submit must echo')
+    assert.equal(listed[0]!.at, '2026-09-29T09:00:00Z', 'the earliest component')
     const asks = code('canvas/asks.tsx')
     assert.ok(/ask\.kind === 'batch' && ask\.tabs\?\.length/.test(asks),
       'AskCard lost its batch dispatch — composed cards fall through to the '

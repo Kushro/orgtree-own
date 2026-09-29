@@ -19,7 +19,7 @@
 //     the real AskCard for questions attached to an item.
 // Both surfaces call this, so they cannot disagree about what is waiting.
 
-import type { AskInfo, TreeNode, TreePayload } from '../types'
+import type { AskInfo, AskTab, TreeNode, TreePayload } from '../types'
 import { askSubmitted } from '../asksubmitted'
 import type { MailRow } from './shared'
 
@@ -39,10 +39,71 @@ export function openAsks(tree: Pick<TreePayload, 'asks'> | null | undefined,
   for (const n of nodes) {
     if (askIsOpen(n.ask)) { out.push(n.ask!); batched.add(n.id) }
   }
+  // an agent the tree does not hold: its open header rows, grouped per agent
+  // and COMPOSED into the same one-card batch the server gives a held node
+  // (FR-14 — never one card per request kind)
+  const loose = new Map<string, AskInfo[]>()
   for (const a of tree?.asks ?? []) {
-    if (askIsOpen(a) && !batched.has(a.node)) out.push(a)
+    if (askIsOpen(a) && !batched.has(a.node)) loose.set(a.node, [...(loose.get(a.node) ?? []), a])
+  }
+  for (const [node, rows] of loose) {
+    const batch = composeBatch(node, rows)
+    if (batch) out.push(batch)
   }
   return out.filter(a => !askSubmitted(a.id))
+}
+
+/** The server's scope-item label (ledger `_scope_item_label`), for a scope tab
+ *  composed here. Mirrors it word for word. */
+function scopeLabel(it: NonNullable<AskTab['item']>): string {
+  return it.kind === 'dir' ? `folder ${it.path} (${it.mode})`
+    : it.kind === 'tool' ? `tool: ${it.tool}`
+      : it.kind === 'mcp' ? `MCP server: ${it.server}`
+        : `permission mode → ${it.mode}`
+          + (it.mode === 'bypassPermissions' ? ' ⚠ UNGUARDED — removes every prompt' : '')
+}
+
+/** One agent's open requests as ONE composed batch card — a client copy of the
+ *  server's `node_ask` (ledger.py), used only for an agent the selected tree
+ *  does not carry, so it has no `node.ask` of its own. The first open question,
+ *  the first pending credit request and the first pending scope request each
+ *  contribute their tabs, and `revs` carries each store's CAS stamp exactly as
+ *  the batch submit expects. */
+export function composeBatch(node: string, rows: readonly AskInfo[]): AskInfo | null {
+  const ask = rows.find((r) => r.kind !== 'credit' && r.kind !== 'scope' && r.status === 'open')
+  const cr = rows.find((r) => r.kind === 'credit' && r.status === 'pending')
+  const sr = rows.find((r) => r.kind === 'scope' && r.status === 'pending')
+  if (!ask && !cr && !sr) return null
+  const tabs: AskTab[] = []
+  const revs: NonNullable<AskInfo['revs']> = {}
+  if (ask) {
+    revs.ask = ask.rev ?? 1
+    // a row written before FR-04 carries its one question on itself
+    const qs = ask.questions?.length ? ask.questions
+      : ask.question ? [{ question: ask.question, header: ask.header, options: ask.options, multi: ask.multi }]
+        : []
+    for (const q of qs) tabs.push({ kind: 'question', ...q } as AskTab)
+  }
+  if (cr) {
+    revs.credits = cr.rev ?? 1
+    tabs.push({ kind: 'credits', id: cr.id, old: cr.old, new: cr.new, reason: cr.reason })
+  }
+  if (sr) {
+    revs.scope = sr.rev ?? 1
+    for (const it of (sr.items ?? []) as NonNullable<AskTab['item']>[]) {
+      tabs.push({ kind: 'scope', id: sr.id, item: it, reason: sr.reason, label: scopeLabel(it) })
+    }
+  }
+  const base = (ask ?? cr ?? sr)!
+  const first = tabs[0]
+  const at = [ask, cr, sr].filter(Boolean).map((x) => x!.at).sort()[0]!
+  return {
+    id: String(base.id), node, kind: 'batch', status: 'open', at, tabs, revs,
+    // legacy mirror: older surfaces title the card off these
+    question: first?.question || first?.label
+      || (first?.kind === 'credits' ? `credits ${first.old} → ${first.new}` : ''),
+    ...(ask ? { rev: revs.ask } : {}),
+  } as AskInfo
 }
 
 /** An open or resolved request as a row of the user's mailbox (user ruling

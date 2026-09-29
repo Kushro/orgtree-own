@@ -634,12 +634,16 @@ test('§8 an open question from an agent outside the tree is listed and answerab
   installServer({ items: [] })
   const v = await mountView(panel(treeWithFarAsk()), titles)
   await settle()
-  assert.deepEqual(titles(v.el), ['question:Is this the right order?'],
+  // composed into the agent's ONE batch card (FR-14), which the inbox titles
+  // by its request count, exactly as it does a held agent's batch
+  assert.deepEqual(titles(v.el), ['question:1 request(s) awaiting one submit'],
     "listed from the header's open requests")
   await inAct(() => { rowEl(v.el, 'question:q88')!.click() })
   await settle()
   assert.ok(!!v.el.querySelector('[data-attn-detail="question"] .askcard'),
     "and the body is the inbox's own ask card")
+  assert.match(v.el.querySelector('[data-attn-detail="question"] .askcard')?.textContent ?? '',
+    /Is this the right order\?/, 'showing the question itself')
   await v.unmount()
 })
 
@@ -653,7 +657,7 @@ test("§8.1 the same question appears in the user's inbox", async () => {
   await settle()
   const rows = [...v.el.querySelectorAll('.mailer-list .mailrow.ask')]
   assert.equal(rows.length, 1, 'one open request row')
-  assert.match(rows[0]!.textContent ?? '', /Is this the right order\?/)
+  assert.match(rows[0]!.textContent ?? '', /request batch/, 'the agent\'s composed card')
   await v.unmount()
 })
 

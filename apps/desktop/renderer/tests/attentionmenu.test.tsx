@@ -59,6 +59,8 @@ test('large Attention drawer switches agent desks and opens both agent menus', a
     assert.ok(document.querySelector('.ctxmenu'), `${selector}: menu opens`)
     await inAct(() => { window.dispatchEvent(new window.KeyboardEvent('keydown',
       { key: 'Escape', bubbles: true, cancelable: true })) })
-    assert.equal(document.querySelector('.ctxmenu'), null)
+    // a boolean, never the node: a DOM element handed to the reporter as
+    // `actual` serialises its whole document on failure (attentionaudit §5)
+    assert.equal(!!document.querySelector('.ctxmenu'), false, `${selector}: Escape closes the menu`)
   }
 })

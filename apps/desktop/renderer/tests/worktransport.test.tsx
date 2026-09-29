@@ -103,10 +103,20 @@ test('hidden deep link reveals group and Attention retains its manual flag witho
   const attention = await mountView(<AttentionQueue slug={f.slug} tree={f.tree} toast={noop} />, el => el)
   t.after(() => attention.unmount())
   await settle()
-  assert.match(attention.el.textContent ?? '', /Hidden item/)
-  const row = attention.el.querySelector('[data-attn-key], .attn-row') as HTMLElement
-  if (row) await inAct(() => row.click())
-  assert.ok(!f.calls.some(p => p.includes('backlogged=1')))
+  // the Attention row IS the docket's own row since point 29 (user
+  // 2026-09-29), and the docket lists an item by its slug with the title as
+  // the row's hover text — the flag retained means the row is listed, in its
+  // attention state
+  const row = attention.el.querySelector('[data-attn-row="ticket:hidden"] .docket-row') as HTMLElement
+  assert.ok(row, 'the flagged hidden item is listed')
+  assert.equal(row.querySelector('.docket-rowname')?.textContent, 'hidden')
+  assert.equal(row.getAttribute('title'), 'Hidden item')
+  assert.ok(row.classList.contains('attention'), 'with its manual flag')
+  await inAct(() => row.click())
+  await settle()
+  assert.match(attention.el.querySelector('[data-attn-detail="ticket"]')?.textContent ?? '',
+    /Hidden item/, 'and its full title in the docket pane')
+  assert.ok(!f.calls.some(p => p.includes('backlogged=1')), 'without loading the backlog')
   const docket = await mountView(<DocketModal slug={f.slug} tree={f.tree} toast={noop} close={noop}
     jumpTo="hidden" jumpSeq={1} />, el => el)
   t.after(() => docket.unmount())
