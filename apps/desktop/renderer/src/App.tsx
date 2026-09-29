@@ -68,6 +68,7 @@ import { primaryEmail, usageIdentity } from './accountidentity'
 import type { HostIdentity } from './accountidentity'
 import { groupByProvider } from './usagegroups'
 import { bumpLive } from './livebus'
+import { applyPrimedAsks, useAskPrimer } from './askprime'
 import { newSync, onBase, onFrame, resetSync } from './treesync'
 import { TreeReadPacer } from './treepace'
 import type { TreeRequest } from './treepace'
@@ -342,6 +343,10 @@ export default function App() {
   const [slug, commitSlug] = useState<string | null>(() => v3 ? identityOrg(identity)
     : slugFromPath() ?? (desktop() ? (() => { try { return localStorage.getItem('orgtree-desktop-last-org') } catch { return null } })() : null))   // browser/v2 /o/<slug> survives refresh
   const [tree, setTree] = useState<TreePayload | null>(null)
+  // point 34: the tree on screen, for the new-question primer (askprime.ts)
+  const treeRef = useRef<TreePayload | null>(null)
+  treeRef.current = tree
+  useAskPrimer(slug, treeRef, setTree)
   const { request: setSlug, prompt: orgTransitionPrompt } = useOrgTransition(slug, commitSlug, BASE)
   const [toasts, setToasts] = useState<Toast[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -744,6 +749,9 @@ export default function App() {
     // snapshot, so it is applied; one trailing read then catches up.
     // Rejecting it instead would starve the tree while the camera moves.
     const { version, selection } = treeSelections.read(want, savedTreeSelection(want))
+    // point 34: a question the primer put on screen after this read started
+    // is re-applied to its answer (askprime.applyPrimedAsks)
+    const readStartedAt = Date.now()
     return getAppTree(want, selection).then((t) => {
       if (treeSelections.version(want) !== version) refreshTree(want, { urgent: true, keep: true })
       // ⚠ an ORG SWITCH mid-flight: this payload is the PREVIOUS org's
@@ -774,7 +782,7 @@ export default function App() {
           (t as TreePayload & { sync_rev?: number }).sync_rev)
         replaceNodeMetadata(want, t.roots,
           replay as Extract<WsEvent, { type: 'node_stream' }>[])
-        setTree(t)
+        setTree(applyPrimedAsks(want, t, readStartedAt))
         setTreeRead({ at: Date.now(), error: null })
       }
       fetchOk()
