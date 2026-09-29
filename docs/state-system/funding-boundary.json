@@ -1,6 +1,6 @@
 {
   "schema": "orgtree.funding-boundary/v1",
-  "source_contract_sha256": "80ff19b70739b447e33b73d0d2ea3a2fdd7563275ca66b2541b223a9125b5b0c",
+  "source_contract_sha256": "31fea5d7e1b2420a9dd71d5910f98dc9a1a3c70f447c650c07be5eef6b96be5c",
   "qualification": {
     "runtime_census": false,
     "conversion_authorized": false
