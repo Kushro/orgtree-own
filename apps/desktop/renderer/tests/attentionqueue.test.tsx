@@ -2,15 +2,16 @@
 //
 // attentionfeed.test.tsx pins the membership and resolution RULES as pure
 // functions. This file pins that the panel actually obeys them through the
-// wire: that the three flavours render as one mixed list, that resolving a row
-// goes through the same endpoint the Docket and the inbox use, and — the part
-// a pure test cannot reach — that a row leaves the list only when the SERVER
-// stops listing it, with the one urgent-mail retention the ticket asks for.
+// wire: that the three flavours render as one mixed list, each drawn by its
+// home surface's own component (the docket's row and pane, the inbox's row and
+// reading pane — user 2026-09-29), that resolving a row goes through the same
+// endpoint the Docket and the inbox use, and that a row leaves the list when
+// the SERVER stops listing it, with the one urgent-mail retention.
 //
-// ⚠ NO OPTIMISTIC REMOVAL ANYWHERE. Every assertion below that a row is gone
-// is made after the server's own answer changed. A panel that hid a row on
-// click would pass a weaker version of these tests and then leave the user
-// looking at a list that disagreed with the docket.
+// ⚠ ONE OPTIMISTIC REMOVAL, AND ONLY ONE: dismissing a ticket's flag hides
+// the row at once (user 2026-09-29: "dismissing attention on a ticket is
+// slow") and brings it back if the server refuses (§2.2). Every other
+// assertion that a row is gone is made after the server's answer changed.
 //
 // Run:  node apps/desktop/renderer/tests/run.mjs attentionqueue
 
@@ -100,12 +101,24 @@ function installServer(initial: Partial<Server> = {}) {
   })
 }
 
+/** kind:name for each listed entry — a ticket by the docket row's own name
+ *  (the slug, as the docket lists it), a mail or question by the inbox row's
+ *  own preview line */
 const titles = (el: HTMLElement) =>
-  [...el.querySelectorAll('.attn-row')].map((r) =>
-    `${r.getAttribute('data-attn-kind')}:${r.querySelector('.attn-row-title')?.textContent ?? ''}`)
+  [...el.querySelectorAll('[data-attn-row]')].map((r) => {
+    const kind = r.getAttribute('data-attn-kind')
+    const name = kind === 'ticket'
+      ? r.querySelector('.docket-rowname')?.textContent
+      : r.querySelector('.mailrow .l2')?.textContent
+    return `${kind}:${name ?? ''}`
+  })
 
+/** the entry's hook cell (display: contents) — selection state lives here */
 const rowFor = (el: HTMLElement, key: string) =>
   el.querySelector(`[data-attn-row="${key}"]`) as HTMLElement | null
+/** the home surface's own row inside it — what the user clicks */
+const rowEl = (el: HTMLElement, key: string) =>
+  rowFor(el, key)?.querySelector('.mailrow') as HTMLElement | null
 
 /** the tree's freshness, which the panel cannot see for itself — question rows
  *  are read out of the `tree` prop rather than a feed it polls. Most cases pass
@@ -127,6 +140,7 @@ const panel = (t = tree(), treeStatus: PolledStatus | null = FRESH) =>
     treeStatus={treeStatus ?? undefined} />
 
 const settle = async () => { await inAct(() => flush(8)) }
+const text = (el: HTMLElement) => el.textContent ?? ''
 
 /** Let the panel re-read both feeds.
  *
@@ -152,10 +166,22 @@ test('§1 the three flavours render as one mixed list, newest first', async () =
   const v = await mountView(panel(tree({ ask: openAsk })), titles)
   await settle()
   assert.deepEqual(titles(v.el), [
-    'mail:the build is down',
-    'ticket:Cut over the index',
+    'mail:the nightly build has been red for six hours',
+    'ticket:cutover',
     'question:Ship the cutover tonight?',
   ], 'heterogeneous rows in a single list')
+  // each row is its home surface's own row, not a lookalike
+  const ticket = rowEl(v.el, 'ticket:cutover')!
+  assert.ok(ticket.classList.contains('docket-row') && ticket.classList.contains('attention'),
+    "the ticket is the docket's DocketRow, in its attention state")
+  assert.ok(!!ticket.closest('.docket-modal'), "inside the docket's style scope")
+  const mail = rowEl(v.el, 'mail:m1')!
+  assert.ok(mail.classList.contains('urgent') && mail.classList.contains('unread'),
+    "the mail is the inbox's row: urgent and unread")
+  assert.equal(mail.querySelector('.urgentkind')?.textContent, 'urgent')
+  const ask = rowEl(v.el, 'question:a1')!
+  assert.ok(ask.classList.contains('ask'), "the question is the inbox's ask row")
+  assert.equal(ask.querySelector('.askkind')?.textContent, 'question')
   await v.unmount()
 })
 
@@ -176,13 +202,20 @@ test('§2 dismissing a ticket goes through the docket\'s own endpoint, and the r
   const v = await mountView(panel(), titles)
   await settle()
 
-  await inAct(() => { rowFor(v.el, 'ticket:cutover')!.click() })
+  await inAct(() => { rowEl(v.el, 'ticket:cutover')!.click() })
   await settle()
-  const dismiss = [...v.el.querySelectorAll('button')]
-    .find((b) => b.textContent === 'Dismiss attention') as HTMLButtonElement
-  assert.ok(dismiss, 'the row carries the control that resolves its own type')
+  // the body is the docket's own pane: title, status line, and its Dismiss
+  const pane = v.el.querySelector('[data-attn-detail="ticket"]') as HTMLElement
+  assert.equal(pane.querySelector('.docket-pane-head b')?.textContent, 'Cut over the index')
+  assert.ok(!!pane.querySelector('.docket-pane-sub'), "the docket pane's status line")
+  const dismiss = [...pane.querySelectorAll('button')]
+    .find((b) => /Dismiss/.test(b.textContent ?? '')) as HTMLButtonElement
+  assert.ok(dismiss, "the pane carries the docket's own Dismiss")
 
   await inAct(() => { dismiss.click() })
+  // ⚠ NO repoll: the row leaves on the click itself (the optimistic half)
+  assert.deepEqual(titles(v.el), ['mail:the nightly build has been red for six hours'],
+    'the ticket is gone at once and the unresolved rows are untouched')
   await settle()
   const post = server.posts.find((p) => /dismiss-attention$/.test(p.path))
   assert.ok(post, 'the existing dismiss endpoint, not a second one')
@@ -190,11 +223,42 @@ test('§2 dismissing a ticket goes through the docket\'s own endpoint, and the r
   assert.deepEqual(post!.body, { set_rev: 4 },
     'echoing the flag\'s revision, so a stale click cannot clear a newer reason')
 
-  // the server now answers without the flag — that is what removes the row
+  // the server now answers without the flag, and the row stays gone
   server.items = [{ ...flagged, manual_attention: null, attention_sources: [], effective_attention: false }]
   await repoll()
-  assert.deepEqual(titles(v.el), ['mail:the build is down'],
-    'the ticket is gone and the unresolved rows are untouched')
+  assert.deepEqual(titles(v.el), ['mail:the nightly build has been red for six hours'])
+  await v.unmount()
+})
+
+test('§2.2 a refused dismissal brings the row back and says why', async () => {
+  localStorage.clear()
+  installServer({ items: [flagged] })
+  const good = (globalThis as unknown as { fetch: (u: string, i?: unknown) => unknown }).fetch
+  // the dismissal is held open, so the optimistic state can be observed, and
+  // then refused
+  let refuse: (() => void) | null = null
+  ;(globalThis as unknown as { fetch: unknown }).fetch = (url: string, init?: unknown) => {
+    if (/dismiss-attention$/.test(new URL(String(url), 'http://localhost').pathname)) {
+      return new Promise((resolve) => {
+        refuse = () => resolve({ ok: false, status: 409, statusText: 'HTTP 409', headers: new Headers(),
+          json: () => Promise.resolve({ detail: 'the flag changed' }) })
+      })
+    }
+    return good(url, init)
+  }
+  const toasts: string[] = []
+  const v = await mountView(<AttentionQueue slug={SLUG} tree={tree()} toast={(m) => { toasts.push(...m) }}
+    treeStatus={FRESH} />, titles)
+  await settle()
+  await inAct(() => { rowEl(v.el, 'ticket:cutover')!.click() })
+  await settle()
+  const dismiss = [...v.el.querySelectorAll('[data-attn-detail="ticket"] button')]
+    .find((b) => /Dismiss/.test(b.textContent ?? '')) as HTMLButtonElement
+  await inAct(() => { dismiss.click() })
+  assert.deepEqual(titles(v.el), [], 'gone while the server has not answered')
+  await inAct(async () => { refuse!(); await flush(8) })
+  assert.deepEqual(titles(v.el), ['ticket:cutover'], 'refused: the row is back')
+  assert.ok(toasts.some((t) => /error/.test(t)), 'and the refusal is reported')
   await v.unmount()
 })
 
@@ -220,8 +284,13 @@ test('§3 opening an urgent mail reads it, and it stays while it is selected', a
   const v = await mountView(panel(), titles)
   await settle()
 
-  await inAct(() => { rowFor(v.el, 'mail:m1')!.click() })
+  await inAct(() => { rowEl(v.el, 'mail:m1')!.click() })
   await settle()
+  // the body is the inbox's own reading pane, with its reply box
+  const pane = v.el.querySelector('[data-attn-detail="mail"]') as HTMLElement
+  assert.ok(!!pane.querySelector('.mailer-head'), "the inbox pane's head")
+  assert.equal(pane.querySelector('.urgent-why')?.textContent, 'the build is down')
+  assert.ok(!!pane.querySelector('.mail-reply textarea'), 'and its reply box')
   const read = server.posts.find((p) => /\/inbox\/read$/.test(p.path))
   assert.ok(read, 'opening it marks it read through the inbox\'s own endpoint')
   assert.deepEqual(read!.body, { ids: ['m1'] })
@@ -230,16 +299,17 @@ test('§3 opening an urgent mail reads it, and it stays while it is selected', a
   server.pending = []
   server.delivered = [urgent]
   await repoll()
-  assert.deepEqual(titles(v.el), ['mail:the build is down', 'ticket:Cut over the index'],
+  assert.deepEqual(titles(v.el), ['mail:the nightly build has been red for six hours', 'ticket:cutover'],
     'a read mail stays on screen while the reader is still in it')
-  assert.ok(rowFor(v.el, 'mail:m1')!.className.includes('attn-resolved'),
-    'marked as resolved, so it does not read as still waiting')
-  assert.match(v.el.querySelector('.attn-read-mark')?.textContent ?? '', /read/)
+  assert.equal(rowEl(v.el, 'mail:m1')!.classList.contains('unread'), false,
+    'drawn as the inbox draws a read mail, so it does not read as still waiting')
+  assert.equal(!!v.el.querySelector('[data-attn-detail="mail"] .wait'), false,
+    'and the pane drops its unread mark')
 
   // move to another row and it is released
-  await inAct(() => { rowFor(v.el, 'ticket:cutover')!.click() })
+  await inAct(() => { rowEl(v.el, 'ticket:cutover')!.click() })
   await settle()
-  assert.deepEqual(titles(v.el), ['ticket:Cut over the index'],
+  assert.deepEqual(titles(v.el), ['ticket:cutover'],
     'read AND no longer selected — now it is gone')
   await v.unmount()
 })
@@ -249,11 +319,11 @@ test('§3.1 a mail the server still calls unread is not read twice', async () =>
   installServer({ items: [], pending: [urgent] })
   const v = await mountView(panel(), titles)
   await settle()
-  await inAct(() => { rowFor(v.el, 'mail:m1')!.click() })
+  await inAct(() => { rowEl(v.el, 'mail:m1')!.click() })
   await settle()
   server.pending = []
   await repoll()
-  await inAct(() => { rowFor(v.el, 'mail:m1')!.click() })
+  await inAct(() => { rowEl(v.el, 'mail:m1')!.click() })
   await settle()
   assert.equal(server.posts.filter((p) => /\/inbox\/read$/.test(p.path)).length, 1,
     're-selecting a retained row posts nothing')
@@ -266,7 +336,7 @@ test('§4 the list is a real listbox the keyboard can drive', async () => {
   installServer({ items: [flagged], pending: [urgent] })
   const v = await mountView(panel(), titles)
   await settle()
-  const list = v.el.querySelector('.attn-list') as HTMLElement
+  const list = v.el.querySelector('.attn-mlist') as HTMLElement
   assert.equal(list.getAttribute('role'), 'listbox')
   assert.equal(list.getAttribute('aria-label'), 'Needs attention')
   assert.equal(rowFor(v.el, 'mail:m1')!.getAttribute('role'), 'option')
@@ -294,29 +364,36 @@ test('§5 a public organization can read the queue and resolve nothing', async (
   const v = await mountView(panel(tree({ isPublic: true })), titles)
   await settle()
   assert.deepEqual(titles(v.el),
-    ['mail:the build is down', 'ticket:Cut over the index'],
+    ['mail:the nightly build has been red for six hours', 'ticket:cutover'],
     'what is waiting is not a secret from a reader who can already see the docket')
 
-  await inAct(() => { rowFor(v.el, 'ticket:cutover')!.click() })
+  await inAct(() => { rowEl(v.el, 'ticket:cutover')!.click() })
   await settle()
-  const labels = () => [...v.el.querySelectorAll('button')].map((b) => b.textContent)
-  assert.equal(labels().includes('Dismiss attention'), false, 'no dismissal')
+  // the docket's own pane is drawn as the docket draws it; a Dismiss pressed
+  // here still writes nothing, and the row stays
+  const dismiss = [...v.el.querySelectorAll('[data-attn-detail="ticket"] button')]
+    .find((b) => /Dismiss/.test(b.textContent ?? '')) as HTMLButtonElement | undefined
+  if (dismiss) await inAct(() => { dismiss.click() })
+  assert.ok(titles(v.el).includes('ticket:cutover'), 'no dismissal')
 
-  await inAct(() => { rowFor(v.el, 'mail:m1')!.click() })
+  await inAct(() => { rowEl(v.el, 'mail:m1')!.click() })
   await settle()
-  assert.equal(labels().includes('Mark read'), false, 'no read mark')
-  assert.equal(server.posts.length, 0, 'and opening a row wrote nothing at all')
+  assert.equal(!!v.el.querySelector('[data-attn-detail="mail"] .mail-reply'), false, 'no reply')
+  assert.equal(server.posts.length, 0, 'and nothing here wrote anything at all')
   await v.unmount()
 })
 
 // ------------------------------------------------------------------- §6
-test('§6 the counts describe the mixed list, by flavour', async () => {
+test('§6 there is no header row: no bell, no title, no count line (user 2026-09-29)', async () => {
   localStorage.clear()
   installServer({ items: [flagged], pending: [urgent] })
-  const v = await mountView(panel(tree({ ask: openAsk })),
-    (el) => el.querySelector('.attn-counts')?.textContent ?? '')
+  const v = await mountView(panel(tree({ ask: openAsk })), titles)
   await settle()
-  assert.equal(v.last(), '1 ticket · 1 urgent mail · 1 question')
+  assert.equal(titles(v.el).length, 3, 'the list itself is all there')
+  assert.equal(!!v.el.querySelector('.attn-head, .attn-counts'), false,
+    'the "Needs attention" header row is gone')
+  assert.equal(!!v.el.querySelector('h3'), false, "no title (the docket row's own status label may say Needs attention)")
+  assert.doesNotMatch(text(v.el), /1 ticket|1 urgent mail|1 question/, 'and no count line')
   await v.unmount()
 })
 
@@ -331,8 +408,6 @@ test('§6 the counts describe the mixed list, by flavour', async () => {
 // I asserted the wrong behaviour to a peer before measuring it — I said the
 // feeds failed closed to an empty list — which is why every case here drives
 // the real failure rather than describing one.
-
-const text = (el: HTMLElement) => el.textContent ?? ''
 
 /** ⚠ NEVER HAND A DOM NODE TO AN ASSERTION AS `actual` OR `expected`.
  *
@@ -418,7 +493,7 @@ test('§7.2 one feed fails and the other still has rows — shown, and the gap n
   await repoll()
   // partial coverage is a real state: the ticket rows are still usable and are
   // still shown. Hiding them because a DIFFERENT feed failed would be its own lie.
-  assert.ok(titles(v.el).includes('ticket:Cut over the index'),
+  assert.ok(titles(v.el).includes('ticket:cutover'),
     'the feed that still reads keeps serving its rows')
   assert.match(text(v.el), /mail could not be refreshed/,
     'and the one that does not is named, so the list is not read as complete')
@@ -450,13 +525,13 @@ test('§7.2a usable rows AND a feed still on its first read — the rows show an
   // to the counts and never said half the queue had not arrived. Pending and
   // failed are different REASONS for the same incompleteness; only what the
   // user is told about them differs.
-  assert.deepEqual(titles(v.el), ['ticket:Cut over the index'],
+  assert.deepEqual(titles(v.el), ['ticket:cutover'],
     'the feed that answered keeps serving its rows — a pending sibling must '
     + 'not blank good data')
   assert.match(text(v.el), /mail is still loading/,
-    'and the one that has not answered is named alongside the counts')
-  assert.ok(v.el.querySelector('.attn-incomplete'),
-    'the header marks itself incomplete, not merely un-stale')
+    'and the one that has not answered is named above the rows')
+  assert.ok(v.el.querySelector('.attn-gaps'),
+    "in the gap line that replaced the header's count line")
   assert.equal(!!v.el.querySelector('.attn-empty'), false)
   await v.unmount()
 })
@@ -537,5 +612,58 @@ test('§7.3 recovery clears the warning and the confident sentence comes back',
   assert.ok(v.el.querySelector('.attn-empty'),
     'once both feeds read again the panel may claim it knows')
   assert.doesNotMatch(text(v.el), /could not be/)
+  await v.unmount()
+})
+
+// ------------------------------------------------------------------- §8
+//
+// A QUESTION FROM AN AGENT THE TREE DOES NOT HOLD. The v3 tree is a selected
+// read, so such an agent has no `node.ask` — but the header's `tree.asks`
+// carries every open request. Before canvas/openasks.ts both this list and
+// the user's inbox read `node.ask` alone, and the question was listed nowhere
+// (user report 2026-09-29, image-29).
+
+const farAsk: AskInfo = {
+  id: 'q88', node: 'far-agent', status: 'open', at: '2026-09-20T08:00:00.000Z',
+  kind: 'question', question: 'Is this the right order?',
+}
+const treeWithFarAsk = (): TreePayload => ({ ...tree(), asks: [farAsk], asks_open: 1 } as TreePayload)
+
+test('§8 an open question from an agent outside the tree is listed and answerable', async () => {
+  localStorage.clear()
+  installServer({ items: [] })
+  const v = await mountView(panel(treeWithFarAsk()), titles)
+  await settle()
+  assert.deepEqual(titles(v.el), ['question:Is this the right order?'],
+    "listed from the header's open requests")
+  await inAct(() => { rowEl(v.el, 'question:q88')!.click() })
+  await settle()
+  assert.ok(!!v.el.querySelector('[data-attn-detail="question"] .askcard'),
+    "and the body is the inbox's own ask card")
+  await v.unmount()
+})
+
+test("§8.1 the same question appears in the user's inbox", async () => {
+  localStorage.clear()
+  window.HTMLElement.prototype.scrollIntoView = () => {}
+  installServer({ items: [] })
+  const { InboxPanel } = await import('../src/App')
+  const v = await mountView(<InboxPanel slug={SLUG} tree={treeWithFarAsk()} toast={() => {}}
+    close={() => {}} jumpTo={null} />, (el) => el)
+  await settle()
+  const rows = [...v.el.querySelectorAll('.mailer-list .mailrow.ask')]
+  assert.equal(rows.length, 1, 'one open request row')
+  assert.match(rows[0]!.textContent ?? '', /Is this the right order\?/)
+  await v.unmount()
+})
+
+test('§8.2 an agent the tree holds keeps its ONE batched card, not a second raw row', async () => {
+  localStorage.clear()
+  installServer({ items: [] })
+  // the header also lists the raw row of the batched ask: it must not double up
+  const t = { ...tree({ ask: openAsk }), asks: [openAsk] } as TreePayload
+  const v = await mountView(panel(t), titles)
+  await settle()
+  assert.deepEqual(titles(v.el), ['question:Ship the cutover tonight?'])
   await v.unmount()
 })

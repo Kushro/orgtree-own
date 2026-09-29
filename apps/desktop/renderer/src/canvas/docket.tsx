@@ -1877,7 +1877,7 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
  *  module counter is enough and needs no reset. */
 let copyTicket = 0
 
-const DocketRow = memo(function DocketRow({ item, selected, onClick, onDismiss, facts, onFocusAgent,
+export const DocketRow = memo(function DocketRow({ item, selected, onClick, onDismiss, facts, onFocusAgent,
   close, flash, rowRef, depth = 0, kids = 0, folded = false, onFold,
   foldLocked = false, ageMode = 'updated', org, toast }: {
   item: WorkItem
@@ -2566,7 +2566,9 @@ function DocketAttachments({ slug, item, toast, refresh }: {
   )
 }
 
-function DocketPane(props: ComponentProps<typeof FullDocketPane>) {
+/** Exported for the Attention view, which shows a flagged ticket with this
+ *  exact pane (user 2026-09-29) rather than a copy that could drift. */
+export function DocketPane(props: ComponentProps<typeof FullDocketPane>) {
   const { slug, item } = props
   const [loaded, setLoaded] = useState<{ slug: string; id: string; item: WorkItem } | null>(null)
   const [error, setError] = useState('')

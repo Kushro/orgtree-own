@@ -16,13 +16,13 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import type { AskInfo, AskQuestion, AskTab, ToastFn } from '../types'
+import type { AskInfo, AskQuestion, AskTab, ToastFn, TreeNode, TreePayload } from '../types'
 import { answerAsk, creditDecide, fileBase, resolveBatch } from '../api'
 import { CreditBar } from './cards'
 import { CloseIcon, WarnIcon } from '../icons'
 import { isMobile } from '../mobile'
 import { useQuestionVisibility } from '../notification-visibility'
-import { md } from './shared'
+import { md, orgPxc } from './shared'
 
 /** Each card owns its inputs, so a deterministic id keeps the visible label
  * associated with the active tab without depending on payload text. */
@@ -796,5 +796,28 @@ function NulledAsk({ ask, credit }: { ask: AskInfo; credit: boolean }) {
         </div>
       )}
     </div>
+  )
+}
+
+/** THE INBOX'S ASK BODY: the canonical card with the asking agent's credit
+ *  bar read off its tree entry (seat, grant, live children). The user's inbox
+ *  and the Attention view both show an open request with this, so the two
+ *  cannot differ. `node` is absent for an agent the tree does not hold; the
+ *  card then draws an empty bar rather than a guessed one. */
+export function InboxAskCard({ ask, slug, tree, node, toast }: {
+  ask: AskInfo
+  slug: string
+  tree: TreePayload
+  node?: TreeNode
+  toast: ToastFn
+}) {
+  return (
+    <AskCard ask={ask} slug={slug} toast={toast}
+      seat={node?.seat ?? 0}
+      committed={(node?.grant ?? 0) - (node?.free ?? 0)}
+      segments={(node?.children ?? []).filter((c) => c.state === 'live')
+        .map((c) => ({ seat: c.seat, grant: c.grant }))}
+      pxc={orgPxc(tree)}
+      maxTop={tree.max_top_grant ?? 1000} />
   )
 }

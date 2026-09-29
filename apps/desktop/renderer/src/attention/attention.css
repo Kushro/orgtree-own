@@ -133,93 +133,20 @@
 /* a drag must not select the prose either side of it */
 .attn-dragging { user-select: none; }
 
-/* ------------------------------------------------- the needs-attention list */
-.attn-wrap { display: flex; flex-direction: column; min-height: 0; height: 100%; }
-.attn-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex: 0 0 auto;
-  padding-bottom: 2px;
-}
-.attn-head h3 { margin: 0; display: flex; align-items: center; gap: 6px; }
-.attn-counts { font-size: 12px; }
-
-.attn-body {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-  gap: 4px;
-}
-.attn-list {
-  flex: 0 0 42%;
-  min-width: 180px;
-  overflow-y: auto;
-  border-right: 1px solid var(--line-soft);
-  padding-right: 3px;
-}
-.attn-list:focus-visible { outline: 1px solid var(--line-hover); outline-offset: -2px; }
-.attn-pane { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding-left: 2px; }
-
-.attn-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 4px;
-  border-left: 2px solid transparent;
-  cursor: pointer;
-}
-.attn-row:hover { background: var(--panel-2); }
-.attn-row.sel { background: var(--panel-2); border-left-color: var(--accent, var(--line-hover)); }
-.attn-row:focus-visible { outline: 1px solid var(--line-hover); outline-offset: -1px; }
-/* a mail that has been read and is only still here because it is selected */
-.attn-row.attn-resolved .attn-row-title { opacity: 0.62; }
-
-.attn-row-kind { flex: 0 0 auto; margin-top: 2px; font-size: 14px; }
-.attn-ticket .attn-row-kind { color: var(--warn, #d08770); }
-.attn-mail .attn-row-kind { color: var(--danger, #e06c75); }
-.attn-question .attn-row-kind { color: var(--accent, #7aa2f7); }
-
-.attn-row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.attn-row-title {
-  font-size: 13px;
-  line-height: 1.35;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.attn-row-sub {
-  font-size: 12px;
-  line-height: 1.3;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.attn-row-meta {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  font-size: 11px;
-}
-.attn-row-agent { display: flex; align-items: center; gap: 3px; }
+/* ------------------------------------------------- the needs-attention list
+ * The list and the pane are the app's own mailbox (`.mailer`), and every row
+ * and body inside is the home surface's own component (AttentionQueue.tsx),
+ * so there are no attention-only row or detail styles here: a ticket looks as
+ * it does in the docket, a mail or question as it does in the inbox. */
+.attn-wrap { display: flex; flex-direction: column; min-height: 0; height: 100%; gap: 4px; }
+.attn-mailer { flex: 1 1 auto; min-height: 0; }
+.attn-mlist:focus-visible { outline: 1px solid var(--line-hover); outline-offset: -2px; }
+/* a cell carries this panel's hooks (data-attn-row, the listbox option) and,
+ * for a ticket, the docket's style scope — but no box of its own, so the row
+ * inside lays out exactly as it does at home */
+.attn-cell { display: contents; }
+.attn-gaps { font-size: 12px; }
 .attn-empty { padding: 8px 6px; }
-
-.attn-detail { display: flex; flex-direction: column; gap: 6px; padding: 2px 2px 6px; }
-.attn-detail-title { margin: 0; font-size: 15px; line-height: 1.3; }
-.attn-detail-sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
-.attn-detail-reason { white-space: pre-wrap; line-height: 1.45; }
-.attn-urgent-reason { border-left: 2px solid var(--danger, #e06c75); padding-left: 8px; }
-.attn-urgent-mark {
-  color: var(--danger, #e06c75);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 10px;
-}
-.attn-read-mark { font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
-.attn-detail-actions { gap: 8px; }
 
 /* ------------------------------------------------- the dynamic agent area */
 .attn-agents-wrap {

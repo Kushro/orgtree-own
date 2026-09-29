@@ -77,11 +77,11 @@ function stubPointerCapture(): () => void {
 interface Mounted {
   el: HTMLElement
   ctx: () => OrgSlotContext | null
-  render: (next: { hidden?: boolean; slot?: boolean }) => Promise<void>
+  render: (next: { hidden?: boolean; slot?: boolean; focusAgent?: string | null }) => Promise<void>
 }
 
 async function mountCanvas(t: TestContext,
-  opts: { hidden?: boolean; slot?: boolean } = {}): Promise<Mounted> {
+  opts: { hidden?: boolean; slot?: boolean; focusAgent?: string | null } = {}): Promise<Mounted> {
   t.after(stubPointerCapture())
   // the canvas settles its springs on timers, so `advance` needs the mocked
   // clock; restored per test so a failure here cannot poison the next file
@@ -93,8 +93,9 @@ async function mountCanvas(t: TestContext,
   t.after(() => { (globalThis as { fetch?: typeof fetch }).fetch = had })
   let seen: OrgSlotContext | null = null
   const roots = [mkNode('alpha', { children: [mkNode('beta')] })]
-  const node = (o: { hidden?: boolean; slot?: boolean }) => (
+  const node = (o: { hidden?: boolean; slot?: boolean; focusAgent?: string | null }) => (
     <OrgCanvas tree={tree(roots)} slug="mine"
+      focusAgent={o.focusAgent ?? null} onFocusAgentHandled={() => {}}
       op={() => Promise.resolve({})}
       toast={() => {}} mailEvt={null} onOpenAgentGallery={() => {}}
       canvasContent={o.hidden ? 'hidden' : 'shown'}
@@ -236,4 +237,47 @@ test('§7 a drag on the hidden canvas does not pan it', async (t: TestContext) =
     await flush()
     assert.equal((m.el.querySelector('.space') as HTMLElement).style.transform, before,
       'the hidden canvas panned under a drag on the presented view')
+  })
+
+// ------------------------------------------------------------------- §8
+//
+// THE ONE FOCUS PATH (user 2026-09-29: "clicking any agent link or any action
+// that focuses an agent while attention view is open should open that agent's
+// desk in the right panel"). Every route that focuses an agent ends in the
+// host's `centerOn`; with the Attention view presented it makes the agent the
+// Attention desk's selection and moves nothing on the hidden canvas.
+
+import { attentionLayout, forgetAttentionMode } from '../src/attention/mode'
+
+const cam = (el: HTMLElement) => (el.querySelector('.space') as HTMLElement).style.transform
+
+test("§8 with the Attention view presented, every focus route selects the agent's desk",
+  async (t: TestContext) => {
+    localStorage.clear(); forgetAttentionMode()
+    const m = await mountCanvas(t, { hidden: true })
+    const before = cam(m.el)
+    // the slot's own route (agent links in the Attention view)
+    await inAct(() => { m.ctx()!.onFocusAgent('beta') })
+    await flush(); await advance(400, 50); await flush()
+    assert.equal(attentionLayout('mine').agent, 'beta', "onFocusAgent opened beta's desk")
+    // the desk's jump cards
+    await inAct(() => { m.ctx()!.deskExtras.onJump!('alpha') })
+    await flush(); await advance(400, 50); await flush()
+    assert.equal(attentionLayout('mine').agent, 'alpha', "a jump card opened alpha's desk")
+    // the shell's focus request (inbox sender chips, docket actor names …)
+    await m.render({ hidden: true, focusAgent: 'beta' })
+    await advance(400, 50); await flush()
+    assert.equal(attentionLayout('mine').agent, 'beta', "the shell's focusAgent opened beta's desk")
+    assert.equal(cam(m.el), before, 'and the hidden camera never moved')
+  })
+
+test('§8.1 with the canvas presented, focusing moves the camera and leaves the Attention desk alone',
+  async (t: TestContext) => {
+    localStorage.clear(); forgetAttentionMode()
+    const m = await mountCanvas(t)
+    const before = cam(m.el)
+    await inAct(() => { m.ctx()!.onFocusAgent('beta') })
+    await flush(); await advance(1200, 50); await flush()
+    assert.equal(attentionLayout('mine').agent, null, 'the Attention selection is untouched')
+    assert.notEqual(cam(m.el), before, 'the canvas camera glided to beta, as before')
   })

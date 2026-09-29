@@ -82,7 +82,9 @@ import {
 import { DirList } from './forms'
 import { FolderPickerHost } from './picker'
 import { activeDocCount, ago, ALL_TIERS, attentionPip, availableAutopsyModels, deskDpi, fmtCredits, formatCount, isOpenRouterTier, jumpKey, jumpTo, orgPxc, presenceOfPayload, primedRestartChip, setDeskDpi, TIER_LETTER, tierLabel, unicodeLength, usePolled } from './canvas/shared'
-import { AskCard } from './canvas/asks'
+import { InboxAskCard } from './canvas/asks'
+import { askMailRow, openAsks } from './canvas/openasks'
+import { SenderChip } from './canvas/senderchip'
 import { AgentName } from './canvas/identity'
 import { ObjectMenuBoundary } from './canvas/contextmenu'
 import { AccountsPanel, ProviderSignIn, UsageBars } from './canvas/accounts'
@@ -2360,41 +2362,9 @@ export function resumableFrozen(
       n.resumable && n.frozen != null)
 }
 
-export function SenderChip({ id, nodes, onFocusAgent }: {
-  id: string
-  nodes: Map<string, TreeNode>
-  onFocusAgent?: (agentId: string) => void
-}) {
-  if (id === SYSTEM || id === 'system') return <b className="dim">system</b>
-  if (id === USER) return <b>you</b>
-  const n = nodes.get(id)
-  // ⚠ ONLY AN ESTABLISHED LOCAL NODE NAVIGATES: a name this tree does not hold
-  // stays readable and loses a route that was never there.
-  if (!n) return <b>{id}</b>
-  const chip = (
-    <span data-copy-agent-name={id} className={'sender ' + (n?.state ?? '')} title={n ? `${tierLabel(n.tier)} · ${n.state}` : id}>
-      {n && <span className={'tier t-' + n.tier}>{TIER_LETTER[n.tier] ?? '?'}</span>}
-      <b>{id}</b>
-    </span>
-  )
-  if (onFocusAgent) {
-    return (
-      /* ⚠ stopPropagation is load-bearing since this chip moved into the mail
-         LIST ROW as well as the reading pane: the row's own onClick toggles
-         selection, so without it clicking a sender's name would jump AND
-         select (or, on the open mail, deselect the thing you were reading).
-         `AgentName` stops it for the same reason; the two must not drift.
-         type="button" for the same reason `AgentName` carries one — this is
-         rendered inside forms, where the default submit would be wrong. */
-      <button type="button" {...agentNavProps(id)}
-        className="cc-name cc-name-jump" title={`focus ${id}'s desk`}
-        onClick={(e) => { e.stopPropagation(); onFocusAgent(id) }}>
-        {chip}
-      </button>
-    )
-  }
-  return chip
-}
+// moved to canvas/senderchip.tsx so the Attention view can draw the inbox's
+// own sender chip without importing the app shell; re-exported for callers
+export { SenderChip }
 
 
 // audience requests parked at the user (fields the inbox reads) —
@@ -2570,41 +2540,22 @@ export function InboxPanel({ slug, tree, toast, refresh, close, jumpTo, jumpSeq,
   // reading pane shows the response UI as the body instead of a reply box.
   // Open asks join the unread group; resolved ones sit in the flow wearing
   // their nulled state (grey answered/denied, orange interrupted).
-  const askRow = (a: AskInfo): MailRow => ({
-    id: 'ask:' + a.id, from: a.node, at: a.at,
-    kind: a.kind === 'batch' ? 'request batch'
-      : (a.kind === 'credit' || a.old != null) ? 'credit request'
-      : a.kind === 'scope' ? 'scope request' : 'question',
-    body: a.kind === 'batch'
-      ? `${(a.tabs ?? []).length} request(s) awaiting one submit`
-      : a.kind === 'scope'
-        ? 'requests scope: ' + (a.items ?? [])
-          .map((it) => it.kind === 'dir' ? it.path
-            : it.kind === 'permission_mode' ? `mode ${it.mode}`
-            : it.tool ?? it.server ?? it.kind).join(', ')
-        : a.question ?? `asks for credits: ${a.old} → ${a.new}`,
-    _ask: a,
-  } as MailRow)
+  const askRow = askMailRow
   const askOpen = (a: AskInfo) => a.status === 'open' || a.status === 'pending'
   const asks = tree.asks ?? []
   // FR-14: an agent's OPEN requests render as its ONE composed batch card
   // (node.ask, kind 'batch') — never as separate per-kind rows. The raw
   // per-store entries keep feeding the resolved history below.
-  const askPending = [...nodes.values()]
-    .filter((n) => n.ask && askOpen(n.ask)).map((n) => askRow(n.ask!))
+  // ⚠ openAsks, NOT `node.ask` alone: the v3 tree is a selected read, and an
+  // agent outside the selection carries no `node.ask` — its open question
+  // was missing from this inbox (canvas/openasks.ts). The Attention view
+  // lists from the same helper, so the two cannot disagree.
+  const askPending = openAsks(tree, nodes.values()).map(askRow)
   const askDone = asks.filter((a) => !askOpen(a)).slice(-8).map(askRow)
   const renderAskBody = (m: MailRow) => {
     if (!m._ask) return null
-    const n = nodes.get(m._ask.node)
-    return (
-      <AskCard ask={m._ask} slug={slug} toast={toast}
-        seat={n?.seat ?? 0}
-        committed={(n?.grant ?? 0) - (n?.free ?? 0)}
-        segments={(n?.children ?? []).filter((c) => c.state === 'live')
-          .map((c) => ({ seat: c.seat, grant: c.grant }))}
-        pxc={orgPxc(tree)}
-        maxTop={tree.max_top_grant ?? 1000} />
-    )
+    return <InboxAskCard ask={m._ask} slug={slug} tree={tree}
+      node={nodes.get(m._ask.node)} toast={toast} />
   }
   return (
     <PinFrame kind="inbox" title="Your inbox" panel="settings wide"

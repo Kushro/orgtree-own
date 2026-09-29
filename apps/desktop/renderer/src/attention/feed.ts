@@ -17,9 +17,11 @@
 //             Source: GET /inbox (api.getInbox), `pending` (pending IS the
 //             unread group) filtered on `urgent`. Resolution: api.markRead.
 //
-//   question  every unanswered question.
-//             Source: the tree — a node whose `ask` is open or pending.
-//             Resolution: the existing AskCard, which resolves the card.
+//   question  every unanswered question (and pending credit / scope request).
+//             Source: `openAsks` (canvas/openasks.ts) — a node's batched
+//             card where the tree holds the node, else the header's open
+//             row. The inbox lists from the same helper. Resolution: the
+//             inbox's own AskCard, which resolves the card.
 //
 // ⚠ WHY `manual_attention` AND NOT `effective_attention`. The backend defines
 // `effective_attention = manual_attention != null || questions.length > 0`
@@ -42,6 +44,8 @@
 // already showing, only while that row is the selected one, and only for mail.
 
 import type { AskInfo, MailEntry, TreeNode, TreePayload, WorkItem } from '../types'
+import type { MailRow } from '../canvas/shared'
+import { askMailRow, openAsks } from '../canvas/openasks'
 
 export type AttentionRowKind = 'ticket' | 'mail' | 'question'
 
@@ -63,6 +67,10 @@ export interface AttentionRow {
   item?: WorkItem
   mail?: MailEntry
   ask?: AskInfo
+  /** for `mail` and `question`: the row EXACTLY as the user's inbox builds
+   *  it (unread, and for a question `askMailRow`), so the Attention view can
+   *  draw it with the inbox's own row and reading pane */
+  mailRow?: MailRow
 }
 
 export interface AttentionSources {
@@ -75,12 +83,12 @@ export interface AttentionSources {
   backlogged?: readonly WorkItem[] | null
   /** GET /inbox `pending` — the unread group of the USER's mailbox */
   pending?: readonly MailEntry[] | null
-  /** every node in the open organization, for its open ask */
+  /** every node in the open organization, for its batched ask card */
   nodes?: readonly TreeNode[] | null
+  /** the tree header's `asks` — every open request, including those of agents
+   *  the (selected) tree does not hold */
+  asks?: readonly AskInfo[] | null
 }
-
-const ASK_OPEN = (a: AskInfo | undefined | null): boolean =>
-  !!a && (a.status === 'open' || a.status === 'pending')
 
 /** Every node of the tree, flattened. Mirrors App.tsx's own `flatNodes`; kept
  *  here so this module depends on the payload and not on a component. */
@@ -130,10 +138,12 @@ function mailRow(m: MailEntry): AttentionRow {
     title: oneLine(m.urgent_reason) || 'urgent message',
     subtitle: oneLine(m.body),
     mail: m,
+    // pending IS the unread group — the inbox marks these rows the same way
+    mailRow: { ...(m as MailRow), _wait: true },
   }
 }
 
-function askRow(node: string, a: AskInfo): AttentionRow {
+function askRow(a: AskInfo): AttentionRow {
   const tabs = (a.tabs ?? []).length
   const title = a.question
     ?? a.questions?.[0]?.question
@@ -144,10 +154,12 @@ function askRow(node: string, a: AskInfo): AttentionRow {
     key: askRowKey(a),
     kind: 'question',
     at: a.at,
-    agent: node,
+    agent: a.node,
     title: oneLine(title),
     subtitle: a.header ? oneLine(a.header) : '',
     ask: a,
+    // an open request rides the inbox's unread group
+    mailRow: { ...askMailRow(a), _wait: true },
   }
 }
 
@@ -179,7 +191,7 @@ export function buildAttentionRows(src: AttentionSources): AttentionRow[] {
     for (const item of group ?? []) if (item.manual_attention) push(ticketRow(item))
   }
   for (const m of src.pending ?? []) if (m.urgent && m.id) push(mailRow(m))
-  for (const n of src.nodes ?? []) if (ASK_OPEN(n.ask)) push(askRow(n.id, n.ask!))
+  for (const a of openAsks({ asks: src.asks ? [...src.asks] : undefined }, src.nodes ?? [])) push(askRow(a))
   return rows.sort(compareRows)
 }
 

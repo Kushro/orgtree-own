@@ -1,46 +1,58 @@
 // attention/AttentionQueue.tsx — THE "NEEDS ATTENTION" PANEL.
 //
 // One mixed list of everything waiting on the user in the open organization,
-// beside a reading pane that carries each row's OWN resolution. The structure
-// is the app's existing list-and-pane idiom (the Docket, the mailboxes, the
-// documents gallery all read this way); what is new is that the rows are
-// heterogeneous — see attention/feed.ts for the membership and resolution
-// rules, which live there as pure functions so they can be tested without a
-// DOM.
+// beside a reading pane. The rows and the pane are NOT drawn here: each kind
+// of entry is drawn by the component its own home surface uses (user
+// 2026-09-29: "the list elements should each look identical to how they each
+// look in their respective lists … and the bodies should look identical to how
+// they look in their respective details"):
 //
-// ⚠ NOTHING HERE OWNS ANY STATE THE SERVER OWNS. A ticket's attention flag, a
-// mail's read mark and a question's answer are all written through the exact
-// calls the Docket, the inbox and the ask card already use, and this panel
-// learns the outcome by re-reading the same feeds. There is no optimistic
-// local copy of any of the three: a row leaves because the server stopped
-// listing it, which is the only claim this list is entitled to make.
+//   entry          row                         body
+//   ticket         the docket's DocketRow      the docket's DocketPane (inline
+//                                              reply, dismiss, the lot)
+//   urgent mail    the inbox's MailRowView     the inbox's MailReadPane (reply)
+//   question       the inbox's MailRowView     MailReadPane + the inbox's
+//                                              InboxAskCard (answer)
 //
-// The ONE piece of local memory is the urgent-mail retention — a mail you have
-// just read stays on screen while it is still the selected row (ticket rule),
-// and `retainSelected` in feed.ts is the whole of it.
+// So the list is a `.mailer` like the inbox and the docket, and a ticket row
+// and its pane sit in a `.docket-modal` context (display: contents), because
+// the docket's row and pane styles are scoped to it. What this file owns is
+// only WHICH entries are listed (attention/feed.ts), the selection, and the
+// resolutions below.
+//
+// ⚠ NOTHING HERE OWNS ANY STATE THE SERVER OWNS, with ONE deliberate
+// exception: a ticket whose attention flag is being dismissed leaves the list
+// AT ONCE (user 2026-09-29: "dismissing attention on a ticket is slow"). It
+// used to wait for the POST and then a whole /work-items refetch. The row is
+// hidden optimistically and comes back, with the error, if the server refuses.
+// Everything else — a mail's read mark, a question's answer — still leaves
+// because the server stopped listing it.
+//
+// The other piece of local memory is the urgent-mail retention: a mail you
+// have just read stays on screen while it is still the selected row (ticket
+// rule), and `retainSelected` in feed.ts is the whole of it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useWorkItems } from '../canvas/useworkitems'
-import { dismissWorkItemAttention, fileBase, getInbox, markRead } from '../api'
+import { dismissWorkItemAttention, fileBase, fileUrl, getInbox, markRead } from '../api'
 import { sendLinkedReply } from '../events/reply'
-import { DocketIcon, MailIcon, NotificationsActiveIcon, PsychologyIcon } from '../icons'
-import type { MailEntry, ToastFn, TreeNode, TreePayload, WorkItem } from '../types'
-import { md, orgPxc, usePolledStatus } from '../canvas/shared'
+import type { MailEntry, ToastFn, TreePayload, WorkItem } from '../types'
+import { usePolledStatus } from '../canvas/shared'
 import type { MailLinkFn, MailRow, PolledStatus } from '../canvas/shared'
-import { AgentName } from '../canvas/identity'
-import { focusByAttr } from './dom'
-import { AskCard } from '../canvas/asks'
-import { MailReplyBox } from '../canvas/mail'
-import { RefMdBody } from '../canvas/refmd'
+import { InboxAskCard } from '../canvas/asks'
+import { MailReadPane, MailRowView } from '../canvas/mail'
+import { SenderChip } from '../canvas/senderchip'
+import { DocketPane, DocketRow, itemActorIds, useNodeFacts } from '../canvas/docket'
+import { buildMentionIndex } from '../canvas/workrefs'
 import { mailRefTarget, refToken, useRefRoutes } from '../canvas/reflinks'
 import type { TypedRef } from '../canvas/workrefs'
-import { EventCard } from '../events/card'
 import { decodeEventRow } from '../events/decode'
+import { projectEvent } from '../events/project'
+import { eventSurface } from '../events/card'
 import { BASE } from '../api'
-import { fmtShort } from '../timefmt'
 import {
-  attentionNodes, buildAttentionRows, countRows, isRetained, nextSelection, retainSelected,
+  attentionNodes, buildAttentionRows, isRetained, nextSelection, retainSelected,
 } from './feed'
 import type { AttentionRow } from './feed'
 
@@ -52,16 +64,15 @@ export interface AttentionQueueProps {
    *  Each is optional and each one omitted simply draws no such control —
    *  never a button that does nothing (the app's rule for absent handlers). */
   onOpenItem?: (itemSlug: string) => void
+  /** ⚠ WHILE THE ATTENTION VIEW IS PRESENTED THIS OPENS THE AGENT'S DESK IN
+   *  THE RIGHT-HAND PANEL — the host's one focus path (OrgCanvas `centerOn`)
+   *  routes there. Every agent name below goes through it. */
   onFocusAgent?: (agentId: string) => void
   onOpenDoc?: (docId: string) => void
   /** ⚠ THE CANONICAL `MailLinkFn`, NOT A TypedRef HANDLER — the same shape the
    *  org host hands its slot and the same one the canvas's own desks get.
-   *  This prop used to take a `TypedRef`, which meant the published
-   *  `OrgSlotContext` could not be spread onto this view at all. The two
-   *  shapes both exist in the app for different callers, and `mailRefTarget`
-   *  (canvas/reflinks) is the app's own bridge between them — OrgCanvas uses
-   *  exactly that line for its own ref world, so this reuses the conversion
-   *  rather than inventing a box-to-recipient mapping of its own. */
+   *  `mailRefTarget` (canvas/reflinks) is the app's own bridge between the two
+   *  shapes. */
   onOpenMail?: MailLinkFn
   /**
    * THE FRESHNESS OF `tree`, WHICH IS THE LIST'S THIRD SOURCE.
@@ -74,34 +85,14 @@ export interface AttentionQueueProps {
    * ⚠ ABSENT MEANS "NOT VOUCHED FOR", NOT "FINE". Without it the confident
    * "Nothing is waiting on you here." is withheld, because a third of the list
    * would be unaccounted for in the sentence that exists precisely to be
-   * trustworthy (finding f3, v3-ux-review-opus, 2026-09-21: both polled feeds
-   * can answer cleanly and empty while a question is in fact waiting in a tree
-   * that is a poll behind). Supply it and the gate covers all three sources.
+   * trustworthy (finding f3, v3-ux-review-opus, 2026-09-21).
    *
-   * ⚠ WHAT A CURRENT STATUS DOES AND DOES NOT CLAIM (multi-window-design,
-   * 2026-09-21). Its scope is the LATEST OBSERVED read of the tree: did the
-   * most recent fetch succeed, and when. It is NOT a coherent snapshot across
-   * the three sources, and it is NOT knowledge that no question was raised
-   * after that read — nothing here can know that, and a gate pretending to
-   * would be the same over-claim in a new place.
-   *
-   * So ordinary polling latency and a known failed refresh stay DISTINCT. A
-   * tree that simply has not been re-fetched yet is `current` and the panel
-   * speaks normally; a tree whose refresh FAILED is `stale` and the panel says
-   * so. Treating the first as a gap would make the hedge permanent and teach
-   * the reader to ignore it, which costs exactly the trust the gate is for.
+   * ⚠ A CURRENT STATUS CLAIMS ONLY THE LATEST OBSERVED READ of the tree
+   * (multi-window-design, 2026-09-21): not a coherent snapshot across the three
+   * sources, and not knowledge that no question was raised since. Ordinary
+   * polling latency is `current`; a known failed refresh is `stale`.
    */
   treeStatus?: PolledStatus
-}
-
-const KIND_LABEL: Record<AttentionRow['kind'], string> = {
-  ticket: 'ticket', mail: 'urgent mail', question: 'question',
-}
-
-function KindIcon({ kind }: { kind: AttentionRow['kind'] }) {
-  if (kind === 'ticket') return <DocketIcon fontSize="inherit" />
-  if (kind === 'mail') return <NotificationsActiveIcon fontSize="inherit" />
-  return <PsychologyIcon fontSize="inherit" />
 }
 
 export function AttentionQueue({
@@ -128,19 +119,13 @@ export function AttentionQueue({
   /**
    * ⚠ WHAT THIS PANEL IS ENTITLED TO CLAIM. Two independent feeds, each of
    * which may be current, still loading, unreadable, or showing something it
-   * can no longer refresh — and this is the one surface where getting that
-   * wrong is actively harmful, because "nothing is waiting" and "nothing could
-   * be read" look identical to a reader and mean opposite things.
+   * can no longer refresh — and "nothing is waiting" and "nothing could be
+   * read" look identical to a reader and mean opposite things.
    *
-   * THE RULE: the confident empty statement requires BOTH feeds to have read
-   * successfully on their most recent attempt. Anything less says what is
-   * actually known instead — which feed could not be read, and whether what is
-   * on screen is a retained answer rather than a fresh one.
-   *
-   * Partial coverage is a real and useful state, not an error: if the tickets
-   * read and the mailbox did not, the ticket rows are shown AND the gap is
-   * named. Hiding usable rows because a different feed failed would be its own
-   * kind of lie.
+   * THE RULE: the confident empty statement requires every source to have read
+   * successfully on its most recent attempt. Anything less says what is
+   * actually known instead. Partial coverage is a real state: usable rows are
+   * shown AND the gap is named.
    */
   const feeds = [
     { name: 'tickets', status: workFeed.status },
@@ -152,44 +137,15 @@ export function AttentionQueue({
   const unavailable = feeds.filter((f) => f.status.unavailable)
   const stale = feeds.filter((f) => f.status.stale)
   const firstLoad = feeds.filter((f) => f.status.loading)
-  /**
-   * EVERY REASON THIS LIST MIGHT NOT BE THE WHOLE TRUTH, in one place — and
-   * that claim is now true of all THREE of its sources, which it was not.
-   *
-   * ⚠ THE LIST IS BUILT FROM THREE SOURCES AND THE GATE ONCE KNEW TWO. Tickets
-   * and urgent mail are polled here; QUESTIONS are read out of the `tree` prop,
-   * which this panel does not fetch. So both polled feeds could answer cleanly
-   * and empty while the tree was a poll behind, and the confident sentence
-   * appeared with a question actually waiting — the one claim this gate exists
-   * to protect, and the reassuring one, so a reader who trusted it stopped
-   * looking (finding f3). The third source is represented now: reported via
-   * `treeStatus` when the caller can, and counted as an explicit gap when it
-   * cannot, because a source whose freshness is unknown is not a source that
-   * has been checked.
-   *
-   * ⚠ A FEED STILL ON ITS FIRST READ IS A GAP TOO, and treating it as one only
-   * when the list happens to be EMPTY was a real hole (found by
-   * multi-window-design reading this source, 2026-09-21): with usable rows from
-   * the other feed the header fell straight through to the counts and never
-   * mentioned that half the queue had not arrived. "Some rows, and one source
-   * still loading" is exactly the partial coverage the requirement is about —
-   * pending and failed are different REASONS for the same incompleteness, and
-   * only the reason differs in what the user is told.
-   *
-   * Building one list also removes a sentence that could not be said: the old
-   * expression reached "…— could not be refreshed" with an empty feed name
-   * whenever the list was empty and the only gap was a pending first read.
-   */
+  /** EVERY REASON THIS LIST MIGHT NOT BE THE WHOLE TRUTH, for all three of its
+   *  sources (finding f3): a feed that failed, one that could not refresh, one
+   *  still on its first read, and a tree nobody vouched for. */
   const gaps = [
     ...unavailable.map((f) => ({ name: f.name, why: 'could not be read' })),
     ...stale.map((f) => ({ name: f.name, why: 'could not be refreshed' })),
     ...firstLoad.map((f) => ({ name: f.name, why: 'is still loading' })),
-    // not a transient state: nobody has told this panel whether the tree it was
-    // handed is current, so it must not vouch for the rows drawn from it
     ...(treeStatus ? [] : [{ name: 'questions', why: 'are not verified here' }]),
   ]
-  /** every feed answered on its most recent attempt — the ONLY state in which
-   *  an empty list may be reported as "nothing is waiting" */
   const complete = gaps.length === 0
   const gapPhrase = gaps.map((g) => `${g.name} ${g.why}`).join(' · ')
   const listNames = (rows: readonly { name: string }[]) => rows.map((f) => f.name).join(' and ')
@@ -198,10 +154,23 @@ export function AttentionQueue({
   const nodeMap = useMemo(
     () => new Map(nodes.map((n) => [n.id, n])), [nodes])
 
-  const live = useMemo(() => buildAttentionRows({
+  // ---- the optimistic half of dismissing a ticket's flag (see the header)
+  const [dismissing, setDismissing] = useState<ReadonlySet<string>>(() => new Set())
+  const allLive = useMemo(() => buildAttentionRows({
     items: work?.attention ?? work?.items, archived: work?.archived, backlogged: work?.backlogged,
-    pending: box?.pending, nodes,
-  }), [work, box, nodes])
+    pending: box?.pending, nodes, asks: tree.asks,
+  }), [work, box, nodes, tree.asks])
+  const live = useMemo(() => dismissing.size
+    ? allLive.filter((r) => !(r.kind === 'ticket' && r.item && dismissing.has(r.item.slug)))
+    : allLive, [allLive, dismissing])
+  // a dismissal the server has confirmed no longer needs hiding: once the feed
+  // stops listing the flag, forget it, so a flag RAISED AGAIN later shows up
+  useEffect(() => {
+    if (!dismissing.size) return
+    const still = new Set([...dismissing].filter((s) =>
+      allLive.some((r) => r.kind === 'ticket' && r.item?.slug === s)))
+    if (still.size !== dismissing.size) setDismissing(still)
+  }, [allLive, dismissing])
 
   // the panel's own selection, and the previous render's rows — the two
   // inputs `retainSelected` needs to honour the urgent-mail rule
@@ -212,8 +181,7 @@ export function AttentionQueue({
 
   // A selected row that resolved (dismissed, answered — or a mail that was
   // read and then deselected) takes the selection to its neighbour rather
-  // than leaving the pane empty. Done in an effect because it is a reaction
-  // to the feed changing underneath a choice the user already made.
+  // than leaving the pane empty.
   const previous = useRef<AttentionRow[]>([])
   useEffect(() => {
     if (selected && !rows.some((r) => r.key === selected)) {
@@ -222,29 +190,41 @@ export function AttentionQueue({
     previous.current = rows
   })
 
-  const counts = countRows(rows)
-  const loading = work === null || box === null
-
   const refs = useRefRoutes(slug, nodeMap, {
     onOpenItem, onFocusAgent, onOpenDoc,
     // ⚠ CONDITIONAL, because `useRefRoutes` reads the PRESENCE of this handler
     // to decide whether a mail token is something this surface can open at all.
-    // Wrapping unconditionally would advertise mail this view cannot route.
     onOpenMail: onOpenMail ? (r: TypedRef) => onOpenMail(mailRefTarget(r)) : undefined,
     tierOf: (id: string) => nodeMap.get(id)?.tier,
     view: tree.foreground,
   })
 
+  // ---- the docket's own context for its row and pane
+  const tickets = useMemo(() => rows.flatMap((r) => (r.item ? [r.item] : [])), [rows])
+  const actorIds = useMemo(() => itemActorIds(tickets), [tickets])
+  const facts = useNodeFacts(slug, tree, actorIds)
+  const refIndex = useMemo(() => buildMentionIndex(tickets,
+    [...facts].map(([id, f]) => [id, f.tier] as const)), [tickets, facts])
+  const asksById = useMemo(
+    () => new Map((tree.asks ?? []).map((a) => [a.id, a])), [tree.asks])
+  const ageTick = Math.floor(Date.now() / 60_000)
+
   // ---- the three resolutions, each through the surface that already owns it
-  const dismiss = (item: WorkItem) => {
-    if (!item.manual_attention) return
+  const dismiss = useCallback((item: WorkItem) => {
+    if (readOnly || !item.manual_attention) return
+    const key = item.slug
+    setDismissing((s) => new Set([...s, key]))
     dismissWorkItemAttention(slug, item.slug, item.manual_attention.set_rev)
       .then(() => {
         toast([`dismissed the attention flag on “${item.title}”`])
         refetch()
       })
-      .catch((e: Error) => toast([`error: ${e.message}`]))
-  }
+      .catch((e: Error) => {
+        // refused: the row comes back, and says why
+        setDismissing((s) => { const n = new Set(s); n.delete(key); return n })
+        toast([`error: ${e.message}`])
+      })
+  }, [readOnly, slug, toast, refetch])
 
   const read = (m: MailEntry) =>
     markRead(slug, [m.id]).then(refetch).catch(() => { /* the poll still decides */ })
@@ -264,16 +244,17 @@ export function AttentionQueue({
   // ---- keyboard: the list is a real listbox, so selection is reachable
   const listRef = useRef<HTMLDivElement>(null)
   const onListKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!rows.length) return
+    if (!rows.length || e.target !== e.currentTarget) return
     const i = rows.findIndex((r) => r.key === selected)
     const go = (to: number) => {
       e.preventDefault()
       const row = rows[Math.min(rows.length - 1, Math.max(0, to))]
-      if (row) {
-        openRow(row)
-        // scanned, not selector-built — see focusByAttr for why
-        focusByAttr(listRef.current, 'data-attn-row', row.key)
-      }
+      if (!row) return
+      openRow(row)
+      // scanned, not selector-built — a key can hold any character
+      const cell = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-attn-row]') ?? [])]
+        .find((c) => c.getAttribute('data-attn-row') === row.key)
+      cell?.firstElementChild?.scrollIntoView?.({ block: 'nearest' })
     }
     if (e.key === 'ArrowDown') go(i < 0 ? 0 : i + 1)
     else if (e.key === 'ArrowUp') go(i < 0 ? rows.length - 1 : i - 1)
@@ -281,33 +262,37 @@ export function AttentionQueue({
     else if (e.key === 'End') go(rows.length - 1)
   }
 
+  // the inbox's own identity renderers: the plain name in the row, the chip
+  // (with the jump) in the reading pane
+  const rowParty = (id: string) => <span>{id}</span>
+  const paneSender = (id: string) => <SenderChip id={id} nodes={nodeMap}
+    onFocusAgent={onFocusAgent ? (agentId) => onFocusAgent(agentId) : undefined} />
+  // a mail that was just read is on screen only because it is selected: it is
+  // drawn as the inbox draws a read mail, not as still waiting
+  const asMail = (row: AttentionRow): MailRow =>
+    isRetained(row, live) ? { ...row.mailRow!, _wait: false } : row.mailRow!
+
   const current = rows.find((r) => r.key === selected) ?? null
+  const profile = BASE ? 'public' : 'operator'
+  const typed = (m: MailRow) => {
+    const d = decodeEventRow(m, profile)
+    return d.kind === 'known' ? projectEvent(d.event) : null
+  }
+  const surface = current && current.kind !== 'ticket' && current.mailRow
+    ? eventSurface(asMail(current), profile) : { className: '' }
 
   return (
     <div className="attn-wrap">
-      <div className="attn-head">
-        <h3><NotificationsActiveIcon fontSize="inherit" /> Needs attention</h3>
-        <span className={'dim attn-counts' + (gaps.length ? ' attn-incomplete' : '')
-          + (stale.length ? ' attn-stale' : '')}
-          aria-live="polite">
-          {/* ⚠ ONE EXPRESSION, AND THE GAPS ARE NAMED IN EVERY BRANCH THAT HAS
-              ANY. Rows and gaps are independent: usable rows do not make the
-              queue complete, and an empty list is only reassuring when nothing
-              is missing. */}
-          {rows.length
-            ? [
-              counts.ticket ? `${counts.ticket} ticket${counts.ticket > 1 ? 's' : ''}` : '',
-              counts.mail ? `${counts.mail} urgent mail` : '',
-              counts.question ? `${counts.question} question${counts.question > 1 ? 's' : ''}` : '',
-            ].filter(Boolean).join(' · ') + (gaps.length ? ` · ${gapPhrase}` : '')
-            : gaps.length ? `nothing to show yet — ${gapPhrase}`
-              : 'nothing is waiting'}
-        </span>
-      </div>
-      <div className="attn-body">
-        <div className="attn-list" role="listbox" aria-label="Needs attention"
-          tabIndex={rows.length && !current ? 0 : -1}
-          ref={listRef} onKeyDown={onListKey}>
+      {/* no header row (user 2026-09-29). What the header's count line used to
+          say about a source that could not be read is still said, here, but
+          only when there is such a gap — the empty-list statements below cover
+          the case with no rows. */}
+      {rows.length > 0 && gaps.length > 0 &&
+        <div className={'dim attn-gaps' + (stale.length ? ' attn-stale' : '')}
+          role="status">{gapPhrase}</div>}
+      <div className="mailer attn-mailer">
+        <div className="mailer-list attn-mlist" role="listbox" aria-label="Needs attention"
+          tabIndex={0} ref={listRef} onKeyDown={onListKey}>
           {/* ⚠ THE CONFIDENT SENTENCE IS GATED ON `complete`. Everything else
               gets a statement about what could not be read, because an empty
               list the panel cannot vouch for must never be drawn as reassurance. */}
@@ -329,184 +314,90 @@ export function AttentionQueue({
               Still reading {listNames(firstLoad)} — this is not yet a statement
               about what is waiting on you.
             </div>}
-          {rows.map((row) => (
-            <div key={row.key} data-attn-row={row.key} data-attn-kind={row.kind}
-              role="option" tabIndex={row.key === selected ? 0 : -1}
-              aria-selected={row.key === selected}
-              className={'attn-row attn-' + row.kind
-                + (row.key === selected ? ' sel' : '')
-                + (isRetained(row, live) ? ' attn-resolved' : '')}
-              onClick={() => openRow(row)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openRow(row) }
-              }}>
-              <span className="attn-row-kind" title={KIND_LABEL[row.kind]}
-                aria-label={KIND_LABEL[row.kind]}><KindIcon kind={row.kind} /></span>
-              <span className="attn-row-main">
-                <span className="attn-row-title">{row.title || KIND_LABEL[row.kind]}</span>
-                {row.subtitle && <span className="dim attn-row-sub">{row.subtitle}</span>}
-              </span>
-              <span className="attn-row-meta">
-                {row.agent && <span className="attn-row-agent">
-                  <AgentName id={row.agent} tier={nodeMap.get(row.agent)?.tier}
-                    onFocus={onFocusAgent ? (id: string) => onFocusAgent(id) : undefined} />
-                </span>}
-                {row.at && <span className="dim attn-row-at" title={row.at}>{fmtShort(row.at)}</span>}
-              </span>
-            </div>
-          ))}
+          {!rows.length && !complete && !unavailable.length && !stale.length
+            && !firstLoad.length &&
+            <div className="dim pad attn-unverified" role="status">
+              Nothing to show — {gapPhrase}.
+            </div>}
+          {rows.map((row) => {
+            const sel = row.key === selected
+            // the cell carries this panel's hooks and nothing visual
+            // (display: contents); the row inside is the home surface's own
+            if (row.kind === 'ticket' && row.item) {
+              return (
+                <div key={row.key} className="attn-cell docket-modal" data-attn-row={row.key}
+                  data-attn-kind={row.kind} role="option" aria-selected={sel}>
+                  <DocketRow item={row.item} selected={sel} org={slug} toast={toast}
+                    ageTick={ageTick} onClick={() => openRow(row)} onDismiss={dismiss}
+                    facts={facts} onFocusAgent={onFocusAgent} />
+                </div>
+              )
+            }
+            const m = asMail(row)
+            return (
+              <div key={row.key} className="attn-cell" data-attn-row={row.key}
+                data-attn-kind={row.kind} role="option" aria-selected={sel}>
+                <MailRowView m={m} view={row.kind === 'mail' ? typed(m) : null}
+                  selected={sel} party={rowParty(m.from)} onClick={() => openRow(row)} />
+              </div>
+            )
+          })}
         </div>
-        <div className="attn-pane">
+        {/* ⚠ the hook sits on `.mailer-read` itself, not on a wrapper inside
+            it: the inbox's pane styles include CHILD selectors
+            (`.mailer-read > .event-head`), and a wrapper silently broke them
+            (measured, attnqueue_probe.py) */}
+        <div className={'mailer-read attn-mread ' + surface.className}
+          data-attn-detail={current?.kind}>
           {!current
-            ? <div className="dim pad">{rows.length ? 'Select a row to resolve it.' : ''}</div>
-            : <AttentionDetail row={current} slug={slug} tree={tree} toast={toast}
-                readOnly={readOnly}
-                resolvedMail={isRetained(current, live)}
-                node={current.agent ? nodeMap.get(current.agent) : undefined}
-                refs={refs}
-                onDismiss={dismiss}
-                onRead={read}
-                onRefetch={refetch}
-                onOpenItem={onOpenItem}
-                onFocusAgent={onFocusAgent} />}
+            ? <div className="dim pad mailer-none">{rows.length ? 'Select an entry to see it.' : ''}</div>
+            : current.kind === 'ticket' && current.item
+              ? <div className="attn-cell docket-modal">
+                  <DocketPane key={slug + ':' + current.item.slug} slug={slug}
+                    item={current.item} toast={toast} asksById={asksById}
+                    onDismiss={dismiss}
+                    // there is no modal to close here: a jump to an agent from
+                    // the pane keeps the ticket selected
+                    close={() => {}}
+                    onFocusAgent={onFocusAgent} facts={facts} refIndex={refIndex}
+                    onGoToItem={(id) => {
+                      const hit = rows.find((r) => r.item?.slug === id)
+                      if (hit) openRow(hit)
+                      else onOpenItem?.(id)
+                    }}
+                    refWorld={refs.world} onOpenRef={refs.onOpen} refresh={refetch} />
+                </div>
+              : current.mailRow
+                ? <MailReadPane cur={asMail(current)} refs={refs}
+                      mdBase={(m) => fileBase(slug, m.from)}
+                      fileHref={(p, m) => fileUrl(slug, m.from, p)}
+                      sender={paneSender} party={current.mailRow.from}
+                      waitLabel="unread" toast={toast}
+                      custom={current.kind === 'question' && current.ask
+                        ? <InboxAskCard ask={current.ask} slug={slug} tree={tree}
+                            node={nodeMap.get(current.ask.node)} toast={toast} />
+                        : null}
+                      onReply={readOnly || current.kind !== 'mail' || !current.mail ? undefined
+                        : (text, attachments, notice) => {
+                          const mail = current.mail!
+                          return sendLinkedReply(slug, mail.from, text,
+                            { kind: 'mail', org: slug, box: 'user', id: mail.id }, attachments, notice)
+                            .then(async (receipt) => {
+                              toast([`sent to ${mail.from}`, ...(receipt.warnings ?? [])])
+                              // Commands have no mail receipt; only a durable reply reads.
+                              if (!receipt.id) return
+                              try { await markRead(slug, [mail.id]) } catch {
+                                toast(['Reply sent, but could not mark the original mail read.'])
+                              }
+                              refetch()
+                            })
+                            .catch((e: Error) => { toast([`error: ${e.message}`]); throw e })
+                        }} />
+                : <div className="dim pad">This entry is no longer listed.</div>}
         </div>
       </div>
     </div>
   )
-}
-
-function AttentionDetail({
-  row, slug, tree, toast, readOnly, resolvedMail, node, refs,
-  onDismiss, onRead, onRefetch, onOpenItem, onFocusAgent,
-}: {
-  row: AttentionRow
-  slug: string
-  tree: TreePayload
-  toast: ToastFn
-  readOnly: boolean
-  /** this mail is no longer in the feed — it is on screen because it is
-   *  selected, and it says so rather than looking like live work */
-  resolvedMail: boolean
-  /** the asking/sending agent's own tree entry — the ask card's credit bar
-   *  reads its seat, grant and live children from it, exactly as the inbox's
-   *  card does */
-  node?: TreeNode
-  refs: ReturnType<typeof useRefRoutes>
-  onDismiss: (item: WorkItem) => void
-  onRead: (m: MailEntry) => void
-  onRefetch: () => void
-  onOpenItem?: (itemSlug: string) => void
-  onFocusAgent?: (agentId: string) => void
-}): ReactNode {
-  if (row.kind === 'ticket') {
-    const item = row.item
-    if (!item) return <div className="dim pad">This ticket is no longer listed.</div>
-    const flag = item.manual_attention
-    return (
-      <div className="attn-detail attn-detail-ticket">
-        <h4 className="attn-detail-title">{item.title}</h4>
-        <div className="dim attn-detail-sub">
-          <span className={'docket-status status-' + item.status + ' attention'}>Needs attention</span>
-          {item.owner && <span className="attn-detail-owner">
-            <AgentName id={item.owner.node} tier={node?.tier}
-              onFocus={onFocusAgent ? (id: string) => onFocusAgent(id) : undefined} />
-          </span>}
-        </div>
-        {flag && <div className="docket-attention-box">
-          <div className="docket-question-head docket-attention-head">
-            <span>Manual attention from{' '}
-              <AgentName id={flag.by.node}
-                onFocus={onFocusAgent ? (id: string) => onFocusAgent(id) : undefined} /></span>
-            <span className="dim" title={flag.at}>{fmtShort(flag.at)}</span>
-          </div>
-          <div className="attn-detail-reason">{flag.reason}</div>
-        </div>}
-        <div className="row attn-detail-actions">
-          {!readOnly && flag && item.attention_sources.includes('manual') &&
-            <button className="primary" onClick={() => onDismiss(item)}>Dismiss attention</button>}
-          {onOpenItem && <button onClick={() => onOpenItem(item.slug)}>Open in the docket</button>}
-        </div>
-      </div>
-    )
-  }
-
-  if (row.kind === 'mail') {
-    const mail = row.mail
-    if (!mail) return <div className="dim pad">This message is no longer listed.</div>
-    return (
-      <div className="attn-detail attn-detail-mail">
-        <div className="attn-detail-sub">
-          <AgentName id={mail.from} tier={node?.tier}
-            onFocus={onFocusAgent ? (id: string) => onFocusAgent(id) : undefined} />
-          <span className="dim" title={mail.at}>{fmtShort(mail.at)}</span>
-          {resolvedMail
-            ? <span className="dim attn-read-mark">read</span>
-            : <span className="attn-urgent-mark">urgent</span>}
-        </div>
-        {mail.urgent_reason &&
-          <div className="attn-detail-reason attn-urgent-reason">{mail.urgent_reason}</div>}
-        <MailBody row={mail as MailRow} slug={slug} refs={refs} />
-        <div className="row attn-detail-actions">
-          {!readOnly && !resolvedMail &&
-            <button onClick={() => onRead(mail)}>Mark read</button>}
-        </div>
-        {!readOnly && <MailReplyBox target={mail.from} slug={slug} toast={toast}
-          placeholder={`reply to ${mail.from}…`}
-          onSend={(text, attachments, notice) =>
-            sendLinkedReply(slug, mail.from, text,
-              { kind: 'mail', org: slug, box: 'user', id: mail.id }, attachments, notice)
-              .then(async (receipt) => {
-                toast([`sent to ${mail.from}`, ...(receipt.warnings ?? [])])
-                // Commands have no mail receipt; only a durable reply reads.
-                if (!receipt.id) return
-                try { await markRead(slug, [mail.id]) } catch {
-                  toast(['Reply sent, but could not mark the original mail read.'])
-                }
-                onRefetch()
-              })
-              .catch((e: Error) => { toast([`error: ${e.message}`]); throw e })} />}
-      </div>
-    )
-  }
-
-  // a question: the canonical ask card, with the same props the inbox gives it
-  const ask = row.ask
-  if (!ask) return <div className="dim pad">This question is no longer open.</div>
-  const kids = (node?.children ?? []).filter((c) => c.state === 'live')
-  return (
-    <div className="attn-detail attn-detail-question">
-      <div className="attn-detail-sub">
-        <AgentName id={row.agent ?? ask.node} tier={node?.tier}
-          onFocus={onFocusAgent ? (id: string) => onFocusAgent(id) : undefined} />
-        <span className="dim" title={ask.at}>{fmtShort(ask.at)}</span>
-      </div>
-      <AskCard ask={ask} slug={slug} toast={toast}
-        seat={node?.seat ?? 0}
-        committed={(node?.grant ?? 0) - (node?.free ?? 0)}
-        segments={kids.map((c) => ({ seat: c.seat, grant: c.grant }))}
-        pxc={orgPxc(tree)}
-        maxTop={tree.max_top_grant ?? 1000} />
-    </div>
-  )
-}
-
-/** The mail body, rendered exactly the way the mailboxes render it: a typed
- *  event through its own card, anything else as reference-aware markdown.
- *  Mirrors `messageContent` in canvas/mail.tsx, which is local to MailList. */
-function MailBody({ row, slug, refs }: {
-  row: MailRow; slug: string; refs: ReturnType<typeof useRefRoutes>
-}) {
-  const profile = BASE ? 'public' : 'operator'
-  const decoded = decodeEventRow(row, profile)
-  const base = fileBase(slug, row.from)
-  if (decoded.kind === 'legacy') {
-    return <RefMdBody className="mailer-body md" html={md(row.body, base)}
-      world={refs.world} onOpen={refs.onOpen} />
-  }
-  return <div className="mailer-body">
-    <EventCard row={row} profile={profile} org={slug} imgBase={base}
-      world={refs.world} onOpen={refs.onOpen} />
-  </div>
 }
 
 /** the reference token for one of this panel's mail rows — the user's own

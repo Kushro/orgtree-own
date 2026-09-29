@@ -68,6 +68,7 @@ import { AgentRetireConfirm, agentMenuEntries, continueFrozenOnAccount } from '.
 import { AgentNavProvider, agentNavProps, useProvideAgentNav } from './agentnav'
 import type { RetireKind } from './agentmenu'
 import { useSurfaceDocument } from '../popout'
+import { setAttentionLayout } from '../attention/mode'
 
 /** What the org host hands a view rendered in its slot. Every field is
  *  something this component already holds, which is the point: a sibling view
@@ -390,6 +391,8 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   onOpenMailHandled, openDocAt, onOpenDocHandled, onOpenAgentGallery,
   renderOrgSlot, canvasContent = 'shown' }: OrgCanvasProps) {
   const worldHidden = canvasContent === 'hidden'
+  const worldHiddenRef = useRef(worldHidden)
+  worldHiddenRef.current = worldHidden
   const [draft, setDraft] = useState<DraftState | null>(null)
   // Draft forms are intentionally not restored on reopening. Resume the
   // incomplete tutorial at the real token instead of pointing to a lost form.
@@ -1792,6 +1795,22 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
    *  jump stays generic and keeps preferring the open window. */
   const centerOn = useCallback((id: string, z: number | null = null,
     onCanvas = false) => {
+    // ⚠ THE ONE FOCUS PATH, WHILE THE ATTENTION VIEW IS PRESENTED (user
+    // 2026-09-29: "clicking any agent link or any action that focuses an agent
+    // while attention view is open should open that agent's desk in the right
+    // panel"). Every route that focuses an agent ends here — agent links, desk
+    // jump cards, the shell's `focusAgent`, "Open owner" — so this one branch
+    // is the whole rule: the agent becomes the Attention desk's selection
+    // (AgentDeskPanel reads it), and neither the hidden camera nor a pinned
+    // window moves. An agent this tree does not hold yet falls through to the
+    // foreground lookup below, whose retry lands back here once it loads.
+    // `onCanvas` is the explicit "Show on canvas" and is left alone.
+    if (!onCanvas && worldHiddenRef.current && mapRef.current.has(id)
+        && id !== USER && id !== DRAFT && id !== INBOX && id !== EXTERN
+        && !id.startsWith('dog:')) {
+      setAttentionLayout(slug, { agent: id })
+      return
+    }
     // ⚠ A PINNED AGENT'S DESTINATION IS ITS WINDOW, NOT ITS CARD. The card
     // renders a placeholder while the agent is pinned (`pinnedFocusId`), so
     // gliding there lands the reader on the placeholder while the real chat
@@ -1968,7 +1987,9 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
         setFront(par + (node.state === 'archived' ? '|a' : '|c'), focusAgent)
       }
     }
-    if (sheetGate()) {
+    // the phone-sized sheet is a canvas surface: with the Attention view
+    // presented, the focus goes through `centerOn`'s Attention branch instead
+    if (sheetGate() && !worldHiddenRef.current) {
       setSheetId(focusAgent)
     } else {
       centerOn(focusAgent)
