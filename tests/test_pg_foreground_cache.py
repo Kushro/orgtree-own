@@ -243,11 +243,11 @@ class ForegroundCache(unittest.TestCase):
         original = fg.select_foreground
         interleaved = []
 
-        def select(raw, stamp, include=()):
+        def select(raw, stamp, include=(), **options):
             if not interleaved:
                 interleaved.append(True)
                 self.status('during the build')            # commits AFTER the snapshot pinned
-            return original(raw, stamp, include)
+            return original(raw, stamp, include, **options)
         with patch.object(fg, 'select_foreground', side_effect=select):
             tag, body, _ = read()
         self.assertNotEqual(json.loads(body)['nodes']['boss'].get('last_status'), {'summary': 'during the build'})
