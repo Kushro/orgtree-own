@@ -158,9 +158,10 @@ export function Onboarding({ children, windowControls }: {
         hint="Off keeps agents running in the tray when the window closes." />
 
       <div className="field-label">Your first organization</div>
+      {/* no "import existing organizations later from Settings" any more:
+          v1 import is gone from v3 (user 2026-09-29) */}
       <p className="dim">An organization is a team of agents around one
-        project. You can also import existing organizations later from
-        Settings.</p>
+        project.</p>
       {children}
 
       <div className="onboard-actions">
