@@ -134,6 +134,29 @@ class ForegroundPilesPG(unittest.TestCase):
         self.same({'a': 'gone', '': 'root-r1'}, label='stale and root fronts')
         self.same({'boss': 'a'}, label='a live row is no front')
 
+    def test_saved_front_with_a_later_sibling_included(self):
+        # boss's retired rows in view: r1 (first), r2 (saved front), r3 (explicit
+        # include). The front must be r2, so r3's own pile (r3-kid) stays hidden.
+        new = self.same({'boss': 'r2'}, include=['r3'], label='saved front before an included later sibling')
+        self.assertNotIn('r3-kid', new['nodes'])
+
+    def test_saved_front_that_belongs_to_another_parent(self):
+        # a-r1 is a retiree of `a`, not of boss: boss still needs its default front
+        new = self.same({'boss': 'a-r1'}, label='front of another parent')
+        self.assertIn('r3', new['nodes'])
+
+    def test_reordering_retirees_moves_the_default_front(self):
+        # only the order changes: the catalog moves, so the warm answer rebuilds
+        self.snapshot(fronts={})
+        org = store.load_org(self.slug)
+        org.nodes['r1']['ui_order'] = 99
+        store.save_org(org)
+        warm = self.snapshot(fronts={})
+        foreground_cache._cache.clear()
+        cold = self.snapshot(fronts={})
+        self.assertIn('r1-kid', cold['nodes'], 'probe inert: r1 did not become the default front')
+        self.assertEqual(warm['nodes'], cold['nodes'])
+
     def test_explicit_includes_travel_with_the_piles(self):
         self.same(include=['a-r2', 'r1-kid'], label='includes')
 
