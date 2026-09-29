@@ -3010,6 +3010,16 @@ def _org_view(slug: str, request: Request,
         raise HTTPException(404, str(e))
     _t0 = time.perf_counter()
     _stage = time.perf_counter()
+    if detail_node is not None:
+        # §4.8 detail (Show lineage, an archived seat's card): ONE node's
+        # projection, not the whole tree. Building every node and the header
+        # to hand back one entry cost ~45 ms idle and far more under load on
+        # the live-org copy (480 nodes, docket counts), per open. The entry is
+        # `tree_node(..., descend=False)`: the same projection the full walk
+        # makes for it, minus the children the detail answer drops anyway.
+        tree = {"roots": [_detail_tree_node(org, detail_node)]}
+        if profile is not None: profile["tree_ms"] = (time.perf_counter() - _stage) * 1000.0
+        return _annotate_org_view(org, tree, request, detail_node, profile=profile)
     tree = org.tree()
     tree["sync_rev"] = sync_rev0
     if org_rev0 is not None:
@@ -3034,6 +3044,27 @@ def _org_view(slug: str, request: Request,
               f"is now relevant (see the 2026-08-06 ruling)", flush=True)
 
     return _annotate_org_view(org, tree, request, detail_node, profile=profile)
+
+
+def _detail_tree_node(org: Org, nid: str) -> dict[str, Any]:
+    """The tree entry `org.tree()` would carry for `nid`, built alone.
+
+    404 exactly where the full walk would not reach it: an unknown id, or a
+    node off the org axis at any step up to a root (`org_children` hides an
+    archived predecessor that has a successor; that holds for its ancestors
+    too)."""
+    index = org.children_index()
+    seen: set[str] = set()
+    cur: str | None = nid
+    while cur is not None:
+        if cur in seen or cur not in org.nodes:
+            raise HTTPException(404, f"no such node: {nid!r}")
+        seen.add(cur)
+        parent = org.nodes[cur].get("parent")
+        if cur not in org.org_children(parent, index):
+            raise HTTPException(404, f"no such node: {nid!r}")
+        cur = parent
+    return org.tree_node(nid, children_index=index, descend=False)
 
 
 def _annotate_org_view(org: Org, tree: dict[str, Any], request: Request,
