@@ -2222,8 +2222,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2127,
-          "end": 2195,
+          "start": 2128,
+          "end": 2196,
           "sha256": "c4c39ba98ecbbc4f2db74121def36b83c10a4078c88cfe6def9fd922b84c87bd"
         },
         {
@@ -2483,8 +2483,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2127,
-          "end": 2195,
+          "start": 2128,
+          "end": 2196,
           "sha256": "c4c39ba98ecbbc4f2db74121def36b83c10a4078c88cfe6def9fd922b84c87bd"
         },
         {
@@ -2813,8 +2813,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2127,
-          "end": 2195,
+          "start": 2128,
+          "end": 2196,
           "sha256": "c4c39ba98ecbbc4f2db74121def36b83c10a4078c88cfe6def9fd922b84c87bd"
         },
         {
@@ -2931,8 +2931,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2127,
-          "end": 2195,
+          "start": 2128,
+          "end": 2196,
           "sha256": "c4c39ba98ecbbc4f2db74121def36b83c10a4078c88cfe6def9fd922b84c87bd"
         },
         {
@@ -4039,8 +4039,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1880,
-          "end": 1897,
+          "start": 1881,
+          "end": 1898,
           "sha256": "cab1501e2db1435d7e05d6e55042a3a4fa179118e8f3090b09c394b8e648861e"
         }
       ],
@@ -4176,8 +4176,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1880,
-          "end": 1897,
+          "start": 1881,
+          "end": 1898,
           "sha256": "cab1501e2db1435d7e05d6e55042a3a4fa179118e8f3090b09c394b8e648861e"
         }
       ],
@@ -6366,8 +6366,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1532,
-          "end": 1653,
+          "start": 1533,
+          "end": 1654,
           "sha256": "c7c353204ec8dc0b5efd58e2014a911d42c8607fd2f9c7ffa67cac2a6117fe83"
         },
         {
@@ -6443,8 +6443,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1532,
-          "end": 1653,
+          "start": 1533,
+          "end": 1654,
           "sha256": "c7c353204ec8dc0b5efd58e2014a911d42c8607fd2f9c7ffa67cac2a6117fe83"
         },
         {
@@ -7040,7 +7040,7 @@
       "status": "specified",
       "facts": [
         "Both operations end with one hub_changed and drive nobody: an operator hire has no kickoff (org_op drives only a rehire's waiting mail), and nothing sparks mail_notify. The preview variant broadcasts nothing. Pinned with spies.",
-        "F1b variants: operator rename reaps (supervisor.remote_reap), broadcasts hub_changed and notifies 'renamed' — unlike the agent door's rename, which does neither of the first two; retire, dissolve and rescind interrupt the target before the lock (interrupt_before_archive), and the agent door's recorded defect holds here too: an agent-actor rescind and an agent-actor self-retire with live reports are refused after the interrupt; retire, dissolve, delete, rescind and cheap_compact reap after the save; delete takes NO pre-archive interrupt and calls supervisor.forget(slug, deleted), which drops the deleted seats' runtime state and removes their scratch directories (source); cheap_compact copies the transcript; a rehire whose seat has waiting mail drives it once with 'Mail above arrived while you were archived …' (mail_ping, ping_reason 'rehire_waited'), a different wording and reason from the agent door's. Every accepted operation ends with one hub_changed, reseed's no-op included; a preview broadcasts nothing. Pinned by tests/test_state_operator_variants_boundary.py against docs/state-system/operator-variants-boundary.json, except forget's file removal."
+        "F1b variants: operator rename reaps (supervisor.remote_reap), broadcasts hub_changed and notifies 'renamed' — unlike the agent door's rename, which does neither of the first two; retire, dissolve, rescind and a user-actor delete interrupt the target before the lock (interrupt_before_archive, which also stops the target's background tasks), and the agent door's recorded defect holds here too: an agent-actor rescind and an agent-actor self-retire with live reports are refused after the interrupt; retire, dissolve, delete, rescind and cheap_compact reap after the save; delete calls supervisor.forget(slug, deleted), which drops the deleted seats' runtime state and removes their scratch directories (source); cheap_compact copies the transcript; a rehire whose seat has waiting mail drives it once with 'Mail above arrived while you were archived …' (mail_ping, ping_reason 'rehire_waited'), a different wording and reason from the agent door's. Every accepted operation ends with one hub_changed, reseed's no-op included; a preview broadcasts nothing. Pinned by tests/test_state_operator_variants_boundary.py against docs/state-system/operator-variants-boundary.json, except forget's file removal."
       ],
       "source_refs": [
         {
@@ -8057,8 +8057,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2335,
-          "end": 2477,
+          "start": 2336,
+          "end": 2478,
           "sha256": "1fab36aeb30f5a888381f0766dab2bf73c8567339aec64f69cd83d331a7b6696"
         }
       ],
@@ -8107,8 +8107,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2335,
-          "end": 2477,
+          "start": 2336,
+          "end": 2478,
           "sha256": "1fab36aeb30f5a888381f0766dab2bf73c8567339aec64f69cd83d331a7b6696"
         }
       ],
@@ -8207,8 +8207,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2335,
-          "end": 2477,
+          "start": 2336,
+          "end": 2478,
           "sha256": "1fab36aeb30f5a888381f0766dab2bf73c8567339aec64f69cd83d331a7b6696"
         }
       ],
@@ -8501,7 +8501,7 @@
       "dimension": "predicates",
       "status": "specified",
       "facts": [
-        "Tool refusals (422 unless stated): rename 'the name X is already taken'; retool 'you may not rewrite your OWN charter' and granting a tool the caller does not hold ('… cannot grant it'); retire by the caller itself with live reports; move batches whose element is not an object with new_parent ('moves[i] must be an object …'); self_subjugate whose target is not a live descendant ('… is not a live descendant …'); switch_model to an unknown tier (the refusal lists the known tiers). Open background tasks refuse retire, dissolve and cheap_compact (source). Pinned, except the background-task refusals.",
+        "Tool refusals (422 unless stated): rename 'the name X is already taken'; retool 'you may not rewrite your OWN charter' and granting a tool the caller does not hold ('… cannot grant it'); retire by the caller itself with live reports; move batches whose element is not an object with new_parent ('moves[i] must be an object …'); self_subjugate whose target is not a live descendant ('… is not a live descendant …'); switch_model to an unknown tier (the refusal lists the known tiers). Open background tasks refuse nothing (user ruling 2026-09-29, docket the-guard-that-stops-retiring-an-agent-with-back): retire, dissolve, delete and cheap_compact stop them first and say so in the result's warnings (tests/test_background_tasks_stop.py); the old bg_open refusals were unreachable and are gone. Pinned.",
         "Not refused, by the design motto: a retire of a node that is already archived (freed 0, '… was already archived — nothing to do'); a superior retiring a node with live reports gets a dissolve with a warning ('… retire became dissolve'); a rehire of a live node, a move to the current parent (for ANY caller: the no-op answers before the authority check, legacy defect 7) and a switch to the current tier succeed as no-ops with a warning. A switch asked for while the node is mid-turn is QUEUED (pending_switch) rather than applied, and asking for the current tier while one is queued cancels it (source). Pinned, except the queue.",
         "Route refusals (422 unless stated): reorder with no sibling as before= or after=; compact of a node with no conversation yet (and, from source, of a node not live, a knowledge bearer, one just compacted, and 409 for remote control, a freeze, a halt, the killswitch or a busy turn); lineage recover of a row that is not a lost generation; drop-phantom of a row that is not a LOST one; repair-rename with no allowlist; account-assign naming an account that is not registered. Pinned for each named refusal; the other compact refusals are source.",
         "lifecycle.operator-scope takes set_scope's refusals, e.g. an unknown org_visibility ('org_visibility must be one of …'). Pinned by tests/test_state_requests_boundary.py."
@@ -8791,8 +8791,8 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2159,
-          "end": 2166,
+          "start": 2160,
+          "end": 2167,
           "sha256": "dadca1dc186a102feb2328090f4f3316e0e68f15cbc6318a83ef736006517266"
         },
         {
@@ -8828,7 +8828,7 @@
       "dimension": "conflicts",
       "status": "unresolved",
       "facts": [
-        "Each F1b operation is one whole-document write cycle under DOC_LOCK in _org_op_locked; outside it sit the pre-archive interrupt of retire, dissolve and rescind (before the lock), rename's filesystem moves (inside its own row transaction and rolled back with it, supervisor.rename_node) and delete's scratch removal (after the save)."
+        "Each F1b operation is one whole-document write cycle under DOC_LOCK in _org_op_locked; outside it sit the pre-archive interrupt of retire, dissolve, rescind and a user-actor delete (before the lock), rename's filesystem moves (inside its own row transaction and rolled back with it, supervisor.rename_node) and delete's scratch removal (after the save)."
       ],
       "source_refs": [
         {
@@ -9752,20 +9752,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -9798,20 +9798,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -9844,20 +9844,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -9890,20 +9890,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -9939,20 +9939,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -9988,20 +9988,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -10034,20 +10034,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -10080,20 +10080,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -10127,20 +10127,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -10540,7 +10540,7 @@
       "dimension": "authority",
       "status": "specified",
       "facts": [
-        "PROFILES (decision 1 on p01-f2-contracts-for-the-run-control-entry-point). Under the desktop-managed profile (ORGTREE_DESKTOP_MANAGED=1, which engine/launch.py sets, and under which it installs desktop_maintenance) orgtree_self_relaunch, orgtree_prime_relaunch arm and cancel and the deprecated orgtree_self_update take the machine-wide gate (Org.self_restart_gate and Org.prime_restart_gate): only a top-level agent or a holder of a user audience, any other caller refused 422 ('a self-restart restarts the shared orgtree install for EVERY org on this machine …' or 'a primed restart …'). prime_relaunch status takes no gate and needs only a live caller (an archived seat is refused 403 'authenticated seat is archived or replaced …'). Under the non-desktop profile orgtree_self_relaunch and orgtree_prime_relaunch are refused 422 at the door whatever their action or options ('<tool> is available only to the desktop-managed V2 profile'), while orgtree_self_update takes the same gate as orgtree_self_restart. The frozen deployment profile refuses all three 403 before any write, prime_relaunch status included, under either profile ('the frozen deployment profile disables agent-triggered self-update, self-restart, and primed restart …'). A halted caller, or any caller while the org killswitch is latched, is refused 409 before any tool runs (the shared door gate, source; pinned for the run-control tools by tests/test_state_control_boundary.py). Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
+        "PROFILES (decision 1 on p01-f2-contracts-for-the-run-control-entry-point). Under the desktop-managed profile (ORGTREE_DESKTOP_MANAGED=1, which engine/launch.py sets, and under which it installs desktop_maintenance) orgtree_self_relaunch, orgtree_prime_relaunch arm and cancel take the machine-wide gate (Org.self_restart_gate and Org.prime_restart_gate): only a top-level agent or a holder of a user audience, any other caller refused 422 ('a self-restart restarts the shared orgtree install for EVERY org on this machine …' or 'a primed restart …'). The deprecated orgtree_self_update is refused 422 under that profile before the gate, the force check and the adapter ('desktop-managed V2 renamed orgtree_self_update to orgtree_self_relaunch; use orgtree_self_relaunch for an installed-app relaunch'), as orgtree_self_restart is. prime_relaunch status takes no gate and needs only a live caller (an archived seat is refused 403 'authenticated seat is archived or replaced …'). Under the non-desktop profile orgtree_self_relaunch and orgtree_prime_relaunch are refused 422 at the door whatever their action or options ('<tool> is available only to the desktop-managed V2 profile'), while orgtree_self_update takes the same gate as orgtree_self_restart. The frozen deployment profile refuses all three 403 before any write, prime_relaunch status included, under either profile ('the frozen deployment profile disables agent-triggered self-update, self-restart, and primed restart …'). A halted caller, or any caller while the org killswitch is latched, is refused 409 before any tool runs (the shared door gate, source; pinned for the run-control tools by tests/test_state_control_boundary.py). Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
       ],
       "open_questions": [],
       "source_refs": [
@@ -10598,7 +10598,7 @@
       "dimension": "reads",
       "status": "specified",
       "facts": [
-        "Under the desktop-managed profile self_relaunch, prime_relaunch arm and self_update first read the machine-wide request file <DATA_ROOT>/desktop-maintenance.json under desktop_maintenance's lock: a request that is pending or acknowledged is returned as it stands (armed true, already_armed true, and the whole request: its action, target, reason, by_org and by_node, which may be another org's) and no new request is written. prime_relaunch status reads only a pending request (desktop_maintenance.pending) and names its by_org, by_node and arming time; cancel reads the pending request. The gates read the caller's node and its audiences. Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
+        "Under the desktop-managed profile self_relaunch and prime_relaunch arm first read the machine-wide request file <DATA_ROOT>/desktop-maintenance.json under desktop_maintenance's lock: a request that is pending or acknowledged is returned as it stands (armed true, already_armed true, and the whole request: its action, target, reason, by_org and by_node, which may be another org's) and no new request is written. prime_relaunch status reads only a pending request (desktop_maintenance.pending) and names its by_org, by_node and arming time; cancel reads the pending request. The gates read the caller's node and its audiences. Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
       ],
       "open_questions": [],
       "source_refs": [
@@ -10632,7 +10632,7 @@
       "dimension": "writes",
       "status": "specified",
       "facts": [
-        "Desktop-managed profile: every admitted call except status appends one org event in this request's save: self_relaunch and self_update 'self_restart' with detail {} (no reason is recorded), prime_relaunch arm 'prime_restart_arm' with {target: 'org', reason} and cancel 'prime_restart_cancel' with {}. The event is appended even when nothing new is requested (already_armed) and when nothing is cancelled (cancelled false, which includes an acknowledged request: cancel leaves it untouched). Outside the org document the maintenance adapter writes <DATA_ROOT>/desktop-maintenance.json (a temporary file then os.replace, source): a new request {id, action, target, reason, by_org, by_node, at, state: 'pending'} with action 'restart' and target 'org' for self_relaunch and prime arm, and action 'update' with the caller's target for self_update; cancel rewrites a pending request to state 'cancelled' with cancelled_by. status writes nothing. Every refusal writes nothing, including self_update's refused target, which is refused after the gate has run and so drops the gate's event with the request's save. Non-desktop profile: self_update appends the 'self_restart' event, with {force: true, reason} followed by 'self_restart_forced' on the forced path, and writes nothing else here; the relaunch tools write nothing. Keyed calls also write op_receipts and op_receipts_meta. Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
+        "Desktop-managed profile: every admitted call except status appends one org event in this request's save: self_relaunch 'self_restart' with detail {} (no reason is recorded), prime_relaunch arm 'prime_restart_arm' with {target: 'org', reason} and cancel 'prime_restart_cancel' with {}. The event is appended even when nothing new is requested (already_armed) and when nothing is cancelled (cancelled false, which includes an acknowledged request: cancel leaves it untouched). Outside the org document the maintenance adapter writes <DATA_ROOT>/desktop-maintenance.json (a temporary file then os.replace, source): a new request {id, action, target, reason, by_org, by_node, at, state: 'pending'} with action 'restart' and target 'org' for self_relaunch and prime arm; cancel rewrites a pending request to state 'cancelled' with cancelled_by. status writes nothing. Every refusal writes nothing; self_update writes nothing under this profile, keyed or not (it is refused before the gate: no event, no request, no receipt). Non-desktop profile: self_update appends the 'self_restart' event, with {force: true, reason} followed by 'self_restart_forced' on the forced path, and writes nothing else here; the relaunch tools write nothing. Keyed calls also write op_receipts and op_receipts_meta. Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
       ],
       "open_questions": [],
       "source_refs": [
@@ -10678,7 +10678,7 @@
       "dimension": "predicates",
       "status": "specified",
       "facts": [
-        "The door reads prime_relaunch's action as str(a.get('action') or 'arm') and refuses anything but arm, cancel and status 422 ('action must be arm|cancel|status'); the selectors use that same reading (action normalization str_or_arm), so every falsy action selects the arm contract and an unknown action ('nope', 'ARM') selects none. _desktop_relaunch_args admits only reason for self_relaunch and only action and reason for prime_relaunch, refusing any other option 422 before the gate ('orgtree_self_relaunch accepts only reason; unsupported option(s): target'), so target, force, deadline_minutes and a legacy action on self_relaunch are refused. Under the non-desktop profile the profile refusal comes first, so an extra option draws the same 'available only to the desktop-managed V2 profile'. self_update is not checked by _desktop_relaunch_args: under the desktop-managed profile force is refused 422 ('Desktop maintenance waits for idle; force is unavailable') and a target outside org, mailhub and both is refused 422 by the adapter ('invalid desktop maintenance target/action'); under the non-desktop profile a forced call needs a reason (422 'a FORCED self-restart requires a `reason` …') and takes the forced path. Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
+        "The door reads prime_relaunch's action as str(a.get('action') or 'arm') and refuses anything but arm, cancel and status 422 ('action must be arm|cancel|status'); the selectors use that same reading (action normalization str_or_arm), so every falsy action selects the arm contract and an unknown action ('nope', 'ARM') selects none. _desktop_relaunch_args admits only reason for self_relaunch and only action and reason for prime_relaunch, refusing any other option 422 before the gate ('orgtree_self_relaunch accepts only reason; unsupported option(s): target'), so target, force, deadline_minutes and a legacy action on self_relaunch are refused. Under the non-desktop profile the profile refusal comes first, so an extra option draws the same 'available only to the desktop-managed V2 profile'. Under the desktop-managed profile every self_update call is refused 422 as renamed, whatever its options; under the non-desktop profile a forced call needs a reason (422 'a FORCED self-restart requires a `reason` …') and takes the forced path. Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
       ],
       "open_questions": [],
       "source_refs": [
@@ -10774,7 +10774,7 @@
       "dimension": "receipt",
       "status": "specified",
       "facts": [
-        "Coverage: self_relaunch, prime_relaunch and self_update UNROLLED (a keyed call files an unrolled_side_effect receipt, prime_relaunch status included; a keyed replay returns replayed true with the first receipt and does not run the call again). Kept: self_relaunch keeps armed; prime_relaunch keeps state and armed, so arm keeps armed and status keeps nothing (cancel's result carries neither field, source); self_update keeps target, a field the desktop-managed result does not carry, so under that profile its receipt keeps nothing (recorded legacy defect). Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
+        "Coverage: self_relaunch, prime_relaunch and self_update UNROLLED (a keyed call files an unrolled_side_effect receipt, prime_relaunch status included; a keyed replay returns replayed true with the first receipt and does not run the call again). Kept: self_relaunch keeps armed; prime_relaunch keeps state and armed, so arm keeps armed and status keeps nothing (cancel's result carries neither field, source); self_update keeps target (non-desktop profile; under the desktop-managed profile no self_update call is admitted, so none files a receipt). Pinned by tests/test_state_relaunch_boundary.py against docs/state-system/relaunch-boundary.json."
       ],
       "open_questions": [],
       "source_refs": [
@@ -13369,8 +13369,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1983,
-          "end": 1996,
+          "start": 1984,
+          "end": 1997,
           "sha256": "171889c0c30ae59e041526883910f9e43e42cb32b1e2aa1e95017a32687bbb89"
         },
         {
@@ -13426,8 +13426,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1964,
-          "end": 1982,
+          "start": 1965,
+          "end": 1983,
           "sha256": "b6a4f151e299c507e95c88010806f0d8498da1ce1a451b25b0cf2d6622dea183"
         },
         {
@@ -13483,8 +13483,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1923,
-          "end": 1938,
+          "start": 1924,
+          "end": 1939,
           "sha256": "05e772d07e1746200d2d774f3036e54f5cb6aa939443fb8f5302714cd5335e61"
         },
         {
@@ -13540,8 +13540,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1939,
-          "end": 1946,
+          "start": 1940,
+          "end": 1947,
           "sha256": "c1ef972e5d5491d31c47db795accf4161e64b6cc20fe5509759a0098c4d83314"
         },
         {
@@ -13597,8 +13597,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1947,
-          "end": 1963,
+          "start": 1948,
+          "end": 1964,
           "sha256": "02828b971356a2545e5380397b1614ba048ff712c1e0eb9472c37f8d11484623"
         },
         {
@@ -13684,8 +13684,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1880,
-          "end": 1897,
+          "start": 1881,
+          "end": 1898,
           "sha256": "cab1501e2db1435d7e05d6e55042a3a4fa179118e8f3090b09c394b8e648861e"
         },
         {
@@ -13741,8 +13741,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1898,
-          "end": 1922,
+          "start": 1899,
+          "end": 1923,
           "sha256": "121c0247ed756abbd44e51c671b530cafe8491e916e4f9341643d805194044ca"
         },
         {
@@ -14330,8 +14330,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1872,
-          "end": 1879,
+          "start": 1873,
+          "end": 1880,
           "sha256": "9b1ad586486b7b8994a2f8a86c59c15d44f4fd11f093249759fb31756857a0eb"
         },
         {
@@ -14505,8 +14505,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1532,
-          "end": 1653,
+          "start": 1533,
+          "end": 1654,
           "sha256": "c7c353204ec8dc0b5efd58e2014a911d42c8607fd2f9c7ffa67cac2a6117fe83"
         },
         {
@@ -14568,8 +14568,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1532,
-          "end": 1653,
+          "start": 1533,
+          "end": 1654,
           "sha256": "c7c353204ec8dc0b5efd58e2014a911d42c8607fd2f9c7ffa67cac2a6117fe83"
         },
         {
@@ -15338,8 +15338,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1733,
-          "end": 1741,
+          "start": 1734,
+          "end": 1742,
           "sha256": "b1a2aa37e24a79cfb0812d7ceacf7d3d7c24a28666e6059754a3f75639ec9eb5"
         },
         {
@@ -15408,8 +15408,8 @@
         {
           "path": "engine/backend/orgtree/mcptool.py",
           "start": 1421,
-          "end": 1434,
-          "sha256": "c25651b94e778943606b7101d645c9199b2b592500f840878b44d393f9514ae1"
+          "end": 1435,
+          "sha256": "37fae1e03efdc77b830fd88cf2467d5fa261b408882a2beb8ada312ef5131420"
         },
         {
           "path": "engine/backend/orgtree/api.py",
@@ -15470,8 +15470,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1435,
-          "end": 1531,
+          "start": 1436,
+          "end": 1532,
           "sha256": "d467efcb0088044e3fa02320a2ca57b816591611686f51b39fb1418ad71a2c06"
         },
         {
@@ -15539,8 +15539,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1673,
-          "end": 1697,
+          "start": 1674,
+          "end": 1698,
           "sha256": "52ce4e3f4b60ef246e34c3558b7ea33bd742ec7299ee8bace23541df942f2351"
         },
         {
@@ -15608,8 +15608,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1698,
-          "end": 1712,
+          "start": 1699,
+          "end": 1713,
           "sha256": "0e3e315ac26c6a2030d583153ee5e29749d54ad153e5fe58ef6d4e4ae86927d7"
         },
         {
@@ -15671,8 +15671,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1713,
-          "end": 1732,
+          "start": 1714,
+          "end": 1733,
           "sha256": "80547e28bdf6ffa632d42016c9b5bcc8bf14a564425df88bbecb5593b2dc1934"
         },
         {
@@ -15740,8 +15740,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2022,
-          "end": 2047,
+          "start": 2023,
+          "end": 2048,
           "sha256": "016519b2fb569fc68bb594db598e2cb7b6af82b5397860acb0c48311b2aa0ba4"
         },
         {
@@ -15803,8 +15803,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1654,
-          "end": 1663,
+          "start": 1655,
+          "end": 1664,
           "sha256": "698c3a1388480c795e72196e698be12f64abc7b17739e10c38bd9c23518ea2cd"
         },
         {
@@ -15866,8 +15866,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1664,
-          "end": 1672,
+          "start": 1665,
+          "end": 1673,
           "sha256": "9d28d97c5fee9e119ba4721b4b07d819df626d2454ccc184a1d5a1ab73e2f758"
         },
         {
@@ -18152,8 +18152,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -18215,8 +18215,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -18278,8 +18278,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -18341,8 +18341,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -18404,8 +18404,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         },
         {
@@ -18809,8 +18809,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1742,
-          "end": 1754,
+          "start": 1743,
+          "end": 1755,
           "sha256": "577c207ddf8c9ec562bc897770d40600c3bcc6da8bdf98e9156d58a5edc19ee7"
         },
         {
@@ -18872,8 +18872,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1755,
-          "end": 1763,
+          "start": 1756,
+          "end": 1764,
           "sha256": "b62a7117883f345b463b8e343124e25b49aeb74e3f7f49160433f60b63054b71"
         },
         {
@@ -18941,8 +18941,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1764,
-          "end": 1793,
+          "start": 1765,
+          "end": 1794,
           "sha256": "3b8123e4ac442caef7892c13e553aed26ec5bc01a18a62dcafe74aafa0b146e5"
         },
         {
@@ -19004,8 +19004,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1837,
-          "end": 1855,
+          "start": 1838,
+          "end": 1856,
           "sha256": "87ec93125e22131e66280857cc9fd9e1b6c67ca68407025437d1150c5a9cc27e"
         },
         {
@@ -19067,8 +19067,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1856,
-          "end": 1871,
+          "start": 1857,
+          "end": 1872,
           "sha256": "eef08798b0e6c8a19b2a523f7f4e9518c5e8311c54a22f12e1168c29704aec40"
         },
         {
@@ -20401,8 +20401,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2082,
-          "end": 2103,
+          "start": 2083,
+          "end": 2104,
           "sha256": "3abd3911f090769c45881708ad23ecf94ddfde2e5a80dc0e6d8b833d3b001577"
         },
         {
@@ -20482,8 +20482,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2104,
-          "end": 2131,
+          "start": 2105,
+          "end": 2132,
           "sha256": "de797fd0cbc31c3034f0ff1260d21981680b5930710e48972e3056a59fad7679"
         },
         {
@@ -20569,8 +20569,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2104,
-          "end": 2131,
+          "start": 2105,
+          "end": 2132,
           "sha256": "de797fd0cbc31c3034f0ff1260d21981680b5930710e48972e3056a59fad7679"
         },
         {
@@ -20650,8 +20650,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2104,
-          "end": 2131,
+          "start": 2105,
+          "end": 2132,
           "sha256": "de797fd0cbc31c3034f0ff1260d21981680b5930710e48972e3056a59fad7679"
         },
         {
@@ -21455,8 +21455,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1997,
-          "end": 2021,
+          "start": 1998,
+          "end": 2022,
           "sha256": "144c65f66c24693fca10b27cb90305d34e60e4f70f100973ce696ba7de212485"
         },
         {
@@ -29723,8 +29723,8 @@
         {
           "path": "engine/backend/orgtree/mcptool.py",
           "start": 1421,
-          "end": 1434,
-          "sha256": "c25651b94e778943606b7101d645c9199b2b592500f840878b44d393f9514ae1"
+          "end": 1435,
+          "sha256": "37fae1e03efdc77b830fd88cf2467d5fa261b408882a2beb8ada312ef5131420"
         }
       ]
     },
@@ -29738,8 +29738,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1435,
-          "end": 1531,
+          "start": 1436,
+          "end": 1532,
           "sha256": "d467efcb0088044e3fa02320a2ca57b816591611686f51b39fb1418ad71a2c06"
         }
       ]
@@ -29755,8 +29755,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1532,
-          "end": 1653,
+          "start": 1533,
+          "end": 1654,
           "sha256": "c7c353204ec8dc0b5efd58e2014a911d42c8607fd2f9c7ffa67cac2a6117fe83"
         }
       ]
@@ -29771,8 +29771,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1654,
-          "end": 1663,
+          "start": 1655,
+          "end": 1664,
           "sha256": "698c3a1388480c795e72196e698be12f64abc7b17739e10c38bd9c23518ea2cd"
         }
       ]
@@ -29787,8 +29787,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1664,
-          "end": 1672,
+          "start": 1665,
+          "end": 1673,
           "sha256": "9d28d97c5fee9e119ba4721b4b07d819df626d2454ccc184a1d5a1ab73e2f758"
         }
       ]
@@ -29803,8 +29803,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1673,
-          "end": 1697,
+          "start": 1674,
+          "end": 1698,
           "sha256": "52ce4e3f4b60ef246e34c3558b7ea33bd742ec7299ee8bace23541df942f2351"
         }
       ]
@@ -29819,8 +29819,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1698,
-          "end": 1712,
+          "start": 1699,
+          "end": 1713,
           "sha256": "0e3e315ac26c6a2030d583153ee5e29749d54ad153e5fe58ef6d4e4ae86927d7"
         }
       ]
@@ -29835,8 +29835,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1713,
-          "end": 1732,
+          "start": 1714,
+          "end": 1733,
           "sha256": "80547e28bdf6ffa632d42016c9b5bcc8bf14a564425df88bbecb5593b2dc1934"
         }
       ]
@@ -29851,8 +29851,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1733,
-          "end": 1741,
+          "start": 1734,
+          "end": 1742,
           "sha256": "b1a2aa37e24a79cfb0812d7ceacf7d3d7c24a28666e6059754a3f75639ec9eb5"
         }
       ]
@@ -29867,8 +29867,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1742,
-          "end": 1754,
+          "start": 1743,
+          "end": 1755,
           "sha256": "577c207ddf8c9ec562bc897770d40600c3bcc6da8bdf98e9156d58a5edc19ee7"
         }
       ]
@@ -29883,8 +29883,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1755,
-          "end": 1763,
+          "start": 1756,
+          "end": 1764,
           "sha256": "b62a7117883f345b463b8e343124e25b49aeb74e3f7f49160433f60b63054b71"
         }
       ]
@@ -29899,8 +29899,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1764,
-          "end": 1793,
+          "start": 1765,
+          "end": 1794,
           "sha256": "3b8123e4ac442caef7892c13e553aed26ec5bc01a18a62dcafe74aafa0b146e5"
         }
       ]
@@ -29915,8 +29915,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1837,
-          "end": 1855,
+          "start": 1838,
+          "end": 1856,
           "sha256": "87ec93125e22131e66280857cc9fd9e1b6c67ca68407025437d1150c5a9cc27e"
         }
       ]
@@ -29931,8 +29931,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1856,
-          "end": 1871,
+          "start": 1857,
+          "end": 1872,
           "sha256": "eef08798b0e6c8a19b2a523f7f4e9518c5e8311c54a22f12e1168c29704aec40"
         }
       ]
@@ -29947,8 +29947,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1872,
-          "end": 1879,
+          "start": 1873,
+          "end": 1880,
           "sha256": "9b1ad586486b7b8994a2f8a86c59c15d44f4fd11f093249759fb31756857a0eb"
         }
       ]
@@ -29963,8 +29963,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1880,
-          "end": 1897,
+          "start": 1881,
+          "end": 1898,
           "sha256": "cab1501e2db1435d7e05d6e55042a3a4fa179118e8f3090b09c394b8e648861e"
         }
       ]
@@ -29979,8 +29979,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1898,
-          "end": 1922,
+          "start": 1899,
+          "end": 1923,
           "sha256": "121c0247ed756abbd44e51c671b530cafe8491e916e4f9341643d805194044ca"
         }
       ]
@@ -29995,8 +29995,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1923,
-          "end": 1938,
+          "start": 1924,
+          "end": 1939,
           "sha256": "05e772d07e1746200d2d774f3036e54f5cb6aa939443fb8f5302714cd5335e61"
         },
         {
@@ -30017,8 +30017,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1939,
-          "end": 1946,
+          "start": 1940,
+          "end": 1947,
           "sha256": "c1ef972e5d5491d31c47db795accf4161e64b6cc20fe5509759a0098c4d83314"
         },
         {
@@ -30039,8 +30039,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1947,
-          "end": 1963,
+          "start": 1948,
+          "end": 1964,
           "sha256": "02828b971356a2545e5380397b1614ba048ff712c1e0eb9472c37f8d11484623"
         },
         {
@@ -30091,8 +30091,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1964,
-          "end": 1982,
+          "start": 1965,
+          "end": 1983,
           "sha256": "b6a4f151e299c507e95c88010806f0d8498da1ce1a451b25b0cf2d6622dea183"
         },
         {
@@ -30113,8 +30113,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1983,
-          "end": 1996,
+          "start": 1984,
+          "end": 1997,
           "sha256": "171889c0c30ae59e041526883910f9e43e42cb32b1e2aa1e95017a32687bbb89"
         },
         {
@@ -30135,8 +30135,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 1997,
-          "end": 2021,
+          "start": 1998,
+          "end": 2022,
           "sha256": "144c65f66c24693fca10b27cb90305d34e60e4f70f100973ce696ba7de212485"
         }
       ]
@@ -30151,8 +30151,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2022,
-          "end": 2047,
+          "start": 2023,
+          "end": 2048,
           "sha256": "016519b2fb569fc68bb594db598e2cb7b6af82b5397860acb0c48311b2aa0ba4"
         }
       ]
@@ -30171,8 +30171,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2048,
-          "end": 2073,
+          "start": 2049,
+          "end": 2074,
           "sha256": "44ccc3f26998a8cb82b254709f2ea4351b74d12b97660958f462b4bf124a6b1e"
         }
       ]
@@ -30751,8 +30751,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2082,
-          "end": 2103,
+          "start": 2083,
+          "end": 2104,
           "sha256": "3abd3911f090769c45881708ad23ecf94ddfde2e5a80dc0e6d8b833d3b001577"
         }
       ]
@@ -30769,8 +30769,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2104,
-          "end": 2131,
+          "start": 2105,
+          "end": 2132,
           "sha256": "de797fd0cbc31c3034f0ff1260d21981680b5930710e48972e3056a59fad7679"
         }
       ]
@@ -33013,7 +33013,7 @@
         "relaunch.self-relaunch",
         "relaunch.self-update"
       ],
-      "reason": "desktop_maintenance.request's unknown-action refusal. The adapter is installed only under the desktop-managed profile (engine/launch.py), where the standard restart tools are refused before it, so only the relaunch verbs and orgtree_self_update reach it (P01 relaunch-cards item, rule 1).",
+      "reason": "desktop_maintenance.request's unknown-action refusal. The adapter is installed only under the desktop-managed profile (engine/launch.py), where the standard restart tools are refused before it, so only the relaunch verbs reach it (P01 relaunch-cards item, rule 1).",
       "source_refs": [
         {
           "path": "engine/backend/orgtree/desktop_maintenance.py",
@@ -33312,15 +33312,15 @@
       "source_refs": []
     },
     {
-      "id": "393fce645999a18f6c5ee05ef82058108ecd302087af8219693338f01fe4fd7b",
+      "id": "211be87225ae7b9fc64fcd12c38b73c1f61171d7db9c18a0ba5b76e514aa1600",
       "disposition": "excluded",
       "contracts": [],
       "reason": "Not an operation: _desktop_relaunch_catalogue only swaps the tool card an agent is shown in the agent-side MCP server's catalogue (orgtree_self_restart becomes orgtree_self_relaunch); it calls nothing. P01 W8.",
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2146,
-          "end": 2146,
+          "start": 2147,
+          "end": 2147,
           "sha256": "a0def51548c304e90d0b13313831bb48f73fd0216fbbf66521818f9d4cd407c9"
         },
         {
@@ -33331,22 +33331,22 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2139,
-          "end": 2152,
+          "start": 2140,
+          "end": 2153,
           "sha256": "520513551db069b15b01199b4b54fe5bbfdc3754212d7cb4e62c666d0b7911cf"
         }
       ]
     },
     {
-      "id": "4c2c333bd2dd75d285180914691205e9a29f97a321670be75941529c14a87db0",
+      "id": "51b0ac81738c354b5429086ef8ed4647ca35736d95baac5a44cc950c8e135fd5",
       "disposition": "excluded",
       "contracts": [],
       "reason": "Not an operation: _desktop_relaunch_catalogue only swaps the tool card an agent is shown in the agent-side MCP server's catalogue (orgtree_prime_restart becomes orgtree_prime_relaunch); it calls nothing. P01 W8.",
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2148,
-          "end": 2148,
+          "start": 2149,
+          "end": 2149,
           "sha256": "5d1dccdad2eea494c3b44ef61a1426ea87b61d6b549cc8eeadb98799685dd88c"
         },
         {
@@ -33357,29 +33357,29 @@
         },
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2139,
-          "end": 2152,
+          "start": 2140,
+          "end": 2153,
           "sha256": "520513551db069b15b01199b4b54fe5bbfdc3754212d7cb4e62c666d0b7911cf"
         }
       ]
     },
     {
-      "id": "404b8187eb1a7d14b999275f16df0d9cf3f919863b938d9abaa4a59d7ad578bd",
+      "id": "e348372e8272960bdb37388c4bbc3abbc2089872401aa9422f8ec3717d0110ba",
       "disposition": "pending",
       "contracts": [],
       "reason": "orgtree_work in mcptool.available_tools: pending with its card — the full orgtree_work card (36 actions) is the P05 work family and the action-coverage rule needs all 36 (S3 ruling 2); the prototype's item read is covered by work.item-list and work.item-get instead. Owner: P05 (the work family).",
       "source_refs": []
     },
     {
-      "id": "b7dc1f06fc23e70fb65e82811fdfb1f605b7e1eaab22a290c6c7fb67578de0fc",
+      "id": "c19826516f1d8d3e913495f15e7e033ab54e13e3bdf49deccf2b385be94ae8c5",
       "disposition": "excluded",
       "contracts": [],
       "reason": "Not an org-state operation in this process (coordinator ruling, decision 2 on the W8 item): a branch of mcptool.py, the agent-side MCP client, a separate client process, that forwards orgtree_send_file (as orgtree_send_file_once) to POST /api/agent. That backend route IS inventoried (api._agent_call_route, line 11156), and its witness carries the obligation; the branch has no other path into org state. P01 W8.",
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2350,
-          "end": 2350,
+          "start": 2351,
+          "end": 2351,
           "sha256": "48011383406b15ae264d56765221f533085f19cab5f10ecce0251505c9df2e18"
         },
         {
@@ -33391,7 +33391,7 @@
       ]
     },
     {
-      "id": "afea82304a3e3936cd879f694f60abba68ddeda6b4c97872ca27da7440aa1c14",
+      "id": "3330c389e611aa09060b89e3584893729cdd4704e4c1f6da85fed194cfad2697",
       "disposition": "mapped",
       "contracts": [
         "receipt.lookup"
@@ -33400,8 +33400,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/mcptool.py",
-          "start": 2335,
-          "end": 2477,
+          "start": 2336,
+          "end": 2478,
           "sha256": "1fab36aeb30f5a888381f0766dab2bf73c8567339aec64f69cd83d331a7b6696"
         }
       ]

@@ -78,9 +78,10 @@ class BoundaryBinding(unittest.TestCase):
         # S3 ruling 2: the card (36 actions) is the P05 work family; its selectors wait with it
         registry = contracts.load(ROOT / 'docs/state-system/operation-contracts.json')
         rows = {r['id'][:8]: r for g in ('entries', 'dispatch') for r in registry[g]}
-        # 404b8187 was 3de03c31 until the orgtree_inbox card (2026-09-29) moved its
-        # line, and b2e49e97 before the mcptool card fields of 2026-09-28
-        for wid in ('53052a77', 'f4cf0218', '788cdb19', '404b8187', 'e8629045'):
+        # e348372e was 404b8187 until the cheap_compact card's background-task line
+        # (2026-09-29) moved it, 3de03c31 before the orgtree_inbox card (2026-09-29)
+        # and b2e49e97 before the mcptool card fields of 2026-09-28
+        for wid in ('53052a77', 'f4cf0218', '788cdb19', 'e348372e', 'e8629045'):
             with self.subTest(witness=wid):
                 self.assertEqual((rows[wid]['disposition'], rows[wid]['contracts']), ('pending', []))
                 self.assertIn('S3 ruling 2', rows[wid]['reason'])
