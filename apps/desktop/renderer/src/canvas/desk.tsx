@@ -86,6 +86,7 @@ import { RefMdBody } from './refmd'
 import { EventCard, eventSurface } from '../events/card'
 import { MailMessage } from '../events/segments'
 import { decodeEventRow } from '../events/decode'
+import { askHidden, markAnswerSeen, queuedAnswerRow, queuedAnswers, useSubmittedAsks } from '../asksubmitted'
 import { eventDedup } from '../events/dedup'
 import { mergeAssistantRows } from '../assistantMessages'
 import { authoredUserLabel, isSegments, SegmentList } from '../events/segments'
@@ -2611,52 +2612,64 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
   // the turn, so the live rows above it really did happen first.
   // ── MESSAGE-VISIBILITY INVARIANT (user ruling 2026-09-10 13:22Z, canonical
   // in message-visibility-invariant.md): every message is visible EXACTLY
-  // ONCE across pending → arriving → sent. For a submitted ask answer the
-  // QUESTION PANEL is the pending representation: it stays pinned — never
-  // also a pending bubble — until the answer mail actually RENDERS in the
-  // transcript, and the handoff is atomic because both facts (the transcript
-  // row and the pending row) come out of the SAME chat payload the desk is
-  // rendering. Server acceptance, the tree payload flipping ask.status, or a
-  // planned refresh are explicitly NOT enough to unpin.
+  // ONCE across pending → arriving → sent.
+  // Point 31 (user 2026-09-29: "id rather they disappear immediately and
+  // queue as the request resolved message immediately") changed WHICH form
+  // the pending step of an ask answer takes. The card is no longer pinned
+  // once answered; it leaves on the click. The answer is queued at once as
+  // its "Request resolved" entry: first this window's own queued entry
+  // (../asksubmitted), then the server's pending row, then the transcript
+  // row. Each form retires in the render that draws the next one, because
+  // the next one is found in the same chat payload this desk is rendering.
+  useSubmittedAsks()
   const ask = node.ask
   const askLive = !!ask && (ask.status === 'open' || ask.status === 'pending')
-  // the mail the answer travelled as (stamped by the backend at resolution)
-  const answerMail = !askLive ? ask?.answer_mail : undefined
+  // a submitted card is gone on the click (the store hides it until the tree
+  // payload no longer lists the ask as open)
+  const showAsk = askLive && !askHidden(slug, ask?.id)
   const rawPendMail = chat?.pending_mail ?? []
-  const answerInTranscript = useMemo(() => {
-    if (!answerMail || !chat) return false
+  // the server's own row for an answer: an answer-decision event naming the ask
+  const answersAsk = (row: unknown, askId: string): boolean => {
+    const d = decodeEventRow(row, BASE ? 'public' : 'operator')
+    if (d.kind !== 'known') return false
+    const ev = d.event as { variant: string; object?: { kind?: string; id?: string } | null }
+    return (ev.variant === 'answer.ask' || ev.variant === 'answer.batch')
+      && String(ev.object?.id ?? '') === askId
+  }
+  // While a LIVE card is on screen it is the ask's one form. An answer row
+  // for it (sent from another window before this tree payload caught up)
+  // waits behind the card instead of doubling as a bubble.
+  const askAnswerRow = (m: PendingMail): boolean =>
+    !!ask && showAsk && answersAsk(m, String(ask.id))
+  // the mail rows the transcript already shows (user rows and steered rows)
+  const transcriptMail = useMemo(() => {
+    const out: unknown[] = []
+    if (!chat) return out
     const rows = [...chat.messages.filter(row => row.role === 'user'),
       ...live_feed.filter(row => row.kind === 'steered')]
     for (const row of rows) {
       const segs = row.segments
       if (!isSegments(segs, BASE ? 'public' : 'operator')) continue
-      for (const seg of segs) {
-        if (seg.kind === 'mail' && seg.rows.some(r => r.id === answerMail)) return true
-      }
+      for (const seg of segs) if (seg.kind === 'mail') out.push(...seg.rows)
     }
-    return false
-  }, [answerMail, chat, live_feed])
-  // Queue removal is not evidence of display. Remember actual rendering so
-  // an answer later leaving the loaded window does not reopen its panel.
-  const answerSeenTranscript = useRef<string | null>(null)
-  if (answerMail && answerInTranscript) answerSeenTranscript.current = answerMail
-  const answerHandedOff = !answerMail || answerSeenTranscript.current === answerMail
-  // never a separate pending bubble for a message the panel represents: the
-  // resolved answer by its stamped id, and — race-proof, straight from the
-  // payload — any answer-decision event that references THIS card, which
-  // covers the window before the tree payload delivers the stamp
-  const askAnswerRow = (m: PendingMail): boolean => {
-    if (!ask) return false
-    if (answerMail && m.id === answerMail) return true
-    const d = decodeEventRow(m, BASE ? 'public' : 'operator')
-    if (d.kind !== 'known') return false
-    const ev = d.event as { variant: string; object?: { kind?: string; id?: string } | null }
-    return (ev.variant === 'answer.ask' || ev.variant === 'answer.batch')
-      && String(ev.object?.id ?? '') === String(ask.id)
-  }
+    return out
+  }, [chat, live_feed])
+  // this window's queued answers: shown until the server's own row for the
+  // same ask is in the payload (pending or transcript), then retired for good
+  const submittedHere = queuedAnswers(slug, node.id)
+  const answerShown = (askId: string) => rawPendMail.some(m => answersAsk(m, askId))
+    || transcriptMail.some(m => answersAsk(m, askId))
+  const shownAnswers = submittedHere.filter(e => answerShown(e.askId)).map(e => e.askId)
+  const shownKey = shownAnswers.join('\n')
+  useEffect(() => {
+    for (const id of shownKey ? shownKey.split('\n') : []) markAnswerSeen(slug, id)
+  }, [slug, shownKey])
+  const queuedAnswerRows = submittedHere.filter(e => !answerShown(e.askId))
+    .map(e => queuedAnswerRow(e, !!BASE))
   const pendMail = rawPendMail.filter((m) => !askAnswerRow(m))
   const pendNow = pendMail.filter((m) => m.delivering && m.via === 'turn')
-  const pendLater = pendMail.filter((m) => !(m.delivering && m.via === 'turn'))
+  const pendLater = [...pendMail.filter((m) => !(m.delivering && m.via === 'turn')),
+    ...queuedAnswerRows]
   // ONE renderer, two places (it is the same bubble; only its position says
   // something different) — the shared PendingMailRow, so the browser parity
   // probe measures exactly what this desk mounts.
@@ -3779,16 +3792,13 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
             .catch((e: Error) => { toast([`error: ${e.message}`]); throw e })} />
       </div>}
       {/* F-04/F-05: the ask card — pinned above the composer while the ask is
-          open ("a question answering ui should appear on the agent"), AND —
-          message-visibility invariant, user 2026-09-10, superseding the
-          2026-08-04 "answered leaves the pin immediately" — while its
-          submitted answer has not yet RENDERED in the transcript: the
-          resolved panel is the answer's one representation for exactly that
-          window (the separate pending bubble is suppressed above), and it
-          unpins in the same render that shows the transcript row. Once handed
-          off it leaves the pin as before — the answer IS in the scroll now —
-          and nulled/interrupted states stay visible on the inbox rows. */}
-      {ask && (askLive || (!!answerMail && !answerHandedOff)) && (
+          open ("a question answering ui should appear on the agent"). Point
+          31 (user 2026-09-29) supersedes the 2026-09-10 rule that kept the
+          answered card pinned until its answer reached the transcript: the
+          card leaves on the click, and the answer is queued at once as its
+          "Request resolved" entry (see the invariant above pendMail).
+          Nulled/interrupted states stay visible on the inbox rows. */}
+      {ask && showAsk && (
         <AskCard ask={ask} slug={slug} toast={toast}
           seat={node.seat ?? 0}
           committed={(node.grant ?? 0) - (node.free ?? 0)}

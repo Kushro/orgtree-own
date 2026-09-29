@@ -33,6 +33,7 @@
 // rule), and `retainSelected` in feed.ts is the whole of it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useSubmittedAsks } from '../asksubmitted'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useWorkItems } from '../canvas/useworkitems'
 import { dismissWorkItemAttention, fileBase, fileUrl, getInbox, markRead } from '../api'
@@ -156,10 +157,12 @@ export function AttentionQueue({
 
   // ---- the optimistic half of dismissing a ticket's flag (see the header)
   const [dismissing, setDismissing] = useState<ReadonlySet<string>>(() => new Set())
+  // point 31: a submitted question leaves this list on the click
+  const submitted = useSubmittedAsks()
   const allLive = useMemo(() => buildAttentionRows({
     items: work?.attention ?? work?.items, archived: work?.archived, backlogged: work?.backlogged,
     pending: box?.pending, nodes, asks: tree.asks,
-  }), [work, box, nodes, tree.asks])
+  }), [work, box, nodes, tree.asks, submitted])
   const live = useMemo(() => dismissing.size
     ? allLive.filter((r) => !(r.kind === 'ticket' && r.item && dismissing.has(r.item.slug)))
     : allLive, [allLive, dismissing])

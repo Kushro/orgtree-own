@@ -28,6 +28,7 @@ import {
   resumeFrozen, runOp, saveDefaults, saveHireDefaults, saveSettings,
   TREE_STALE_EVENT,
 } from './api'
+import { settleFromTree, useSubmittedAsks } from './asksubmitted'
 import { treeSelections } from './treeselection'
 import { savedTreeSelection } from './canvas/treeselection'
 import { AdvancedOrgModal } from './shell/advancedorg'
@@ -782,7 +783,10 @@ export default function App() {
           (t as TreePayload & { sync_rev?: number }).sync_rev)
         replaceNodeMetadata(want, t.roots,
           replay as Extract<WsEvent, { type: 'node_stream' }>[])
-        setTree(applyPrimedAsks(want, t, readStartedAt))
+        const shown = applyPrimedAsks(want, t, readStartedAt)
+        setTree(shown)
+        // point 31: forget submitted cards this tree has caught up with
+        settleFromTree(want, shown)
         setTreeRead({ at: Date.now(), error: null })
       }
       fetchOk()
@@ -2571,6 +2575,8 @@ export function InboxPanel({ slug, tree, toast, refresh, close, jumpTo, jumpSeq,
   // agent outside the selection carries no `node.ask` — its open question
   // was missing from this inbox (canvas/openasks.ts). The Attention view
   // lists from the same helper, so the two cannot disagree.
+  // point 31: re-render when a card is submitted (openAsks drops it)
+  useSubmittedAsks()
   const askPending = openAsks(tree, nodes.values()).map(askRow)
   const askDone = asks.filter((a) => !askOpen(a)).slice(-8).map(askRow)
   const renderAskBody = (m: MailRow) => {

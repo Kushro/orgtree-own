@@ -667,3 +667,48 @@ test('§8.2 an agent the tree holds keeps its ONE batched card, not a second raw
   assert.deepEqual(titles(v.el), ['question:Ship the cutover tonight?'])
   await v.unmount()
 })
+
+// ------------------------------------------------------------------ point 31
+test('point 31: a submitted question leaves the list on the click, before any repoll', async () => {
+  localStorage.clear()
+  installServer({ items: [flagged] })
+  const { submitAsk, resetSubmittedAsks } = await import('../src/asksubmitted')
+  const v = await mountView(panel(tree({ ask: openAsk })), titles)
+  await settle()
+  assert.ok(titles(v.el).includes('question:Ship the cutover tonight?'), 'fixture: the question is listed')
+  // answered from any view (desk, inbox, this pane): the server has not
+  // answered yet, and no feed is re-read
+  let finish: () => void = () => {}
+  await inAct(async () => {
+    void submitAsk({ slug: SLUG, nid: openAsk.node, askId: openAsk.id, sections: null },
+      () => new Promise<void>(r => { finish = r }))
+    await flush(4)
+  })
+  assert.deepEqual(titles(v.el), ['ticket:cutover'], 'gone on the click; the ticket stays')
+  finish()
+  await v.unmount()
+  resetSubmittedAsks()
+})
+
+test("point 31: the user's inbox drops the submitted question's row on the click too", async () => {
+  localStorage.clear()
+  window.HTMLElement.prototype.scrollIntoView = () => {}
+  installServer({ items: [] })
+  const { submitAsk, resetSubmittedAsks } = await import('../src/asksubmitted')
+  const { InboxPanel } = await import('../src/App')
+  const v = await mountView(<InboxPanel slug={SLUG} tree={treeWithFarAsk()} toast={() => {}}
+    close={() => {}} jumpTo={null} />, (el) => el)
+  await settle()
+  const rows = () => [...v.el.querySelectorAll('.mailer-list .mailrow.ask')]
+  assert.equal(rows().length, 1, 'fixture: one open request row')
+  let finish: () => void = () => {}
+  await inAct(async () => {
+    void submitAsk({ slug: SLUG, nid: farAsk.node, askId: farAsk.id, sections: null },
+      () => new Promise<void>(r => { finish = r }))
+    await flush(4)
+  })
+  assert.equal(rows().length, 0, 'gone on the click, before the server answers')
+  finish()
+  await v.unmount()
+  resetSubmittedAsks()
+})

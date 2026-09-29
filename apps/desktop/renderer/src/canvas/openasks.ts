@@ -20,13 +20,18 @@
 // Both surfaces call this, so they cannot disagree about what is waiting.
 
 import type { AskInfo, TreeNode, TreePayload } from '../types'
+import { askSubmitted } from '../asksubmitted'
 import type { MailRow } from './shared'
 
 export const askIsOpen = (a: AskInfo | undefined | null): boolean =>
   !!a && (a.status === 'open' || a.status === 'pending')
 
 /** The open requests to list, one entry per batched card or unbatched row.
- *  `nodes` is every node of the tree, flattened. */
+ *  `nodes` is every node of the tree, flattened.
+ *
+ *  A card the user has just submitted is not listed (point 31, 2026-09-29:
+ *  it leaves every view on the click, ../asksubmitted). Callers re-render on
+ *  that store with `useSubmittedAsks`. */
 export function openAsks(tree: Pick<TreePayload, 'asks'> | null | undefined,
   nodes: Iterable<TreeNode>): AskInfo[] {
   const out: AskInfo[] = []
@@ -37,7 +42,7 @@ export function openAsks(tree: Pick<TreePayload, 'asks'> | null | undefined,
   for (const a of tree?.asks ?? []) {
     if (askIsOpen(a) && !batched.has(a.node)) out.push(a)
   }
-  return out
+  return out.filter(a => !askSubmitted(a.id))
 }
 
 /** An open or resolved request as a row of the user's mailbox (user ruling
