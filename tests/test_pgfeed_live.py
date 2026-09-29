@@ -211,7 +211,14 @@ class Rt9Live(unittest.TestCase):
         slug = _fresh_org("n1000-slow-answer")
         store.cached_org(slug)                                  # warm
         told: list = []
-        r = self.rig(pgfeed.engine_callback(store.external_change, told.append))
+        self.addCleanup(setattr, pgfeed, "_on_undecided_abort", pgfeed._on_undecided_abort)
+        cb = pgfeed.engine_callback(store.external_change, told.append)
+        # stop() only signals: the listener thread outlives this test until
+        # its next wake, and must not judge (and prune) later tests' commits
+        live = threading.Event()
+        live.set()
+        self.addCleanup(live.clear)
+        r = self.rig(lambda s, v, g: cb(s, v, g) if live.is_set() else None)
         self.assertTrue(_wait(lambda: r.feed.last_seen(slug) == _rev(slug)))
         real = pgfeed.confirm_local
         held: list = []
