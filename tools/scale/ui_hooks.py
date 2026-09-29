@@ -5,6 +5,19 @@ import time
 from urllib.parse import quote
 
 WINDOWS = ("docket", "desk", "attention", "org-chooser")
+# treepace.ts: a same-org tree read starts no sooner than this after the last
+# one finished (max(floor, 2 x its duration), capped). Harness windows are
+# visible, so the renderer's hidden-window gap does not apply.
+TREE_MIN_GAP_S = 1.5
+TREE_MAX_GAP_S = 15.
+
+
+def tree_gap(last, now):
+    """treepace.ts `treeGap` for one org: seconds still to wait, or 0."""
+    if last is None:
+        return 0.
+    at, took = last
+    return max(0., at + min(TREE_MAX_GAP_S, max(TREE_MIN_GAP_S, 2 * took)) - now)
 
 
 @dataclass(frozen=True)
@@ -57,7 +70,9 @@ class HookClock:
         self.busy = False
         self.chat_first = True
         self.last_rev = None
-        self.counts = dict(deduped=0, trailing=0)
+        self.counts = dict(deduped=0, trailing=0, paced=0)
+        self.tree_began = None
+        self.tree_last = None                           # (finished, took) of the last tree read
 
     def event(self, frame, now, watch):
         kind = frame.get("type")
@@ -113,6 +128,14 @@ class HookClock:
                 else:
                     self.counts["deduped"] += 1
                 continue
+            if name == "org_tree":
+                # App's TreeReadPacer: the heartbeat and every frame wait out
+                # the gap; the request is kept, never dropped.
+                if tree_gap(self.tree_last, now) > 0:
+                    self.counts["paced"] += name not in self.pending
+                    self.pending.add(name)
+                    continue
+                self.tree_began = now
             self.active[name] += 1
             self.issued[name] += 1
             if name == "chat":
@@ -120,8 +143,12 @@ class HookClock:
             output.append((replace(h, request_serial=self.issued[name]), at))
         return output
 
-    def complete(self, name, payload=None, request_serial=None):
+    def complete(self, name, payload=None, request_serial=None, now=None):
+        """`now` (seconds on the ready() clock) is when an issued read finished;
+        a tree read given it paces the next one."""
         self.active[name] -= 1
+        if name == "org_tree" and now is not None and self.tree_began is not None:
+            self.tree_last = (now, max(0., now - self.tree_began))
         if name == "chat":
             serial = self.issued[name] if request_serial is None else request_serial
             if serial == self.issued[name]:
@@ -363,8 +390,11 @@ class WindowDriver:
         with self.lock:
             if frame.get("type") == "node_stream" and frame.get("kind") in (
                     "cache_forecast", "mcp_tool_count", "mcp_readiness"):
+                # App's patchedTreeCache fences only the full-tree cache; the
+                # selected tree keeps its ETag (its server moved the runtime
+                # stamp before sending the frame). Dropping it here sent an
+                # unconditional read, a whole 6.9 MB snapshot at N1000.
                 self.cache["org_tree"] = Conditional()
-                self.tree_view.invalidate()
             if self.started:
                 self.clock.event(frame, time.time() - self.started, self.watch)
 
@@ -437,7 +467,7 @@ class WindowDriver:
                 "ms": 0, "late_ms": 0, "total_ms": (time.time() - due) * 1000})
         finally:
             with self.lock:
-                self.clock.complete(hook.name, None, hook.request_serial)
+                self.clock.complete(hook.name, None, hook.request_serial, time.time() - self.started)
 
     def fetch(self, hook, due):
         if hook.name == "org_tree":

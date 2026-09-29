@@ -68,6 +68,8 @@ import type { HostIdentity } from './accountidentity'
 import { groupByProvider } from './usagegroups'
 import { bumpLive } from './livebus'
 import { newSync, onBase, onFrame, resetSync } from './treesync'
+import { TreeReadPacer } from './treepace'
+import type { TreeRequest } from './treepace'
 import { AgentNavProvider, agentNavProps } from './canvas/agentnav'
 import { AudienceFold, ConfirmModal, MailFolders, MailList, OrgCanvas, OrgRecord, RetiredFold } from './Canvas'
 import { KillSwitch } from './KillSwitch'
@@ -717,83 +719,80 @@ export default function App() {
   // a different organization is a different identity: its predecessor's
   // success certifies nothing about it
   useEffect(() => { setTreeRead({ at: null, error: null }) }, [slug])
-  const treeBusy = useRef(false)
-  const treePending = useRef<string | null>(null)
   // …and the slug the app actually wants right now, for the guard below.
   // A ref rather than a dep so coalescing never re-creates this callback
   // (which would restart the heartbeat interval on every org switch).
   const wantSlug = useRef(slug)
   useEffect(() => { wantSlug.current = slug }, [slug])
-  const refreshTree = useCallback((s: string | null) => {
-    if (!s) return
-    if (treeBusy.current) { treePending.current = s; return }
-    const run = (want: string) => {
-      treeBusy.current = true
-      // THE SELECTED TREE: what mounted surfaces registered, or — before any
-      // registers — what the saved windows, pins and piles will need. An
-      // answer for a selection that changed in flight is still one coherent
-      // snapshot, so it is applied; one trailing read then catches up.
-      // Rejecting it instead would starve the tree while the camera moves.
-      const { version, selection } = treeSelections.read(want, savedTreeSelection(want))
-      getAppTree(want, selection).then((t) => {
-        if (treeSelections.version(want) !== version && !treePending.current) treePending.current = want
-        // ⚠ an ORG SWITCH mid-flight: this payload is the PREVIOUS org's
-        // tree and painting it would show the old org under the new org's
-        // header until the next poll. Not new caution — before coalescing,
-        // the two fetches raced and the loser was whichever the network
-        // happened to settle last, so the stale one could win. Now the
-        // ordering is deterministic and the stale one is simply not applied;
-        // the switch has already queued its own fetch as `pending`.
-        //
-        // BASE+PATCH RECONCILE (2026-09-19, treesync.ts): the fetched body
-        // is ALWAYS applied — the old wholesale-discard resolved null when
-        // a fetch raced any ws patch invalidation, and under a working
-        // swarm's continuous patch traffic every bounded attempt raced
-        // one, refreshes starved, and lifecycle state sat visibly stale
-        // for over a minute while the backend was already correct. Any
-        // buffered patch frames NEWER than the body's sync_rev replay in
-        // rev order onto its metadata snapshots before desks are notified.
-        // The structural body is applied by reference, so an unchanged 304
-        // keeps React's Object.is render bail even during metadata traffic.
-        // ⚠ THE SAME APPLICABILITY TEST THAT DECIDES WHETHER TO PAINT IT IS
-        // WHAT CERTIFIES IT. A null body, or one for the organization we have
-        // since left, is not evidence about the tree on screen — so it must
-        // not refresh the freshness stamp either. A 304 that yields the
-        // applicable cached body IS a successful revalidation and does.
-        if (t && wantSlug.current === want) {
-          const replay = onBase(syncRef.current,
-            (t as TreePayload & { sync_rev?: number }).sync_rev)
-          replaceNodeMetadata(want, t.roots,
-            replay as Extract<WsEvent, { type: 'node_stream' }>[])
-          setTree(t)
-          setTreeRead({ at: Date.now(), error: null })
-        }
-        fetchOk()
-      }).catch((e: Error) => {
-        // a LATE failure for an organization we have left says nothing about
-        // the one we are looking at now
-        if (wantSlug.current === want) {
-          setTreeRead((r) => ({ ...r, error: e.message || 'unavailable' }))
-        }
-        fetchErr(e)
-      }).finally(() => {
-        treeBusy.current = false
-        const next = treePending.current
-        treePending.current = null
-        if (next) run(next)
-      })
-    }
-    run(s)
-  }, [fetchOk, fetchErr])
+  // One read in flight, one trailing read, and a gap after a read of the same
+  // org (treepace.ts: at N1000 the trailing read otherwise ran back to back).
+  const readTree = useRef<(want: string) => Promise<unknown>>(() => Promise.resolve())
+  const treePacer = useRef<TreeReadPacer | null>(null)
+  treePacer.current ??= new TreeReadPacer(want => readTree.current(want))
+  useEffect(() => () => treePacer.current?.dispose(), [])
+  const refreshTree = useCallback((s: string | null, how?: TreeRequest) => {
+    if (s) treePacer.current!.request(s, how)
+  }, [])
+  readTree.current = (want: string) => {
+    // THE SELECTED TREE: what mounted surfaces registered, or — before any
+    // registers — what the saved windows, pins and piles will need. An
+    // answer for a selection that changed in flight is still one coherent
+    // snapshot, so it is applied; one trailing read then catches up.
+    // Rejecting it instead would starve the tree while the camera moves.
+    const { version, selection } = treeSelections.read(want, savedTreeSelection(want))
+    return getAppTree(want, selection).then((t) => {
+      if (treeSelections.version(want) !== version) refreshTree(want, { urgent: true, keep: true })
+      // ⚠ an ORG SWITCH mid-flight: this payload is the PREVIOUS org's
+      // tree and painting it would show the old org under the new org's
+      // header until the next poll. Not new caution — before coalescing,
+      // the two fetches raced and the loser was whichever the network
+      // happened to settle last, so the stale one could win. Now the
+      // ordering is deterministic and the stale one is simply not applied;
+      // the switch has already queued its own fetch as `pending`.
+      //
+      // BASE+PATCH RECONCILE (2026-09-19, treesync.ts): the fetched body
+      // is ALWAYS applied — the old wholesale-discard resolved null when
+      // a fetch raced any ws patch invalidation, and under a working
+      // swarm's continuous patch traffic every bounded attempt raced
+      // one, refreshes starved, and lifecycle state sat visibly stale
+      // for over a minute while the backend was already correct. Any
+      // buffered patch frames NEWER than the body's sync_rev replay in
+      // rev order onto its metadata snapshots before desks are notified.
+      // The structural body is applied by reference, so an unchanged 304
+      // keeps React's Object.is render bail even during metadata traffic.
+      // ⚠ THE SAME APPLICABILITY TEST THAT DECIDES WHETHER TO PAINT IT IS
+      // WHAT CERTIFIES IT. A null body, or one for the organization we have
+      // since left, is not evidence about the tree on screen — so it must
+      // not refresh the freshness stamp either. A 304 that yields the
+      // applicable cached body IS a successful revalidation and does.
+      if (t && wantSlug.current === want) {
+        const replay = onBase(syncRef.current,
+          (t as TreePayload & { sync_rev?: number }).sync_rev)
+        replaceNodeMetadata(want, t.roots,
+          replay as Extract<WsEvent, { type: 'node_stream' }>[])
+        setTree(t)
+        setTreeRead({ at: Date.now(), error: null })
+      }
+      fetchOk()
+    }).catch((e: Error) => {
+      // a LATE failure for an organization we have left says nothing about
+      // the one we are looking at now
+      if (wantSlug.current === want) {
+        setTreeRead((r) => ({ ...r, error: e.message || 'unavailable' }))
+      }
+      fetchErr(e)
+    })
+  }
   // A mounted surface changing what it needs (a picker, a pin, a pending
   // jump) asks for the tree again. Debounced: camera focus moves publish
   // often, and the coalescing above already allows only one read in flight.
+  // Urgent: the user is waiting on it, so it skips the pacer's gap.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null
     const off = treeSelections.subscribe((org) => {
       if (org !== wantSlug.current) return
       if (timer) clearTimeout(timer)
-      timer = setTimeout(() => { timer = null; refreshTree(org) }, 150)
+      timer = setTimeout(() => { timer = null; refreshTree(org, { urgent: true }) }, 150)
     })
     return () => { off(); if (timer) clearTimeout(timer) }
   }, [refreshTree])
@@ -843,7 +842,7 @@ export default function App() {
     }
     const t = setInterval(tick, TREE_POLL_MS)
     const onVisible = () => {
-      if (!document.hidden) { last = Date.now(); refreshTree(slug) }
+      if (!document.hidden) { last = Date.now(); refreshTree(slug, { urgent: true }) }
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => {

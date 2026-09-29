@@ -107,6 +107,38 @@ class ControllerControls(unittest.TestCase):
         self.assertEqual([h.name for h, _ in clock.ready(.15)], ["org_tree"])
         self.assertEqual(clock.ready(.16), [])
 
+    def settled_tree_clock(self, finished):
+        """Window 0 after its first round, the tree read issued at 0 having
+        finished at `finished` (App's pacer measures from there)."""
+        clock = HookClock(hooks("test", "worker", 0))
+        for h, _ in clock.ready(0):
+            clock.complete(h.name, now=finished if h.name == "org_tree" else None)
+        return clock
+
+    def tree_reads(self, clock, times):
+        issued = []
+        for t in times:
+            for h, _ in clock.ready(t):
+                if h.name == "org_tree":
+                    issued.append(t)
+                    clock.complete("org_tree", now=t + .1)
+                else:
+                    clock.complete(h.name)
+        return issued
+
+    def test_tree_frames_wait_the_gap_after_the_last_read_and_are_never_dropped(self):
+        clock = self.settled_tree_clock(.1)             # took .1 s: the 1.5 s floor
+        for i in range(20):                             # a busy org: a frame every 50 ms
+            clock.event({"type": "changed"}, .2 + i * .05, "worker")
+        issued = self.tree_reads(clock, [round(.2 + i * .01, 2) for i in range(141)])
+        self.assertEqual(issued, [1.6], "twenty frames, one read, exactly at the gap")
+        self.assertGreaterEqual(clock.counts["paced"], 1)
+
+    def test_a_slow_tree_read_doubles_the_gap_and_the_heartbeat_waits_too(self):
+        clock = self.settled_tree_clock(3.)             # took 3 s: wait 6 s, until 9
+        issued = self.tree_reads(clock, [round(3 + i * .05, 2) for i in range(141)])
+        self.assertEqual(issued, [9.0], "the 6 s heartbeat is held until the gap ends")
+
     def test_stream_is_not_busy_chat_or_tree_demand(self):
         clock = HookClock(hooks("test", "worker", 1))
         for h, _ in clock.ready(0):

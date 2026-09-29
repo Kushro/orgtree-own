@@ -154,6 +154,18 @@ class ForegroundTreeControls(unittest.TestCase):
         self.assertIn("boundary", rows[-1][1]["err"])
         self.assertEqual(driver.clock.active["org_tree"], 0)
 
+    def test_a_metadata_frame_keeps_the_selected_trees_etag(self):
+        # App's patchedTreeCache fences only the full-tree cache. Dropping the
+        # selected tree's ETag here made every read after a cache_forecast or
+        # MCP frame an unconditional 6.9 MB snapshot at N1000 (attempt 9).
+        driver, sent = self.driver_with(lambda url: reply(200, snapshot(), "e1") if not sent[:-1]
+                                        else reply(304, headers={"x-orgtree-catalog-rev": "c1"}))
+        self.read(driver, 1)
+        for kind in ("cache_forecast", "mcp_tool_count", "mcp_readiness"):
+            driver.event(dict(type="node_stream", node="worker", kind=kind))
+        self.read(driver, 1)
+        self.assertEqual([etag for _, etag in sent], [None, "e1"])
+
 
 if __name__ == "__main__":
     unittest.main()
