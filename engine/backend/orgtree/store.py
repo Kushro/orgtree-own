@@ -8683,6 +8683,26 @@ def _resident_dirty(d: LazyDoc) -> list[str]:
     return dirty
 
 
+def split_blobs(d: LazyDoc) -> list[str]:
+    """Split sections still stored as one pre-split whole-section blob that
+    the next save WOULD turn into rows. Nothing converts them until a save
+    re-serializes the key, and the import (tools/pypg/pgimport.py) copies
+    rows as they are, so an org idle since before PG-3d keeps its blobs;
+    the conversion then rewrites the container row, which an owner-scoped
+    org_tx (`sections=[("notices", nid)]`) never locks. `orgtx` converts
+    them in its load-heal first. A blob that is not a dict of lists stays
+    one row and is not listed: saving it changes nothing."""
+    out: list[str] = []
+    for k in sorted(SPLIT_SECTIONS):
+        raw = d._snap_doc.get(k)
+        if raw is None or raw == "{}" or not dict.__contains__(d, k):
+            continue
+        v = dict.__getitem__(d, k)
+        if isinstance(v, dict) and all(isinstance(x, list) for x in dict.values(v)):
+            out.append(k)
+    return out
+
+
 def org_slugs() -> list[str]:
     """Every org's slug, for a hot loop that reads its own few rows per org
     and needs nothing from the listing row (scale, hot-paths-off-full-org-

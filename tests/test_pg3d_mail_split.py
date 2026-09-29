@@ -175,6 +175,64 @@ class SplitStorage(unittest.TestCase):
         self.assertIn(('section', 'notices'), cm.exception.rows)
         self.assertEqual(_doc_rows(self.slug), before)
 
+    def _set_notices_blob(self, blob) -> None:
+        with store._POOL.acquire(self.slug) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM doc WHERE substr(key,1,8)=?", ('notices' + SEP,))
+            conn.execute("UPDATE doc SET val=? WHERE key='notices'", (json.dumps(blob),))
+            conn.execute("COMMIT")
+        store._resident.pop(self.slug, None)
+        store._publish_changes_unknown(self.slug)
+
+    def test_owner_lock_on_a_pre_split_blob_converts_it_first(self) -> None:
+        """An org imported from v2 and idle since keeps its whole-section
+        blob; the first owner-scoped write used to fail with "wrote rows it
+        did not lock: section 'notices'" (the live maurdekye-works turn)."""
+        for blob in ({'a': [{'text': 'old'}]},                 # the live shape: one owner
+                     {'a': [{'text': 'old'}], 'b': []},
+                     {'b': [{'text': 'other'}]}):              # the owner is new
+            with self.subTest(blob=blob):
+                self._set_notices_blob(blob)
+                with orgtx.org_tx(self.slug, sections=[('notices', 'a')]) as tx:
+                    tx.d['notices'].setdefault('a', []).append({'text': 'new'})
+                rows = _doc_rows(self.slug)
+                self.assertEqual(rows['notices'], '{}')
+                want = {**blob, 'a': [*blob.get('a', []), {'text': 'new'}]}
+                for owner, box in want.items():
+                    self.assertEqual(json.loads(rows['notices' + SEP + owner]), box)
+                self.assertEqual(dict(store.load_org(self.slug).d['notices']), want)
+
+    def test_every_split_section_blob_is_converted_before_an_owner_lock(self) -> None:
+        for sect in ('mail', 'delivering', 'notices'):
+            with self.subTest(sect=sect):
+                with store._POOL.acquire(self.slug) as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("DELETE FROM doc WHERE substr(key,1,?)=?",
+                                 (len(sect) + 1, sect + SEP))
+                    conn.execute("UPDATE doc SET val=? WHERE key=?",
+                                 (json.dumps({'a': [{'id': 'old'}]}), sect))
+                    conn.execute("COMMIT")
+                store._resident.pop(self.slug, None)
+                store._publish_changes_unknown(self.slug)
+                with orgtx.org_tx(self.slug, sections=[(sect, 'a')]) as tx:
+                    tx.d[sect]['a'].append({'id': 'new'})
+                rows = _doc_rows(self.slug)
+                self.assertEqual(rows[sect], '{}')
+                self.assertEqual(json.loads(rows[sect + SEP + 'a']),
+                                 [{'id': 'old'}, {'id': 'new'}])
+
+    def test_control_a_blob_that_is_not_a_dict_of_lists_is_left_alone(self) -> None:
+        """It cannot be split (it stays one row), so there is nothing to
+        heal: an owner-scoped write to it is still refused, nothing lands."""
+        self._set_notices_blob({'a': [{'text': 'old'}], 'b': None})
+        before = _doc_rows(self.slug)
+        self.assertEqual(store.split_blobs(store.load_org(self.slug).d), [])
+        with self.assertRaises(orgtx.UnlockedWrite) as cm:
+            with orgtx.org_tx(self.slug, sections=[('notices', 'a')]) as tx:
+                tx.d['notices']['a'].append({'text': 'new'})
+        self.assertIn(('section', 'notices'), cm.exception.rows)
+        self.assertEqual(_doc_rows(self.slug), before)
+
     def test_bad_names_refused(self) -> None:
         for bad in ([('events', 'a')], [('mail',)], ['mail' + SEP + 'a'], [('mail', '')]):
             with self.assertRaises(ValueError, msg=repr(bad)):

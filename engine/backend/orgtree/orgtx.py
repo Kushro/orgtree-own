@@ -553,6 +553,10 @@ def _heal_rows(org: Org) -> list[str]:
         return []
     rows = store._resident_dirty(d)                # pyright: ignore[reportPrivateUsage]
     rows += [f"{k} (append)" for k, v in d._pending.items() if v]   # pyright: ignore[reportPrivateUsage]
+    # a pre-split blob: the body's save would rewrite its container row,
+    # unlocked under an owner-scoped lock (v3-user-message-to-an-agent-in-
+    # maurdekye-works-f: "wrote rows it did not lock: section 'notices'")
+    rows += [f"{k} (pre-split blob)" for k in store.split_blobs(d)]
     return rows
 
 
@@ -591,6 +595,11 @@ def _heal(slug: str) -> None:
     with org_exclusive(slug):
         org = store._load_sqlite_org(slug)          # pyright: ignore[reportPrivateUsage]
         if _heal_rows(org):
+            # an untouched key keeps its stored rows; mark each blob so the
+            # save re-serializes it as container + owner rows
+            d = org.d
+            if isinstance(d, store.LazyDoc):
+                d._touched.update(store.split_blobs(d))   # pyright: ignore[reportPrivateUsage]
             store._save_org(org)                    # pyright: ignore[reportPrivateUsage]
 
 
