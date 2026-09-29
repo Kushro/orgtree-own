@@ -18,6 +18,7 @@
 // Run:  node apps/desktop/renderer/tests/run.mjs shellviews
 import { advance, flush, inAct, mountView, realClock, useFakeClock } from './harness'
 import test from 'node:test'
+import React from 'react'
 import assert from 'node:assert/strict'
 import { OrgtreeMenu } from '../src/shell/menu'
 import { HomepageView } from '../src/shell/homepage'
@@ -25,6 +26,9 @@ import { CreateOrgView, creationDirty } from '../src/shell/createorg'
 import { openOrgEffect, refusalText } from '../src/shell/openorg'
 import { OrgViewToggle } from '../src/shell/modetoggle'
 import { OrgStatusBar } from '../src/shell/statusbar'
+import { ShellAction, ShellHeader } from '../src/shell/header'
+import { DocketToolbarButton } from '../src/canvas/docket'
+import { AskBell } from '../src/App'
 import { useOpenOrgs } from '../src/shell/openorgs'
 import { installBridge, removeBridge, typeInto } from './shellbridge'
 import type { OrgListEntry, TreePayload } from '../src/types'
@@ -67,7 +71,7 @@ async function menu(over: Partial<Parameters<typeof OrgtreeMenu>[0]> = {}) {
   const calls: string[] = []
   const view = await mountView(
     <OrgtreeMenu orgs={ORGS} freshness="current" ageMs={0} error={null}
-      currentOrg={null} appVersion="3.0.0-alpha.0"
+      currentOrg={null}
       onOpenOrg={(s) => calls.push('open:' + s)}
       onNewWindow={() => calls.push('new-window')}
       onCreateOrg={() => calls.push('create')}
@@ -85,9 +89,13 @@ test('the menu carries every route the removed sidebar did, Usage included', asy
   try {
     await inAct(async () => { m.view.el.querySelector<HTMLElement>('.shell-menu-button')!.click() })
     for (const label of ['New window', 'Open organization', 'Create new organization',
-      'Usage', 'App settings', 'About Orgtree']) {
+      'Usage', 'App settings']) {
       assert.ok(m.item(label), `the menu offers "${label}"`)
     }
+    // user 2026-09-29: "About Orgtree" only opened App settings, which the
+    // entry above already does, so it is gone; the version is on screen
+    // without a click instead (see section 6)
+    assert.equal(m.item('About'), undefined, 'no About entry')
     // ⚠ Usage and App settings are here because Homepage and Create windows
     // have no header action buttons at all; without them those two windows
     // would silently lose the usage snapshots the shell must preserve.
@@ -98,17 +106,14 @@ test('the menu carries every route the removed sidebar did, Usage included', asy
   } finally { await m.view.unmount() }
 })
 
-test('the About entry shows the REAL running version, and none when there is none', async () => {
-  let m = await menu()
+test('the menu button is an icon with a name, not a word', async () => {
+  const m = await menu()
   try {
-    await inAct(async () => { m.view.el.querySelector<HTMLElement>('.shell-menu-button')!.click() })
-    assert.match(m.item('About Orgtree')!.textContent ?? '', /3\.0\.0-alpha\.0/)
-  } finally { await m.view.unmount() }
-  m = await menu({ appVersion: null })
-  try {
-    await inAct(async () => { m.view.el.querySelector<HTMLElement>('.shell-menu-button')!.click() })
-    assert.equal(m.item('About Orgtree')!.querySelector('.shell-menu-value'), null,
-      'a browser has no packaged version and is given no invented one')
+    const btn = m.view.el.querySelector<HTMLElement>('.shell-menu-button')!
+    assert.equal(btn.textContent?.trim(), '', 'no visible text on the button')
+    assert.equal(btn.getAttribute('aria-label'), 'Orgtree menu')
+    assert.equal(btn.getAttribute('title'), 'Orgtree menu', 'the tooltip names it')
+    assert.ok(btn.querySelector('svg'), 'the icon is what shows')
   } finally { await m.view.unmount() }
 })
 
@@ -322,25 +327,80 @@ test('a successful creation clears the flag before it binds', async () => {
 
 // ----------------------------------------------------- §5 the mode toggle
 
-test('the toggle is a radio group with both labels always visible', async () => {
+test('the view switch shows ONE word, the current view, and flips on click', async () => {
   const picked: string[] = []
+  function Host() {
+    const [m, setM] = React.useState<'canvas' | 'attention'>('canvas')
+    return <OrgViewToggle mode={m} setMode={(next) => { picked.push(next); setM(next) }} />
+  }
+  const view = await mountView(<Host />, (el) => el)
+  try {
+    const sw = () => view.el.querySelector<HTMLElement>('[role="switch"]')!
+    assert.equal(view.el.querySelectorAll('[role="switch"]').length, 1, 'one control, not two')
+    assert.equal(view.el.querySelectorAll('[role="radio"]').length, 0)
+    const word = () => sw().querySelector('.shell-switch-word')!.textContent
+    const icon = () => sw().querySelector('.shell-switch-knob svg')?.getAttribute('data-testid')
+    assert.equal(word(), 'Canvas', 'only the current view is named')
+    assert.doesNotMatch(sw().textContent ?? '', /Attention/, 'the other view is not shown')
+    assert.equal(sw().getAttribute('aria-checked'), 'false')
+    assert.equal(sw().getAttribute('aria-label'), 'Attention view')
+    const canvasIcon = icon()
+    assert.ok(canvasIcon, 'the knob carries an icon')
+    await inAct(async () => { sw().click() })
+    assert.deepEqual(picked, ['attention'])
+    assert.equal(word(), 'Attention')
+    assert.doesNotMatch(sw().textContent ?? '', /Canvas/)
+    assert.equal(sw().getAttribute('aria-checked'), 'true')
+    assert.ok(sw().classList.contains('on'), 'the knob moves to the other end')
+    assert.notEqual(icon(), canvasIcon, 'the knob icon swaps with the view')
+    await inAct(async () => { sw().click() })
+    assert.deepEqual(picked, ['attention', 'canvas'], 'a click flips it back')
+    // the arrow keys pick a side, and picking the current side is not a change
+    await inAct(async () => {
+      sw().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
+    })
+    assert.deepEqual(picked, ['attention', 'canvas'])
+    await inAct(async () => {
+      sw().dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    })
+    assert.deepEqual(picked, ['attention', 'canvas', 'attention'])
+  } finally { await view.unmount() }
+})
+
+// ------------------------------------------------ §5b the header buttons
+
+test('header actions are icons with names and badges, and the killswitch sits left of them', async () => {
+  const tree = { asks_open: 0, urgent_unread: 0, user_inbox_count: 4 }
   const view = await mountView(
-    <OrgViewToggle mode="canvas" setMode={(m) => picked.push(m)} />,
+    <ShellHeader menu={<span className="m" />} title="Studio"
+      actions={<>
+        <DocketToolbarButton label="Work" summary={{ attention: 0, active: 7 }} onClick={() => {}} />
+        <AskBell tree={tree} label="Inbox" onOpen={() => {}} />
+        <ShellAction label="Presentations" icon={<svg />} badge={<b className="eye-count">3</b>}
+          onClick={() => {}} />
+        <ShellAction label="Org settings" icon={<svg />} onClick={() => {}} />
+      </>}
+      guard={<span className="kill"><button type="button" className="kill-latch">L</button></span>} />,
     (el) => el)
   try {
-    const radios = [...view.el.querySelectorAll('[role="radio"]')]
-    assert.deepEqual(radios.map((r) => r.textContent), ['Canvas', 'Attention'])
-    assert.equal(radios[0]!.getAttribute('aria-checked'), 'true')
-    // ⚠ NO "not available in this build yet" HEDGE ANY MORE. It shipped while
-    // the toggle led nowhere; the Attention view is now rendered into the
-    // canvas host's slot, so both radios have a destination and a control that
-    // still hedged about one of them would be lying.
-    assert.equal(radios[1]!.getAttribute('title'), null,
-      'a real destination needs no apology in its tooltip')
-    await inAct(async () => { (radios[1] as HTMLElement).click() })
-    assert.deepEqual(picked, ['attention'])
-    await inAct(async () => { (radios[0] as HTMLElement).click() })
-    assert.deepEqual(picked, ['attention'], 'choosing the current mode is not a change')
+    const buttons = [...view.el.querySelectorAll<HTMLElement>('.shell-header-actions > button')]
+    assert.deepEqual(buttons.map((b) => b.getAttribute('aria-label')),
+      ['Work', 'Inbox', 'Presentations', 'Org settings'], 'every button is named')
+    // the only text a button may show is its count badge
+    const shown = buttons.map((b) => {
+      const clone = b.cloneNode(true) as HTMLElement
+      clone.querySelectorAll('.eye-count').forEach((c) => c.remove())
+      return clone.textContent?.trim()
+    })
+    assert.deepEqual(shown, ['', '', '', ''], 'no words on the buttons')
+    assert.deepEqual(buttons.map((b) => b.querySelector('.eye-count')?.textContent ?? null),
+      ['7', '4', '3', null], 'the same badge wherever a count applies')
+    assert.equal(view.el.querySelector('.shell-action-label'), null)
+    const guard = view.el.querySelector('.shell-header-guard')!
+    assert.ok(guard.querySelector('.kill'), 'the killswitch has its own slot')
+    assert.equal(guard.closest('.shell-header-actions'), null, 'outside the button row')
+    assert.equal(guard.nextElementSibling?.className, 'shell-header-actions',
+      'immediately LEFT of the row, so expanding it never moves the row')
   } finally { await view.unmount() }
 })
 
@@ -372,7 +432,30 @@ test('the strip carries the chip run with its click-through, and pins the error'
     const err = view.el.querySelector('.shell-statusbar-error')!
     assert.equal(err.getAttribute('role'), 'alert')
     assert.equal(err.closest('.shell-statusbar-chips'), null)
+    assert.equal(view.el.querySelector('.shell-version'), null,
+      'no version given, none shown - a browser has no packaged version')
   } finally { await view.unmount() }
+})
+
+test('the running version is on screen without a click: status strip, or Home header', async () => {
+  const strip = await mountView(
+    <OrgStatusBar tree={TREE} orgs={[]} error={null} appVersion="3.0.0-alpha.0"
+      onOpenConnections={() => {}} />,
+    (el) => el)
+  try {
+    const v = strip.el.querySelector('.shell-version')!
+    assert.equal(v.textContent, 'Orgtree 3.0.0-alpha.0')
+    assert.equal(v.closest('.shell-statusbar-chips'), null, 'pinned, not in the scrolling run')
+  } finally { await strip.unmount() }
+  const home = await mountView(
+    <ShellHeader menu={<span />} title="Home" version="3.0.0-alpha.0" />, (el) => el)
+  try {
+    assert.equal(home.el.querySelector('.shell-version')?.textContent, 'Orgtree 3.0.0-alpha.0')
+  } finally { await home.unmount() }
+  const none = await mountView(<ShellHeader menu={<span />} title="Home" version={null} />, (el) => el)
+  try {
+    assert.equal(none.el.querySelector('.shell-version'), null)
+  } finally { await none.unmount() }
 })
 
 // ------------------------------------------------- §7 which orgs are open

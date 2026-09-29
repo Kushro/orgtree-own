@@ -1,7 +1,7 @@
 """The real App's v3 window chrome in Chromium: screenshots and geometry.
 
     node apps/desktop/renderer/tests/appchrome-build.mjs <bundle>
-    python -B apps/desktop/renderer/tests/appchrome_probe.py <bundle> <outdir>
+    python -B apps/desktop/renderer/tests/appchrome_probe.py <bundle> <outdir> [--check]
 
 Writes <outdir>/chrome-*.png and <outdir>/chrome.json. Reports numbers only;
 it asserts that the fixture actually mounted (a header and a status strip
@@ -125,3 +125,49 @@ finally:
 print(json.dumps({k: {kk: v.get(kk) for kk in ('header', 'statusbar', 'mainPadding', 'close', 'modesText', 'kill')}
                   for k, v in result['cases'].items()}, indent=1))
 print('errors', result['errors'][:5])
+
+# --check: assert the settled chrome (user 2026-09-29) instead of only
+# recording it. Run it against the tip; the base fails it by design.
+if '--check' in sys.argv:
+    bad = []
+    cases = result['cases']
+    for name, c in cases.items():
+        if name == 'armed-before':
+            continue
+        w, h = c['viewport']['w'], c['viewport']['h']
+        hd, cl = c['header'], c['close']
+        if not hd or abs(hd['top']) > .5 or abs(hd['left']) > .5 or abs(hd['right'] - w) > .5:
+            bad.append((name, 'header not flush with the top and sides', hd))
+        if not cl or abs(cl['top']) > .5 or abs(cl['right'] - w) > .5:
+            bad.append((name, 'Close is not in the top-right corner', cl))
+        sb = c['statusbar']
+        if name != 'home' and (not sb or abs(sb['bottom'] - h) > .5 or abs(sb['left']) > .5 or abs(sb['right'] - w) > .5):
+            bad.append((name, 'status strip not flush with the bottom and sides', sb))
+        if hd and hd['height'] > 40:
+            bad.append((name, 'header wrapped', hd['height']))
+        for b in c['buttons']:
+            label = (b['aria'] or '')
+            if label in ('Orgtree menu', 'Work', 'Inbox', 'Presentations', 'Org settings'):
+                if not b['text'].replace(' ', '').isdigit() and b['text'] != '':
+                    bad.append((name, 'a header button shows a word', label, b['text']))
+        if name != 'home' and c['modesText'] not in ('Canvas', 'Attention'):
+            bad.append((name, 'the view switch does not show exactly one word', c['modesText']))
+        if not c['version']:
+            bad.append((name, 'no visible version'))
+    frame = {(b['border'], b['background'], round(b['rect']['width']), round(b['rect']['height']))
+             for b in cases['canvas']['buttons']
+             if (b['aria'] or '') in ('Orgtree menu', 'Work', 'Inbox', 'Presentations', 'Org settings')}
+    if len(frame) != 1:
+        bad.append(('canvas', 'header buttons are not one uniform frame', frame))
+    def lefts(c):
+        return {b['aria']: round(b['rect']['left']) for b in c['buttons'] if b['aria'] in ('Work', 'Inbox', 'Presentations', 'Org settings')}
+    if lefts(cases['canvas']) != lefts(cases['armed']):
+        bad.append(('armed', 'arming the killswitch moved the buttons', lefts(cases['canvas']), lefts(cases['armed'])))
+    if lefts(cases['armed-before']) != lefts(cases['min-armed']):
+        bad.append(('min-armed', 'arming at 640px moved the buttons', lefts(cases['armed-before']), lefts(cases['min-armed'])))
+    if cases['attention']['modesText'] != 'Attention':
+        bad.append(('attention', 'switch did not show Attention'))
+    if any('About' in t for t in cases['menu'].get('menuItems', [])):
+        bad.append(('menu', 'About entry still present'))
+    print('CHECK', 'FAIL' if bad else 'PASS', json.dumps(bad, default=str)[:3000])
+    sys.exit(1 if bad else 0)
