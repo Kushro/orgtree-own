@@ -317,6 +317,22 @@ class ForegroundCache(unittest.TestCase):
         self.assertEqual(json.loads(body)['kind'], 'delta')
         self.assertEqual(self.builds, 1)
 
+    def test_a_full_rebuild_shares_the_rows_it_did_not_change(self):
+        org = store.load_org(self.slug)
+        org.hire(ledger.USER, 'boss', 'luna', 0, 'bystander', charter='Unchanging text. ' * 200)
+        store.save_org(org)
+        tag, _, _ = self.read()
+        org = store.load_org(self.slug)
+        org.nodes['boss']['charter'] = 'A charter change rebuilds the foreground'
+        store.save_org(org)
+        _, body, _ = self.read(tag)
+        self.assertEqual(self.builds, 2)
+        self.assertEqual(json.loads(body)['kind'], 'delta')
+        (entry,) = [e for k, e in cache._cache.items() if k[1] == self.slug]
+        old, new = entry['versions'].values()
+        self.assertIs(old['nodes']['bystander'], new['nodes']['bystander'])
+        self.assertIsNot(old['nodes']['boss'], new['nodes']['boss'])
+
     def test_an_entry_over_budget_on_its_own_survives_its_read_minus_old_bases(self):
         tag, _, _ = self.read()
         self.status('second')
