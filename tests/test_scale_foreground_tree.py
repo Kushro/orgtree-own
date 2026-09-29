@@ -128,7 +128,7 @@ class ForegroundTreeControls(unittest.TestCase):
         driver, sent = self.driver_with(lambda url: reply(404, {"detail": "none"}) if "foreground" in url
                                         else reply(200, {"roots": []}, "L1"))
         self.read(driver, 3)
-        self.assertEqual(sent, [(BASE, None), (legacy, None), (legacy, None), (legacy, "L1")])
+        self.assertEqual(sent, [(BASE + "?" + PILES, None), (legacy, None), (legacy, None), (legacy, "L1")])
 
     def test_two_resets_fall_back_after_exactly_two_foreground_reads(self):
         server = Server({BASE: [reply(409, {"kind": "reset"}), reply(409, {"kind": "reset"})]})
@@ -150,7 +150,7 @@ class ForegroundTreeControls(unittest.TestCase):
             driver.fetch(driver.clock.specs["org_tree"], 1)
         finally:
             driver.pool.shutdown()
-        self.assertEqual([r["url"] for _, r in rows], [BASE, "<tree read>"])
+        self.assertEqual([r["url"] for _, r in rows], [BASE + "?" + PILES, "<tree read>"])
         self.assertIn("boundary", rows[-1][1]["err"])
         self.assertEqual(driver.clock.active["org_tree"], 0)
 

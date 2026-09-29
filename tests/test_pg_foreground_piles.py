@@ -65,7 +65,11 @@ class ForegroundPilesPG(unittest.TestCase):
         for nid in ('x-r1', 'x-r2'):
             org.hire(ledger.USER, 'x', 'luna', 1, nid)
         org.hire(ledger.USER, 'r1', 'luna', 1, 'r1-kid')
-        for nid in ('root-r1', 'root-r2', 'r1', 'r2', 'r3', 'a-r1', 'a-r2', 'a-r3', 'x-r1', 'x-r2', 'r1-kid'):
+        # the default front of boss's pile (its last retiree) holds a pile of
+        # its own, known only after the first round selects it: a second round
+        org.hire(ledger.USER, 'r3', 'luna', 1, 'r3-kid')
+        for nid in ('root-r1', 'root-r2', 'r1', 'r2', 'r3', 'a-r1', 'a-r2', 'a-r3', 'x-r1', 'x-r2',
+                    'r1-kid', 'r3-kid'):
             org.nodes[nid]['state'] = 'archived'
         store.save_org(ledger.Org(copy.deepcopy(org.d)))
         self.client = TestClient(TokenGate(api.app, 'fg-piles'))
@@ -110,7 +114,8 @@ class ForegroundPilesPG(unittest.TestCase):
 
     def same(self, fronts=None, include=(), label=''):
         old, pages = self.paged(include, fronts)
-        new = self.snapshot(include, fronts or {})
+        # the renderer always sends the saved fronts as protected includes too
+        new = self.snapshot(set(include) | set((fronts or {}).values()), fronts or {})
         self.assertGreater(pages, 0, label + ': the old plan paged nothing, so this compares nothing')
         for key in ('roots', 'nodes', 'header', 'catalog_revision'):
             self.assertEqual(new[key], old[key], f'{label}: {key}')
@@ -118,9 +123,9 @@ class ForegroundPilesPG(unittest.TestCase):
 
     def test_one_read_selects_exactly_what_the_paged_plan_selected(self):
         new = self.same(label='default fronts')
-        # the fixed point reached the pile under a pile's front
         self.assertIn('x-r2', new['nodes'])
         self.assertIn('x-r1', new['nodes'])
+        self.assertIn('r3-kid', new['nodes'], 'the fixed point reached the pile under a default front')
         self.assertNotIn('r1-kid', new['nodes'], 'a pile member that is not the front shows no subtree')
 
     def test_saved_fronts_and_a_stale_saved_front(self):
@@ -134,7 +139,8 @@ class ForegroundPilesPG(unittest.TestCase):
 
     def test_hidden_retirees_select_no_piles(self):
         plain = self.snapshot()
-        self.assertFalse(any(row['state'] == 'archived' for row in plain['nodes'].values()))
+        # only live rows and their ancestors (a-r3 holds live x)
+        self.assertEqual({nid for nid, row in plain['nodes'].items() if row['state'] == 'archived'}, {'a-r3'})
 
     def test_warm_piles_answer_equals_a_cold_build_after_writes(self):
         self.snapshot(fronts={})
@@ -159,10 +165,12 @@ class ForegroundPilesPG(unittest.TestCase):
 
     def test_fronts_are_part_of_the_cached_answer(self):
         default = self.snapshot(fronts={})
-        saved = self.snapshot(fronts={'boss': 'r2'})
+        saved = self.snapshot(['r2'], fronts={'boss': 'r2'})
         self.assertNotEqual(set(default['nodes']), set(saved['nodes']))
         self.assertIn('r2', saved['nodes'])
         self.assertNotIn('r2', default['nodes'])
+        self.assertIn('r3', default['nodes'])
+        self.assertNotIn('r3', saved['nodes'], 'a valid saved front replaces the default front')
 
     def test_bad_fronts_are_refused(self):
         for suffix in ('?piles=1&fronts=%5B%5D', '?piles=1&fronts=nope', '?fronts=%7B%7D',
