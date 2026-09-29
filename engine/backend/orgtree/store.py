@@ -6732,12 +6732,105 @@ def _load_sqlite_org(slug: str, preload: Iterable[str] = (), *,
         raise LedgerError(f"cannot open org {slug!r}: {e}") from e
 
 
+#: sections a pre-row-storage org can still hold as `doc` blobs; the bounded
+#: document reads below serve rows only and leave those orgs to `load_org`
+_DOCUMENT_BLOB_SQL = ("SELECT key FROM doc WHERE key IN ('documents','events','nodes') "
+                      "LIMIT 1")
+
+
+def _pg_document_read(slug: str, body: Callable[[Any], Any]) -> Any:
+    """`_bounded_read` for the presentation reads, or None when only the
+    whole-document path is exact: not PostgreSQL, a transaction pinned on this
+    org on this thread (its uncommitted writes live on that connection), or a
+    section still held as a blob."""
+    if STORE_BACKEND != "postgres":
+        return None
+    if (getattr(_orgtx_local, "pinned", None) or {}).get(_safe_slug(slug)) is not None:
+        return None
+
+    def guarded(conn: Any) -> Any:
+        if conn.execute(_DOCUMENT_BLOB_SQL).fetchone():
+            return None
+        return body(conn)
+    return _bounded_read(slug, guarded)
+
+
+def _pg_document_gallery(slug: str) -> list[dict[str, Any]] | None:
+    """`Org.document_gallery()` on PostgreSQL without loading the org.
+
+    Presentations used to open through `load_org` here: 410-450 ms and 40 MB
+    read per open on a copy of the live org (all 48,877 event rows, every
+    node, every body). This reads the document rows minus their bodies, the
+    `present_evicted` events (a text prefilter, then the exact `op` check)
+    with their positions in the events list, and only the presenters' nodes,
+    in one snapshot, and hands them to the same `Org.gallery_metadata`."""
+    def body(conn: Any) -> list[dict[str, Any]]:
+        documents = [json.loads(row[0]) for row in conn.execute(
+            f"SELECT (val::jsonb - 'body')::text FROM log_l WHERE {_SECT_RANGE} ORDER BY seq",
+            ("documents", "documents"))]
+        candidates = [(int(seq), json.loads(val)) for seq, val in conn.execute(
+            f"SELECT seq, val FROM log_l WHERE {_SECT_RANGE} "
+            "AND strpos(val, 'present_evicted') > 0 ORDER BY seq", ("events", "events"))]
+        evicted = [(seq, e) for seq, e in candidates
+                   if isinstance(e, dict) and e.get("op") == "present_evicted"]
+        evictions: list[tuple[int, Any]] = []
+        if evicted:
+            # the index an eviction has in the Org's `events` list: its rank
+            # by seq within the section, numbered from the (sect, seq) index
+            # only as far as the last eviction
+            position = dict(conn.execute(
+                "SELECT seq, n FROM (SELECT seq, row_number() OVER (ORDER BY seq) - 1 AS n "
+                f"FROM log_l WHERE {_SECT_RANGE} AND seq <= ?) q WHERE seq = ANY(?)",
+                ("events", "events", evicted[-1][0], [seq for seq, _ in evicted])).fetchall())
+            evictions = [(int(position[seq]), e) for seq, e in evicted]
+        wanted = sorted({str(d.get("node") or "") for d in documents if isinstance(d, dict)}
+                        | {str(e.get("actor") or "") for _, e in evicted})
+        # gallery_metadata reads a node's `state` and `model` and nothing else
+        nodes = {str(nid): json.loads(val) for nid, val in conn.execute(
+            "SELECT id, jsonb_build_object('state', v->'state', 'model', v->'model')::text "
+            "FROM (SELECT id, val::jsonb AS v FROM nodes WHERE id = ANY(?)) q",
+            (wanted,))} if wanted else {}
+        return Org.gallery_metadata(documents, evictions, nodes)
+    return _pg_document_read(slug, body)
+
+
+#: `read_document`: this path cannot answer, load the org instead
+DOCUMENT_READ_FALLBACK = object()
+
+
+def read_document(slug: str, did: str) -> Any:
+    """`(document, presenter node or None)` for one presented document, None
+    when there is no such document, or DOCUMENT_READ_FALLBACK when only
+    `load_org` is exact (see `_pg_document_read`).
+
+    Opening a presentation read the whole org for one body: 160-220 ms and
+    29 MB on a copy of the live org. The document is the first `documents`
+    row with this id, as `api._document_or_404` finds it; the text prefilter
+    only narrows the rows that are decoded."""
+    def body(conn: Any) -> Any:
+        doc = next((d for d in (json.loads(row[0]) for row in conn.execute(
+            f"SELECT val FROM log_l WHERE {_SECT_RANGE} AND strpos(val, ?) > 0 ORDER BY seq",
+            ("documents", "documents", did)))
+            if isinstance(d, dict) and d.get("id") == did), None)
+        if doc is None:
+            return None
+        row = conn.execute("SELECT val FROM nodes WHERE id=?", (str(doc.get("node")),)).fetchone()
+        return doc, (json.loads(row[0]) if row else None)
+    if not did or STORE_BACKEND != "postgres":
+        return DOCUMENT_READ_FALLBACK
+    found = _pg_document_read(slug, lambda conn: [body(conn)])
+    return DOCUMENT_READ_FALLBACK if found is None else found[0]
+
+
 def read_document_gallery(slug: str) -> list[dict[str, Any]]:
     """Project metadata in SQLite; never transfer document bodies or all events.
 
     Node labels, existing cards and legacy eviction stubs share one snapshot.
     Row positions preserve the original equal-timestamp tie ordering.
     """
+    if STORE_BACKEND == "postgres":
+        rows = _pg_document_gallery(slug)
+        return rows if rows is not None else load_org(slug).document_gallery()
     if STORE_BACKEND != "sqlite":
         return load_org(slug).document_gallery()
     slug = _safe_slug(slug)

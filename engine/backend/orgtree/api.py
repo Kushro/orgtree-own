@@ -6771,13 +6771,21 @@ def documents_list(slug: str, offset: int = 0, limit: int = 100, node: str = "",
 @app.get("/api/orgs/{slug}/documents/{did}")
 def document_get(slug: str, did: str) -> dict[str, Any]:
     """FR-03: the reader fetches the BODY on open (the tree payload carries
-    metadata only). Kiosk visitors are the user of their org — readable."""
+    metadata only). Kiosk visitors are the user of their org — readable.
+    On PostgreSQL the one document row and its presenter's node are read
+    (store.read_document), not the whole org."""
     try:
-        org = store.load_org(slug)
+        found = store.read_document(slug, did)
+        if found is store.DOCUMENT_READ_FALLBACK:
+            org = store.load_org(slug)
+            doc = _document_or_404(org, did)
+            presenter = org.nodes.get(doc["node"])
+        elif found is None:
+            raise _no_document(did)
+        else:
+            doc, presenter = found
     except LedgerError as e:
         raise HTTPException(404, str(e))
-    doc = _document_or_404(org, did)
-    presenter = org.nodes.get(doc["node"])
     out: dict[str, Any] = {
         "id": doc["id"], "node": doc["node"], "title": doc["title"],
         "body": doc["body"], "at": doc["at"],
@@ -6822,10 +6830,14 @@ def document_download(slug: str, did: str) -> Response:
 def _document_or_404(org: Org, did: str) -> dict[str, Any]:
     doc = next((x for x in org.d.get("documents", []) if x["id"] == did), None)
     if doc is None:
-        raise HTTPException(
-            404, f"no document {did!r} — it was removed or is unavailable "
-                 f"in the imported history")
+        raise _no_document(did)
     return doc
+
+
+def _no_document(did: str) -> HTTPException:
+    return HTTPException(
+        404, f"no document {did!r} — it was removed or is unavailable "
+             f"in the imported history")
 
 
 # present-html-mockups-in-a-new-browser-tab (2026-09-06). The mockup's bytes
