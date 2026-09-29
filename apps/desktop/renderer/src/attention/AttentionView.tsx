@@ -23,10 +23,9 @@
 // stage is hidden, and it is the only thing that should disappear when the
 // canvas comes back.
 //
-// THE DIVIDER exists only while BOTH panels are embedded, because that is the
-// only arrangement in which there is a margin between them to drag. Pin or pop
-// either one out and the other takes the stage; the stored split is untouched
-// and comes back with the panel.
+// Keep the split slots when a panel is pinned or popped out: moving one panel
+// must not change the other's width. The divider remains usable while either
+// panel is embedded, and disappears when neither is in the stage.
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type {
@@ -384,11 +383,11 @@ export function AttentionView(props: AttentionViewProps) {
   usePersistedModalOpen(QUEUE_KIND, slug, queueOn)
   usePersistedModalOpen(DESK_KIND, slug, deskOn)
 
-  // the divider exists only while there IS a margin between two embedded
-  // panels — see the file header
+  // An empty slot preserves the other panel's width and leaves its divider
+  // available when its neighbour moves into a pin or a popout.
   const queueEmbedded = queueOn && !queuePinned && !queueOut
   const deskEmbedded = deskOn && !deskPinned && !deskOut
-  const dividable = active && queueEmbedded && deskEmbedded
+  const dividable = active && (queueEmbedded || deskEmbedded)
 
   /**
    * IS THE DESK PANEL'S DESTINATION ON SCREEN? — the `eligible` question the
@@ -490,8 +489,8 @@ export function AttentionView(props: AttentionViewProps) {
     commit(next)
   }
 
-  const leftStyle = dividable ? { flex: `0 0 ${(split * 100).toFixed(2)}%` } : undefined
-  const rightStyle = dividable ? { flex: '1 1 0' } : undefined
+  const leftStyle = { flex: `0 0 ${(split * 100).toFixed(2)}%` }
+  const rightStyle = { flex: '1 1 0' }
 
   return (
     <div ref={stageRef}

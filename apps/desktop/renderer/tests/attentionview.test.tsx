@@ -26,7 +26,7 @@ import assert from 'node:assert/strict'
 import type { CanvasNode } from '../src/canvas/shared'
 import { USER } from '../src/canvas/shared'
 import type { OpFn, TreePayload } from '../src/types'
-import { forgetModalPins, isModalPinned, pinModal, readModalPins } from '../src/canvas/modalpin'
+import { forgetModalPins, isModalPinned, pinModal, readModalPins, unpinModal } from '../src/canvas/modalpin'
 import { WINDOW_LAYOUT_KEY } from '../src/windowlayout'
 import { CurrentOrg } from '../src/popout'
 import { openSurfaces, registerWindow } from '../src/windowlife'
@@ -135,8 +135,8 @@ test('§3 a PINNED panel is retained across the switch back to the canvas', asyn
   await inAct(() => flush())
   assert.equal(isModalPinned(QUEUE_KIND, SLUG), true)
   assert.equal(shape().queue, true, 'the pinned panel is still on screen in its own window')
-  assert.equal(shape().divider, false,
-    'and the divider is gone — there is no margin between two embedded panels now')
+  assert.equal(shape().divider, true,
+    'the embedded desk still has its resize handle')
 
   // the switch the ticket is about
   await inAct(() => { setOrgView(SLUG, 'canvas') })
@@ -289,6 +289,56 @@ test('§5.2 a drag cannot squeeze either panel out of existence', async () => {
   assert.equal(shape().desk, true)
   await v.unmount()
 })
+
+for (const kind of [QUEUE_KIND, DESK_KIND]) {
+  test(`pinning ${kind} preserves the other panel's width and pointer resize`, async () => {
+    reset()
+    setOrgView(SLUG, 'attention')
+    setAttentionLayout(SLUG, { split: 0.57 })
+    const v = await mountView(view(), () => shape())
+    try {
+      await inAct(() => flush())
+      const stage = document.querySelector('.attn-stage') as HTMLElement
+      const left = document.querySelector('.attn-slot-queue') as HTMLElement
+      const right = document.querySelector('.attn-slot-desk') as HTMLElement
+      const widths = [left.style.flex, right.style.flex]
+      stage.getBoundingClientRect = () => ({
+        left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800, x: 0, y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect
+      const pinRect = { x: 40, y: 40, w: 420, h: 480 }
+      await inAct(() => { pinModal(kind, pinRect, SLUG) })
+      await inAct(() => flush())
+      assert.deepEqual([left.style.flex, right.style.flex], widths,
+        'pinning must retain both split slots, so the embedded panel cannot jump in width')
+      assert.equal(attentionLayout(SLUG).split, 0.57, 'pinning leaves the saved split alone')
+      const divider = document.querySelector('.attn-divider') as HTMLElement
+      assert.ok(divider, 'the remaining embedded panel is still draggable')
+      divider.setPointerCapture = () => {}
+      divider.releasePointerCapture = () => {}
+      const point = (type: string, clientX: number) => inAct(() => {
+        const e = new window.MouseEvent(type, { bubbles: true, clientX, button: 0 })
+        Object.defineProperty(e, 'pointerId', { value: 1 })
+        divider.dispatchEvent(e)
+      })
+      await point('pointerdown', 570)
+      await point('pointermove', 650)
+      assert.equal(left.style.flexBasis, '65.00%', 'the split follows the drag while one panel is pinned')
+      assert.equal(attentionLayout(SLUG).split, 0.57, 'a drag writes only on release')
+      await point('pointerup', 650)
+      assert.equal(attentionLayout(SLUG).split, 0.65)
+      assert.deepEqual(readModalPins()[JSON.stringify([SLUG, kind])]?.rect, pinRect,
+        'resizing the embedded panel does not resize the pinned panel')
+      await inAct(() => { pinModal(kind === QUEUE_KIND ? DESK_KIND : QUEUE_KIND, pinRect, SLUG) })
+      assert.equal(shape().divider, false, 'with both panels pinned there is nothing embedded to resize')
+      await inAct(() => { unpinModal(QUEUE_KIND, SLUG); unpinModal(DESK_KIND, SLUG) })
+      assert.equal(shape().divider, true, 'unpinning restores the normal divider')
+      assert.equal(left.style.flexBasis, '65.00%', 'unpinning keeps the resized split')
+    } finally {
+      await v.unmount()
+    }
+  })
+}
 
 // ------------------------------------------------------------------- §7
 //
