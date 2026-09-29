@@ -1933,7 +1933,8 @@ def _start_revision_feed() -> None:
     orgtx.commit_listeners.append(lambda c: pgfeed.note_local(c.slug, c.revision))
     feed = pgfeed.RevisionFeed(
         lambda: pgfeed.psycopg_conn(pgstore.url()),
-        pgfeed.engine_callback(store.external_change, hub_changed))
+        pgfeed.engine_callback(lambda s: store.external_change(s, "feed"),
+                               hub_changed))
     feed.start()
     _REV_FEED = feed
 

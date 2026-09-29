@@ -224,8 +224,16 @@ class RevisionFeed:
 # connection answers `confirm_local` the moment the server answers COMMIT, or
 # `abort_local` on rollback. A callback that meets an in-flight revision waits
 # for that answer, bounded per call AND by a rolling budget, so a backlog never
-# stalls the feed for long; an unanswered wait is taken for foreign, which only
-# costs the safe full reload. The confirmation only tells THE FEED the commit
+# stalls the feed for long. An answer still missing when the wait ends is NOT
+# taken for foreign any more (N1000 #4): under GIL load the committing thread
+# routinely needs longer than the wait to run again, every such commit cost a
+# ~21 MB full reload at N1000, and each reload's parse starved the next
+# committer in turn. The revision is left UNDECIDED instead, and its own answer
+# decides it: `confirm_local` means ours (nothing to do), `abort_local` means
+# the number was freed and may have been committed by another process, so the
+# abort publishes the unknown change set and the broadcast then (`_on_undecided_abort`).
+# Until it is answered `snapshot_changes_published` refuses every range that
+# covers it. The confirmation only tells THE FEED the commit
 # was ours (`_committed`); it does NOT publish anything: `_local`/`_local_set`,
 # which `snapshot_changes_published` and `known_revision` read, are still fed
 # by `note_local` AFTER the committer published its change set, so a stamp is
@@ -238,6 +246,12 @@ _local: dict[str, int] = {}                 # the newest revision made here
 _local_set: dict[str, set[int]] = {}        # every revision made here, not yet passed
 _inflight: dict[str, set[int]] = {}         # bumped here, COMMIT not yet answered
 _committed: dict[str, set[int]] = {}        # COMMIT answered here, not yet passed by the feed
+_undecided: dict[str, set[int]] = {}        # notified while in flight, wait expired, unanswered
+#: what an undecided revision's abort does: the engine callback's reload and
+#: broadcast (set by `engine_callback`; None until one exists)
+_on_undecided_abort: "Callable[[str], None] | None" = None
+#: why the engine callback marked a snapshot unknown, by cause
+causes: dict[str, int] = {}
 _local_lock = threading.Lock()
 _answered = threading.Condition(_local_lock)
 #: longest one callback waits for a commit's answer
@@ -258,10 +272,15 @@ def confirm_local(slug: str, revision: int) -> None:
     """The server answered COMMIT for ``revision``: the feed may take it for
     ours. Publication (and so the published/known predicates) is note_local's."""
     with _answered:
-        revs = _committed.setdefault(slug, set())
-        revs.add(revision)
-        if len(revs) > _LOCAL_CAP:
-            revs.discard(min(revs))
+        undecided = _undecided.get(slug)
+        if undecided is not None and revision in undecided:
+            # its NOTIFY was already passed: the verdict is all it needed
+            undecided.discard(revision)
+        else:
+            revs = _committed.setdefault(slug, set())
+            revs.add(revision)
+            if len(revs) > _LOCAL_CAP:
+                revs.discard(min(revs))
         pending = _inflight.get(slug)
         if pending is not None:
             pending.discard(revision)
@@ -274,7 +293,22 @@ def abort_local(slug: str, revision: int) -> None:
         revs = _inflight.get(slug)
         if revs is not None:
             revs.discard(revision)
+        undecided = _undecided.get(slug)
+        late = undecided is not None and revision in undecided
+        if late:
+            undecided.discard(revision)
+        act = _on_undecided_abort
         _answered.notify_all()
+    if late and act is not None:
+        # the feed already passed this revision believing it might be ours;
+        # it was not, so whatever committed that number is foreign
+        _count("undecided_abort")
+        act(slug)
+
+
+def _count(cause: str) -> None:
+    with _local_lock:
+        causes[cause] = causes.get(cause, 0) + 1
 
 
 def note_local(slug: str, revision: int) -> None:
@@ -305,6 +339,9 @@ def snapshot_changes_published(feed: "RevisionFeed | None", slug: str,
     """
     if after is None or through < after:
         return False
+    with _local_lock:
+        if any(r <= through for r in _undecided.get(slug, ())):
+            return False
     applied = feed.applied_since(slug, after) if feed is not None else after
     if applied >= through:
         return True
@@ -331,19 +368,25 @@ def _wait_answered(slug: str, revision: int) -> None:
     _budget["spent"] += time.monotonic() - now
 
 
-def _take_local(slug: str, revision: int) -> bool:
+def _take_local(slug: str, revision: int) -> "bool | None":
     """Was ``revision`` made by this process? Waits (bounded) for an in-flight
     commit's answer, then prunes every recorded revision at or below it: the
-    feed never calls back for those again. Unanswered counts as foreign."""
+    feed never calls back for those again. Still unanswered after the wait:
+    None, and the revision is left UNDECIDED for its own answer to settle."""
     with _answered:
         _wait_answered(slug, revision)
-        mine = False
+        pending = revision in _inflight.get(slug, ())
+        mine = any(revision in state.get(slug, ()) for state in (_committed, _local_set))
         for state in (_inflight, _committed, _local_set):
             revs = state.get(slug)
             if revs:
-                if state is not _inflight:
-                    mine = mine or revision in revs
                 revs.difference_update([r for r in revs if r <= revision])
+        if pending and not mine:
+            undecided = _undecided.setdefault(slug, set())
+            undecided.add(revision)
+            if len(undecided) > _LOCAL_CAP:
+                undecided.discard(min(undecided))
+            return None
         return mine
 
 
@@ -353,12 +396,24 @@ def engine_callback(publish_unknown: Callable[[str], None],
     or any gap, drops trust in the shared snapshot's accumulated change set
     (the next read does one full reload) and schedules the ordinary coalesced
     ``changed`` broadcast, which the renderer answers with a refetch."""
-    def on_change(slug: str, revision: int, gap: bool) -> None:
-        mine = _take_local(slug, revision)
-        if mine and not gap:
-            return
+    global _on_undecided_abort
+
+    def act(slug: str) -> None:
         publish_unknown(slug)
         broadcast(slug)
+
+    def on_change(slug: str, revision: int, gap: bool) -> None:
+        mine = _take_local(slug, revision)
+        if not gap:
+            if mine:
+                return
+            if mine is None:
+                # still in flight here: its own answer decides (abort acts)
+                _count("undecided")
+                return
+        _count("gap" if gap else "foreign")
+        act(slug)
+    _on_undecided_abort = act
     return on_change
 
 

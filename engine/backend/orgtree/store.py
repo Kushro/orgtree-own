@@ -5560,7 +5560,7 @@ def _save_sqlite(org: Org) -> None:
                 else:
                     # a plain-dict save reconciles the whole database; the
                     # change record is not a trustworthy delta of it
-                    _publish_changes_unknown(slug)
+                    _publish_changes_unknown(slug, "plain_dict_save")
                 _bump_org_seq(slug)
                 if STORE_BACKEND == "postgres":
                     # PG-4: this process made that revision (recorded only now
@@ -7300,6 +7300,14 @@ _changed_all: set[str] = set()
 _res_changed_keys: dict[str, set[str]] = {}
 _res_changed_nodes: dict[str, set[str]] = {}
 _res_changed_all: set[str] = set()
+#: WHY each org's change set is marked unknown (N1000 #4): at N1000 one full
+#: reload reads ~21 MB, so every reload has to be attributable. The first
+#: reason since the shared snapshot last drained is kept (it is the one the
+#: reload pays for); `full_load_counts` tallies the reloads themselves.
+_unknown_reason: dict[str, str] = {}
+#: shared-snapshot full reloads by reason — "first_build", "bail", or
+#: "unknown:<reason>". In memory, a handful of keys, for tests and scale runs.
+full_load_counts: collections.Counter[str] = collections.Counter()
 _snap_gates: dict[str, threading.Lock] = {}
 #: per-slug snapshot REBUILD mutex — herd suppression, not coherence. Under
 #: sustained writes every request used to find the cache stale and re-parse
@@ -7345,28 +7353,38 @@ def _publish_changes(slug: str, changes: SaveChanges) -> None:
         with _changed_lock:
             _changed_all.add(slug)
             _res_changed_all.add(slug)
+            _unknown_reason.setdefault(slug, "publish_error")
         from . import tree_changes
         tree_changes.publish(DATA_ROOT, slug, None)
 
 
-def _publish_changes_unknown(slug: str) -> None:
+def _publish_changes_unknown(slug: str, reason: str = "unspecified") -> None:
     """A save whose exact change set is unknown (JSON backend, failure mid
-    collection): the next reader rebuild must not trust the accumulation."""
+    collection): the next reader rebuild must not trust the accumulation.
+    `reason` names the cause; the reload it forces is counted under it."""
     with _changed_lock:
         _changed_all.add(slug)
         _res_changed_all.add(slug)
+        _unknown_reason.setdefault(slug, reason)
+    stateprobe.record("snapshot_unknown", detail={"reason": reason})
     from . import tree_changes
     tree_changes.publish(DATA_ROOT, slug, None)
 
 
-def external_change(slug: str) -> None:
+def external_change(slug: str, reason: str = "external") -> None:
     """PG-4: a commit this process did not make (another process, or one whose
     NOTIFY was missed). Its change set is unknown, so the next snapshot read
     must be a full reload: publish `unknown` and move the seq, inside the
     snapshot gate like a local commit's publish."""
     with _snap_gate(slug):
-        _publish_changes_unknown(slug)
+        _publish_changes_unknown(slug, reason)
         _bump_org_seq(slug)
+
+
+def _count_full_load(reason: str) -> None:
+    with _changed_lock:
+        full_load_counts[reason] += 1
+    stateprobe.record("snapshot_full_load", detail={"reason": reason})
 
 
 def _invalidate_snapshot(slug: str) -> None:
@@ -7378,6 +7396,7 @@ def _invalidate_snapshot(slug: str) -> None:
         _doc_cache.pop(slug, None)
     with _changed_lock:
         _changed_all.discard(slug)
+        _unknown_reason.pop(slug, None)
         _changed_keys.pop(slug, None)
         _changed_nodes.pop(slug, None)
         _changed_node_struct.pop(slug, None)
@@ -7453,6 +7472,7 @@ def _load_pinned(slug: str, *, resident: bool = False) -> tuple[Org, int]:
                     _res_changed_nodes.pop(slug, None)
                 else:
                     _changed_all.discard(slug)
+                    _unknown_reason.pop(slug, None)
                     _changed_keys.pop(slug, None)
                     _changed_nodes.pop(slug, None)
                     _changed_node_struct.pop(slug, None)
@@ -7508,7 +7528,7 @@ def _assemble_snapshot(slug: str, prev: Org) -> tuple[Org, int] | None:
                 conn.execute("BEGIN")
                 raw_order = _meta_get(conn, _META_KEY_ORDER)   # pins the view
             except BaseException:
-                _publish_changes_unknown(slug)
+                _publish_changes_unknown(slug, "assemble_pin_error")
                 if conn.in_transaction:
                     with contextlib.suppress(Exception):
                         conn.execute("ROLLBACK")
@@ -7665,7 +7685,7 @@ def _assemble_snapshot(slug: str, prev: Org) -> tuple[Org, int] | None:
             return org2, seq
         except BaseException as e:
             # whatever was drained can no longer be trusted to be complete
-            _publish_changes_unknown(slug)
+            _publish_changes_unknown(slug, "assemble_bail")
             # the bail REASON is operational gold: two bails per swarm run
             # were invisible until this row existed, and each one costs the
             # next reader a full parse — a reason that recurs is a bug to fix
@@ -7724,9 +7744,14 @@ def cached_org_seq(slug: str) -> tuple[Org, int]:
             hit = _doc_cache.get(slug)
         if hit is not None and hit[0] >= arrival:
             return hit[1], hit[0]
+        reason = "first_build"
         if hit is not None:
             assembled = _assemble_snapshot(slug, hit[1])
-            if assembled is not None:
+            if assembled is None:
+                with _changed_lock:
+                    reason = ("unknown:" + _unknown_reason.get(slug, "unspecified")
+                              if slug in _changed_all else "bail")
+            else:
                 org2, seq2 = assembled
                 # the mark first-use helpers honor (perf-review round 2):
                 # a marked org is never stamped by the incarnation minters —
@@ -7738,6 +7763,7 @@ def cached_org_seq(slug: str) -> tuple[Org, int]:
                     if cur is None or cur[0] <= seq2:
                         _doc_cache[slug] = (seq2, org2)
                 return org2, seq2
+        _count_full_load(reason)
         try:
             org, seq_pin = _load_pinned(slug)
         except LedgerError:
@@ -7910,7 +7936,7 @@ def _advance_resident(slug: str, d: LazyDoc) -> bool:
     except Exception as e:
         stateprobe.record("snapshot_bail",
                           detail={"reason": f"advance {type(e).__name__}: {e}"[:200]})
-        _publish_changes_unknown(slug)
+        _publish_changes_unknown(slug, "advance_bail")
         return False
 
 
@@ -8247,7 +8273,7 @@ def _save_org(org: Org) -> None:
         _save_json(org)
         stateprobe.record("save_doc", ms=(time.perf_counter() - _t1) * 1000.0)
         # the JSON backend has no change record: readers full-reload
-        _publish_changes_unknown(org.d["slug"])
+        _publish_changes_unknown(org.d["slug"], "json_save")
         _bump_org_seq(org.d["slug"])
     REVISION += 1  # pyright: ignore[reportConstantRedefinition]  # uppercase mutable counter is the public API; renaming is forbidden this wave
     # PG-0: inside an org_tx the hooks are deferred; org_tx fires them after

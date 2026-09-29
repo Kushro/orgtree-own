@@ -25,6 +25,12 @@ IDLE_S = 60.0
 _lock = threading.RLock()
 _cache: OrderedDict = OrderedDict()
 _build_locks: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+#: (root, slug) -> the (org_id, revision) the shared snapshot was last proven
+#: fresh through by a read below. It outlives the cache entry on purpose
+#: (N1000 #4): the proof is about store.cached_org, not about this cache, and
+#: losing it with an idle entry made every tree read after a quiet minute
+#: publish an unknown change set - one ~21 MB full reload at N1000 each time.
+_verified: dict[tuple[str, str], tuple[int, int]] = {}
 _sweeper: threading.Timer | None = None
 
 
@@ -144,12 +150,16 @@ def read(slug: str, public: bool, since: str, *, stamp: Callable[[], str],
                 entry = None
         committed = _committed(slug)
         if committed is not None:
-            previous = entry.get('committed') if entry else None
+            proof = (key[0], slug)
+            with _lock:
+                previous = _verified.get(proof)
             after = previous[1] if previous and previous[0] == committed[0] else None
             if not pgfeed.snapshot_changes_published(feed, slug, after, committed[1]):
                 # The commit is newer than the delivered feed/local evidence.
                 # Publish unknown BEFORE cached_org can serve this request.
-                store.external_change(slug)
+                store.external_change(slug, 'tree_unverified')
+            with _lock:
+                _verified[proof] = committed
         current = (committed, stamp())  # read before build, never afterwards
         if entry is None or entry['stamp'] != current:
             mark = fast.mark() if fast else None

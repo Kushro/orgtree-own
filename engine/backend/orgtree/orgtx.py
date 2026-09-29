@@ -1115,7 +1115,7 @@ class PgBackend:
                         # is journaled" could count a phantom write (review f5).
                         # An org that published nothing only rebuilds in full.
                         for done in order[:i + 1]:
-                            store._publish_changes_unknown(done.slug)   # pyright: ignore[reportPrivateUsage]
+                            store._publish_changes_unknown(done.slug, "orgtx_failed")   # pyright: ignore[reportPrivateUsage]
                             store._bump_org_seq(done.slug)              # pyright: ignore[reportPrivateUsage]
                         raise _pg_error(e) from e
                     finally:
@@ -1129,7 +1129,7 @@ class PgBackend:
                 # real COMMIT; a snapshot rebuilt in that window may hold
                 # pre-commit rows under the new seq — bump again, as unknown
                 for tx in order[:-1]:
-                    store._publish_changes_unknown(tx.slug)   # pyright: ignore[reportPrivateUsage]
+                    store._publish_changes_unknown(tx.slug, "orgtx_multi_org")   # pyright: ignore[reportPrivateUsage]
                     store._bump_org_seq(tx.slug)              # pyright: ignore[reportPrivateUsage]
             for tx in order:
                 conn = conns[tx.slug]
