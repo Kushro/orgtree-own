@@ -30,10 +30,18 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from playwright.sync_api import sync_playwright  # noqa: E402
-
 HERE = pathlib.Path(__file__).resolve().parent
 FRONTEND = HERE.parent
+REPO = FRONTEND.parents[2]
+
+# team rule: every test module and probe proves which checkout it runs from
+# (this one drives the renderer bundle built from FRONTEND, not the engine,
+# but the receipt still pins the checkout the measurement belongs to)
+sys.path.insert(0, str(REPO / "tools"))
+from assert_repo_import import assert_repo_import  # noqa: E402
+PROVENANCE = assert_repo_import(REPO)
+
+from playwright.sync_api import sync_playwright  # noqa: E402
 VP_W, VP_H = 1600, 900
 POST_MS, GET_MS = 200, 300
 
