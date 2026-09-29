@@ -27,7 +27,7 @@ os.environ["ORGTREE_DATA"] = str(Path(_temp.name) / "data")
 Path(os.environ["ORGTREE_DATA"]).mkdir()
 os.environ["ORGTREE_V2_TOKEN"] = "answered-card-fg"
 
-import import_provenance  # noqa: F401,E402  asserts orgtree resolves inside this checkout
+import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
 from engine.launch import load_app                                   # noqa: E402
 load_app()
 from orgtree import ledger                                           # noqa: E402
