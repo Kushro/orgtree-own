@@ -203,6 +203,38 @@ def _reqprof_wrap(app, root: Path):
     return wrapped
 
 
+def install_hub_guard(root: Path) -> None:
+    """Fail closed against the real mail hub, before the engine is imported.
+
+    seed.child_env already points the engine at a dead hub address; this is the
+    second layer (tests/hub_isolation.py, the mailhub test rigs' guard): refuse
+    to start if the address names a live hub port, and refuse every HTTP request
+    to 7370/7371 before it is sent. Each refused URL is logged ONCE to
+    <root>/metrics/live-hub-refused.jsonl, so a retrying engine stays cheap."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "scale_hub_isolation", REPO / "tests" / "hub_isolation.py")
+    hub_isolation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hub_isolation)
+    address = os.environ.get("ORGTREE_LOCAL_HUB_ADDRESS", "")
+    if not address or hub_isolation.is_live_hub_address(address):
+        raise SystemExit(f"scale engine refused: hub address {address!r} "
+                         "is not the dead address seed.child_env sets")
+    seen: set[str] = set()
+    lock = threading.Lock()
+    out = root / "metrics" / "live-hub-refused.jsonl"
+
+    def report(url: str) -> None:
+        with lock:
+            if url in seen:
+                return
+            seen.add(url)
+            with open(out, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"t": time.time(), "url": url}) + chr(10))
+
+    hub_isolation.install_transport_guard(report)
+
+
 def child(args) -> int:
     t_proc = time.time()
     root = Path(args.root).resolve()
@@ -217,6 +249,7 @@ def child(args) -> int:
         providers=[os.environ["ORGTREE_CLAUDE"], os.environ["ORGTREE_CODEX"]],
         agy=shutil.which("agy"), trace_git=os.environ.get("ORGTREE_SCALE_TRACE_GIT") == "1")
     sys.addaudithook(launch_audit)
+    install_hub_guard(root)
 
     t_import = time.time()
     from engine.launch import load_app

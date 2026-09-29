@@ -130,8 +130,20 @@ def child_env(root: Path, pg_url: str) -> dict[str, str]:
                XDG_CONFIG_HOME=str(root / "home"),
                TEMP=str(root / "temp"), TMP=str(root / "temp"), TMPDIR=str(root / "temp"),
                ORGTREE_V2_TOKEN="scale-seed-only", PYTHONIOENCODING="utf-8",
-               PYTHONDONTWRITEBYTECODE="1", GIT_OPTIONAL_LOCKS="0", ORGTREE_WARM="0")
+               PYTHONDONTWRITEBYTECODE="1", GIT_OPTIONAL_LOCKS="0", ORGTREE_WARM="0",
+               ORGTREE_LOCAL_HUB_ADDRESS=SCALE_HUB_ADDRESS)
     return env
+
+
+# KEEP SCALE ENGINES OFF THE REAL MAIL HUB (scale-test-engines-register-as-orgs-
+# named-scale, 2026-09-29: 270 orgs named "scale" sat in the user's hub roster).
+# TEMP above points into the root, so the engine's temp-root floor
+# (net._under_os_temp) never applies, and a root with no defaults.json falls
+# back to the live hub on 127.0.0.1:7370. ORGTREE_LOCAL_HUB_ADDRESS outranks that
+# default, and net's address sync rewrites the stored local-hub entry of a root
+# seeded before this fix, so old roots are covered too. The discard port refuses
+# at once: registration fails into net's ordinary backoff (no hot loop).
+SCALE_HUB_ADDRESS = "http://127.0.0.1:9"      # == net.UNROUTABLE_HUB_ADDRESS
 
 
 def parent(args) -> int:
