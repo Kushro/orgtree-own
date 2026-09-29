@@ -430,7 +430,7 @@ test('a reveal that arrives before its window is held, not dropped, and lands on
   assert.equal(registry.pendingReveals('acme'), 1)
   const host = hostFor(registry)
   await openOrg(registry, 'acme', null, host)
-  assert.deepEqual(host.log, ['create:acme', 'deliver:window-for-acme:notice-1'])
+  assert.deepEqual(host.log, ['create:acme', 'load:window-for-acme', 'deliver:window-for-acme:notice-1'])
   assert.equal(registry.pendingReveals('acme'), 0)
 })
 
