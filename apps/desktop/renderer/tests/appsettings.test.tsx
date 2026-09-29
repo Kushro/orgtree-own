@@ -140,33 +140,38 @@ test('§1 stable accessible tabs navigate by key without swapping identity',
     const view = await mountSettings()
     try {
       const tabs = view.el.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-      // v3: About leads and is where the panel opens — the version and
-      // repository link the removed sidebar used to carry. (It was "General"
-      // until 2026-09-29, when its startup choice moved to Display.) Default org settings closes the strip, having
-      // absorbed the standalone window that sidebar opened. Developer (the
-      // engine debug view, 2026-09-26) comes last.
+      // v3: the strip follows the user's own list (2026-09-29). About — the
+      // version and repository link the removed sidebar used to carry — is
+      // last but is still where the panel opens.
       assert.deepEqual([...tabs].map((b) => b.textContent?.trim()),
-        ['About', 'Providers', 'Runtime', 'Mail hub', 'Display',
-          'Default org settings', 'Developer'])
-      assert.equal(tabs[4]!.querySelector('.app-settings-scope'), null,
+        ['Providers', 'Runtime', 'Display', 'Default org settings',
+          'Mail hub', 'Developer', 'About'])
+      assert.equal(tabs[2]!.querySelector('.app-settings-scope'), null,
         'Display has no device-label pill while retaining its tab identity')
-      assert.equal(tabs[0]!.getAttribute('aria-selected'), 'true')
-      assert.equal(tabs[1]!.getAttribute('aria-selected'), 'false')
+      assert.equal(tabs[6]!.getAttribute('aria-selected'), 'true')
+      assert.equal(tabs[0]!.getAttribute('aria-selected'), 'false')
       await inAct(async () => {
-        tabs[0]!.dispatchEvent(new KeyboardEvent('keydown', {
-          key: 'ArrowRight', bubbles: true,
+        tabs[6]!.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Home', bubbles: true,
         }))
       })
-      assert.equal(tabs[0]!.getAttribute('aria-selected'), 'false')
-      assert.equal(tabs[1]!.getAttribute('aria-selected'), 'true')
-      assert.equal(document.activeElement, tabs[1])
+      assert.equal(tabs[6]!.getAttribute('aria-selected'), 'false')
+      assert.equal(tabs[0]!.getAttribute('aria-selected'), 'true')
+      assert.equal(document.activeElement, tabs[0])
       await inAct(async () => {
-        tabs[1]!.dispatchEvent(new KeyboardEvent('keydown', {
+        tabs[0]!.dispatchEvent(new KeyboardEvent('keydown', {
           key: 'End', bubbles: true,
         }))
       })
       assert.equal(tabs[6]!.getAttribute('aria-selected'), 'true')
       assert.equal(document.activeElement, tabs[6])
+      await inAct(async () => {
+        tabs[6]!.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'ArrowLeft', bubbles: true,
+        }))
+      })
+      assert.equal(tabs[5]!.getAttribute('aria-selected'), 'true')
+      assert.equal(document.activeElement, tabs[5])
       const last = view.el.querySelector('#app-settings-panel-developer')!
       assert.equal(last.hasAttribute('hidden'), false)
       // the engine debug view's toggle lives here, and is off by default

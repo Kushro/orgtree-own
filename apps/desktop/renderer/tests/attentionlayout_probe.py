@@ -230,7 +230,8 @@ def main() -> int:
             bool(res[f"tabs_{t}"]) and all(x["lines"] == 1 and x["byHeight"] == 1 for x in res[f"tabs_{t}"])
             for t in ("about", "display"))
         checks["D_no_general_tab"] = bool(tabs) and all(t["label"] != "General" for t in tabs)
-        checks["D_about_tab_first"] = bool(tabs) and tabs[0]["label"] == "About"
+        checks["D_tab_order_is_the_users"] = [t["label"] for t in tabs] == [
+            "Providers", "Runtime", "Display", "Default org settings", "Mail hub", "Developer", "About"]
         checks["D_startup_is_a_dropdown_in_display"] = bool(res.get("startup_select")) \
             and not res.get("fancy_startup_left")
         browser.close()

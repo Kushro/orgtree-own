@@ -213,19 +213,12 @@ export function UsageBars({ u }: { u: AccountUsage }) {
 
 type AppSettingsTab = 'about' | 'providers' | 'runtime' | 'mailhub'
   | 'display' | 'defaults' | 'developer'
+// Strip order is the user's own list (2026-09-29): Providers, Runtime,
+// Display, Default org settings, Mail hub, Developer, About. The panel still
+// OPENS on About (see useState below) — the order does not pick the default.
 const APP_TABS: SettingsTab<AppSettingsTab>[] = [
-  // About is FIRST and is where the panel opens: what is actually running.
-  // The v3 shell removes the sidebar that used to carry the version badge and
-  // the repository link, so this is their home. It was "General" until
-  // 2026-09-29, when its one setting (the startup choice) moved to Display →
-  // Startup as an ordinary dropdown (user ruling via coordinator-opus).
-  { id: 'about', label: 'About' },
   { id: 'providers', label: 'Providers' },
   { id: 'runtime', label: 'Runtime' },
-  // one installation hosts at most one mail hub, so hosting it and granting
-  // access to it are machine-wide settings — they used to sit inside a single
-  // organization's Connections tab, which is where they did not belong
-  { id: 'mailhub', label: 'Mail hub' },
   { id: 'display', label: 'Display' },
   // Default org settings USED TO BE ITS OWN WINDOW, opened from the sidebar
   // that v3 removes. It is app-wide — every new organization is born with
@@ -233,8 +226,17 @@ const APP_TABS: SettingsTab<AppSettingsTab>[] = [
   // settings. The standalone window still exists and still opens; this is the
   // same fields (shell/defaults.tsx), not a copy.
   { id: 'defaults', label: 'Default org settings' },
+  // one installation hosts at most one mail hub, so hosting it and granting
+  // access to it are machine-wide settings — they used to sit inside a single
+  // organization's Connections tab, which is where they did not belong
+  { id: 'mailhub', label: 'Mail hub' },
   // tools for looking inside the running engine; nothing here changes behaviour
   { id: 'developer', label: 'Developer' },
+  // About: what is actually running. The v3 shell removes the sidebar that
+  // used to carry the version badge and the repository link, so this is their
+  // home. It was "General" until 2026-09-29, when its one setting (the startup
+  // choice) moved to Display → Startup as an ordinary dropdown.
+  { id: 'about', label: 'About' },
 ]
 
 function DeskTextSize() {
