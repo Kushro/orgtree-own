@@ -31,7 +31,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { ChevronLeftIcon, ViewListIcon } from '../icons'
 import type { ToastFn, TreePayload } from '../types'
-import { DRAFT, USER, useEsc } from '../canvas/shared'
+import { DRAFT, queuedSwitchTitle, TIER_LETTER, USER, useEsc } from '../canvas/shared'
 import type { CanvasNode, OpFn, Pt } from '../canvas/shared'
 import { DeskSlot } from '../canvas/deskhosts'
 import type { DeskChatProps } from '../canvas/desk'
@@ -245,6 +245,13 @@ export function AgentDeskPanel({
             style={{ paddingLeft: 8 + depth * 12 }}
             onClick={() => select(node.id)}>
             <AgentName id={node.id} tier={node.tier} />
+            {/* a busy agent's model switch is QUEUED (D-234): the tier stays the
+                old one until the turn ends, so without this mark the row reads as
+                if the switch never happened. Same mark and wording as the canvas
+                card and the desk header. */}
+            {node.pending_switch &&
+              <span className="queued-mark" title={queuedSwitchTitle(node)}>
+                →{TIER_LETTER[node.pending_switch.tier] ?? '?'}</span>}
             {node.busy && <span className="attn-agent-busy" title="working" aria-label="working" />}
             {(node.mail_pending ?? 0) > 0 &&
               <b className="eye-count">{node.mail_pending}</b>}
