@@ -2,7 +2,10 @@
 // OrgCanvas, AttentionView and App settings from ../src, CSS in main.tsx's
 // order) into a browser page for `attentionlayout_probe.py`.
 //
-//   node tests/attentionlayout_build.mjs <outdir>
+//   node tests/attentionlayout_build.mjs <outdir> [entry.tsx]
+//
+// The optional second argument bundles another probe page the same way
+// (orgsubmenu_probe.py uses it for orgsubmenu-probe.tsx).
 
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -18,7 +21,7 @@ if (!outdir) {
 rmSync(outdir, { recursive: true, force: true })
 mkdirSync(outdir, { recursive: true })
 await esbuild.build({
-  entryPoints: [path.join(HERE, 'attentionlayout-probe.tsx')],
+  entryPoints: [path.join(HERE, process.argv[3] || 'attentionlayout-probe.tsx')],
   outfile: path.join(outdir, 'probe.js'),
   bundle: true,
   platform: 'browser',

@@ -21,7 +21,7 @@
 // kiosk badge, an "already open" mark and the freshness of the snapshot behind
 // all of them. Rendering that through a label API would mean flattening it to
 // text and losing the thing the list is for.
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { DataUsageIcon, HomeIcon, MenuIcon, SettingsIcon } from '../icons'
 import { orgFreshnessNote } from '../orgstatus'
 import type { OrgFreshness } from '../orgstatus'
@@ -70,11 +70,23 @@ function focusItem(panel: HTMLElement | null, from: Element | null,
   items[next]!.focus()
 }
 
+/** Where the organization submenu sits, relative to `.shell-menu`: beside the
+ *  panel on the right, or on the left when the right has no room. */
+interface SubPos { left: number; top: number; flip: boolean }
+
 export function OrgtreeMenu(props: OrgtreeMenuProps) {
   const { orgs, freshness, ageMs, error, currentOrg, isOpenElsewhere,
     onOpenOrg, onNewWindow, onCreateOrg, onUsage, onAppSettings } = props
   const [open, setOpen] = useState(false)
-  const [orgList, setOrgList] = useState(false)
+  // THE ORGANIZATION LIST IS A SUBMENU (user 2026-09-29, image-21: "this open
+  // organization should open a submenu to the right side, not expand a new
+  // list inside itself"). `subBy` says HOW it was opened, because that decides
+  // how it closes: a submenu the pointer opened closes when the pointer
+  // leaves it, like any desktop submenu; one opened by a click or the keyboard
+  // stays until it is dismissed, so a click on a hover-opened row keeps it.
+  const [subBy, setSubBy] = useState<'hover' | 'click' | 'key' | null>(null)
+  const orgList = subBy !== null
+  const [subPos, setSubPos] = useState<SubPos | null>(null)
   const [filter, setFilter] = useState('')
   // ⚠ REPORTED FROM AN EFFECT, NOT FROM THE SETTER. Calling the parent's
   // callback inside a state updater is a side effect in the render phase, and
@@ -86,15 +98,22 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
   notifyOrgList.current = props.onOrgListOpen
   useEffect(() => { notifyOrgList.current?.(orgList) }, [orgList])
   useEffect(() => () => { notifyOrgList.current?.(false) }, [])
+  const root = useRef<HTMLDivElement>(null)
   const button = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
+  const row = useRef<HTMLButtonElement>(null)
+  const sub = useRef<HTMLDivElement>(null)
   const id = useId()
+  const subId = useId()
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(hoverTimer.current), [])
 
   // closing RETURNS FOCUS to the button. Without that a keyboard user who
   // escapes the menu is left with focus on the document body, several tab
   // stops from where they were.
   const close = useCallback((restore = true) => {
-    setOpen(false); setOrgList(false); setFilter('')
+    clearTimeout(hoverTimer.current)
+    setOpen(false); setSubBy(null); setFilter('')
     if (restore) button.current?.focus()
   }, [])
 
@@ -109,9 +128,10 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
     // after the press has already moved focus, so a press on another header
     // button would close the menu and then be delivered to a button the menu
     // was covering a moment ago.
+    // the submenu is outside the panel (see below), so "inside" is the whole
+    // menu root: button, panel and submenu
     const onDown = (e: Event) => {
-      const t = e.target as Node | null
-      if (panel.current?.contains(t as Node) || button.current?.contains(t as Node)) return
+      if (root.current?.contains(e.target as Node)) return
       close(false)
     }
     window.addEventListener('keydown', onKey)
@@ -148,8 +168,71 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
       || o.slug.toLowerCase().includes(needle))
     : orgs
 
+  // ⚠ THE SUBMENU IS A SIBLING OF THE PANEL, NOT ITS CHILD. The panel scrolls
+  // (`overflow-y: auto`), and a scroll container clips anything positioned
+  // outside it, so a flyout nested inside would be cut off at the panel's
+  // edge. It is placed from measured boxes instead: level with its row, to the
+  // right of the panel, flipped to the left when the window has no room on the
+  // right, and kept inside the window vertically. Hidden until placed, so it
+  // never paints for a frame at the wrong spot.
+  useLayoutEffect(() => {
+    if (!orgList) { setSubPos(null); return }
+    const place = () => {
+      const r = row.current, p = panel.current, s = sub.current, m = root.current
+      if (!r || !p || !s || !m) return
+      const rr = r.getBoundingClientRect(), pr = p.getBoundingClientRect()
+      const mr = m.getBoundingClientRect()
+      const w = s.offsetWidth, h = s.offsetHeight
+      const fitsRight = pr.right + 2 + w <= window.innerWidth - 4
+      const x = fitsRight ? pr.right + 2 : Math.max(4, pr.left - 2 - w)
+      const y = Math.max(4, Math.min(rr.top - 5, window.innerHeight - 4 - h))
+      const next = { left: Math.round(x - mr.left), top: Math.round(y - mr.top), flip: !fitsRight }
+      setSubPos((prev) => prev && prev.left === next.left && prev.top === next.top
+        && prev.flip === next.flip ? prev : next)
+    }
+    place()
+    const p = panel.current
+    window.addEventListener('resize', place)
+    p?.addEventListener('scroll', place)
+    return () => { window.removeEventListener('resize', place); p?.removeEventListener('scroll', place) }
+  }, [orgList, shown.length, note])
+
+  // a submenu opened from the keyboard takes focus: the filter when there is
+  // one, otherwise its first organization. Opened by the pointer it leaves
+  // focus alone, as the main menu does.
+  const wantSubFocus = useRef(false)
+  useEffect(() => {
+    if (!orgList || !wantSubFocus.current) return
+    wantSubFocus.current = false
+    const input = sub.current?.querySelector<HTMLElement>('.shell-menu-filter')
+    if (input) input.focus()
+    else focusItem(sub.current, null, 'first')
+  }, [orgList])
+  const openSub = (by: 'hover' | 'click' | 'key') => {
+    clearTimeout(hoverTimer.current)
+    if (by === 'key') wantSubFocus.current = true
+    setSubBy(by)
+  }
+  const closeSub = (focusRow: boolean) => {
+    clearTimeout(hoverTimer.current)
+    setSubBy(null); setFilter('')
+    if (focusRow) row.current?.focus()
+  }
+  const hoverIn = () => {
+    clearTimeout(hoverTimer.current)
+    if (!orgList) openSub('hover')
+  }
+  // a short grace period, so a diagonal move from the row into the submenu
+  // does not cross another item and lose it
+  const hoverOut = () => {
+    clearTimeout(hoverTimer.current)
+    hoverTimer.current = setTimeout(() => {
+      setSubBy((v) => (v === 'hover' ? null : v))
+    }, 250)
+  }
+
   return (
-    <div className="shell-menu">
+    <div ref={root} className="shell-menu">
       {/* icon only, like every header button (user 2026-09-29); the name is
           the aria-label and the tooltip */}
       <button ref={button} type="button" className="shell-menu-button"
@@ -181,43 +264,25 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
             <span className="shell-menu-label">New window</span>
             <span className="shell-menu-value dim">Homepage</span>
           </button>
-          <button type="button" role="menuitem" className="shell-menu-item"
-            aria-haspopup="true" aria-expanded={orgList}
-            onClick={() => setOrgList((v) => !v)}>
+          <button ref={row} type="button" role="menuitem"
+            className={'shell-menu-item shell-menu-subrow' + (orgList ? ' on' : '')}
+            aria-haspopup="menu" aria-expanded={orgList}
+            aria-controls={orgList ? subId : undefined}
+            onPointerEnter={hoverIn} onPointerLeave={hoverOut}
+            onClick={(e) => {
+              // a click on a submenu the POINTER opened keeps it open (the
+              // press landed on a row that was already showing its list); a
+              // deliberate second activation closes it. A keyboard activation
+              // (Enter/Space, `detail` 0) opens it with focus.
+              if (orgList && subBy !== 'hover') closeSub(false)
+              else openSub(e.detail === 0 ? 'key' : 'click')
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); openSub('key') }
+            }}>
             <span className="shell-menu-label">Open organization…</span>
-            <span className="shell-menu-value dim" aria-hidden="true">{orgList ? '▾' : '▸'}</span>
+            <span className="shell-menu-value dim" aria-hidden="true">▸</span>
           </button>
-          {orgList && (
-            <div className="shell-menu-orgs">
-              {orgs.length > 6 && (
-                <input className="shell-menu-filter" autoFocus
-                  aria-label="find an organization" placeholder="Find an organization"
-                  value={filter} onChange={(e) => setFilter(e.target.value)} />
-              )}
-              {note && <div className="dim org-freshness" role="status">{note}</div>}
-              {shown.map((o) => {
-                const elsewhere = isOpenElsewhere?.(o.slug) === true
-                return (
-                  <button key={o.slug} type="button" role="menuitem"
-                    className={'shell-menu-org' + (o.slug === currentOrg ? ' current' : '')}
-                    onClick={() => run(() => onOpenOrg(o.slug))}>
-                    <span className="shell-menu-label">{o.name}</span>
-                    {elsewhere
-                      ? <span className="shell-menu-value dim">Already open</span>
-                      : <span className="shell-menu-value dim">
-                        {/* the SAME freshness rule the list rows obey: an
-                            unfresh snapshot shows no count rather than an
-                            old one presented as current */}
-                        {freshness !== 'current' ? '…'
-                          : typeof o.working === 'number' ? `${o.working}/${o.live}` : `${o.live}`}
-                      </span>}
-                  </button>
-                )
-              })}
-              {!shown.length && <div className="dim pad">
-                {orgs.length ? 'no match' : 'no organizations yet'}</div>}
-            </div>
-          )}
           <button type="button" role="menuitem" className="shell-menu-item"
             onClick={() => run(onCreateOrg)}>
             <span className="shell-menu-label">Create new organization…</span>
@@ -238,6 +303,57 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
               version is shown without any click instead — in an organization
               window's status strip, and beside the title on Home and New
               organization (shell/header.tsx `version`). */}
+        </div>
+      )}
+      {open && orgList && (
+        <div ref={sub} id={subId} role="menu" aria-label="Organizations"
+          className={'shell-menu-sub' + (subPos?.flip ? ' flip' : '')}
+          style={subPos ? { left: subPos.left, top: subPos.top }
+            : { left: 0, top: 0, visibility: 'hidden' }}
+          onPointerEnter={hoverIn} onPointerLeave={hoverOut}
+          onKeyDown={(e) => {
+            // the submenu's keys are its own: none of them reaches the main
+            // panel's handler or the window's Escape (which closes the whole
+            // menu) — Escape and ArrowLeft step back to the row instead
+            e.stopPropagation()
+            const inInput = (e.target as Element).tagName === 'INPUT'
+            const from = (e.target as Element).closest('[role="menuitem"]')
+            if (e.key === 'ArrowDown') { e.preventDefault(); focusItem(sub.current, from, 'next') }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); focusItem(sub.current, from, 'prev') }
+            else if (e.key === 'Home' && !inInput) { e.preventDefault(); focusItem(sub.current, null, 'first') }
+            else if (e.key === 'End' && !inInput) { e.preventDefault(); focusItem(sub.current, null, 'last') }
+            else if (e.key === 'Escape' || (e.key === 'ArrowLeft' && !inInput)) {
+              e.preventDefault(); closeSub(true)
+            }
+            else if (e.key === 'Tab') close(false)
+          }}>
+          {orgs.length > 6 && (
+            <input className="shell-menu-filter"
+              aria-label="find an organization" placeholder="Find an organization"
+              value={filter} onChange={(e) => setFilter(e.target.value)} />
+          )}
+          {note && <div className="dim org-freshness" role="status">{note}</div>}
+          {shown.map((o) => {
+            const elsewhere = isOpenElsewhere?.(o.slug) === true
+            return (
+              <button key={o.slug} type="button" role="menuitem"
+                className={'shell-menu-org' + (o.slug === currentOrg ? ' current' : '')}
+                onClick={() => run(() => onOpenOrg(o.slug))}>
+                <span className="shell-menu-label">{o.name}</span>
+                {elsewhere
+                  ? <span className="shell-menu-value dim">Already open</span>
+                  : <span className="shell-menu-value dim">
+                    {/* the SAME freshness rule the list rows obey: an
+                        unfresh snapshot shows no count rather than an
+                        old one presented as current */}
+                    {freshness !== 'current' ? '…'
+                      : typeof o.working === 'number' ? `${o.working}/${o.live}` : `${o.live}`}
+                  </span>}
+              </button>
+            )
+          })}
+          {!shown.length && <div className="dim pad">
+            {orgs.length ? 'no match' : 'no organizations yet'}</div>}
         </div>
       )}
     </div>

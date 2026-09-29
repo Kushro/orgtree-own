@@ -166,6 +166,61 @@ test('an unfresh snapshot withholds the menu list’s counts too', async () => {
   } finally { await m.view.unmount() }
 })
 
+test('Open organization… opens a SUBMENU beside the menu, not a list inside it', async () => {
+  const m = await menu()
+  try {
+    await inAct(async () => { m.view.el.querySelector<HTMLElement>('.shell-menu-button')!.click() })
+    const panel = m.view.el.querySelector<HTMLElement>('.shell-menu-panel')!
+    const itemsBefore = panel.querySelectorAll('[role="menuitem"]').length
+    await inAct(async () => { m.item('Open organization')!.click(); await flush(4) })
+    const sub = m.view.el.querySelector<HTMLElement>('.shell-menu-sub')
+    assert.ok(sub, 'the submenu opens')
+    assert.equal(sub!.getAttribute('role'), 'menu')
+    // user 2026-09-29 (image-21): the main menu must not grow — the rows live
+    // in their own menu, which is NOT inside the (scrolling) panel
+    assert.equal(panel.contains(sub), false, 'the organizations are not inside the main menu')
+    assert.equal(panel.querySelectorAll('[role="menuitem"]').length, itemsBefore,
+      'the main menu gained no rows')
+    const row = m.item('Open organization')!
+    assert.equal(row.getAttribute('aria-haspopup'), 'menu')
+    assert.equal(row.getAttribute('aria-controls'), sub!.id)
+    assert.equal(sub!.querySelectorAll('.shell-menu-org').length, ORGS.length)
+    // choosing an organization still opens it and closes the whole menu
+    await inAct(async () => { sub!.querySelector<HTMLElement>('.shell-menu-org')!.click() })
+    assert.deepEqual(m.calls, ['open:' + ORGS[0]!.slug])
+    assert.equal(m.view.el.querySelector('.shell-menu-panel'), null)
+    assert.equal(m.view.el.querySelector('.shell-menu-sub'), null)
+  } finally { await m.view.unmount() }
+})
+
+test('the organization submenu is keyboard-reachable, and Escape steps back to its row', async () => {
+  const m = await menu()
+  try {
+    await inAct(async () => { m.view.el.querySelector<HTMLElement>('.shell-menu-button')!.click() })
+    const row = m.item('Open organization')!
+    await inAct(async () => {
+      row.focus()
+      row.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+      await flush(4)
+    })
+    const sub = m.view.el.querySelector<HTMLElement>('.shell-menu-sub')!
+    assert.ok(sub, 'ArrowRight opens it')
+    assert.ok(sub.contains(document.activeElement), 'and moves focus into it')
+    await inAct(async () => {
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      await flush(2)
+    })
+    assert.ok(sub.contains(document.activeElement), 'arrows move within the submenu')
+    await inAct(async () => {
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flush(4)
+    })
+    assert.equal(m.view.el.querySelector('.shell-menu-sub'), null, 'Escape closes the submenu')
+    assert.ok(m.view.el.querySelector('.shell-menu-panel'), '…but not the menu')
+    assert.equal(document.activeElement, row, 'focus returns to the row')
+  } finally { await m.view.unmount() }
+})
+
 // -------------------------------------------------------- §3 the Homepage
 
 test('the Homepage opens an organization and creates in a SEPARATE window', async () => {
