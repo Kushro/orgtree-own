@@ -121,7 +121,8 @@ for its organization. A warm row runs immediately after the cold one.
   - 409 halted and killswitch;
   - 422 unaddressable release successor (inside the lock);
   - 409 keyed conflict, a keyed replay, and a stale epoch;
-  - the 512 retained-row cap;
+  - the 512 held-row cap (label `refusal:retained-row-cap` kept; the cap
+    counts held rows only since 2026-09-29);
   - a scratch path escape;
   - an outsider with no access route.
 - **Negative controls:**

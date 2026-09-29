@@ -34,8 +34,8 @@ pg3c-inventory.md):
 
   RESERVATIONS · the `reservations` section FOR UPDATE — every action scans
     and rewrites that one row, so two acquires of one resource queue on it
-    and the second sees the first (race test RT8). The 512-row cap
-    (reservations.py) is unchanged. Visibility reads of `work_items` are
+    and the second sees the first (race test RT8). The 512 cap
+    (reservations.py) counts held rows on that same row. Visibility reads of `work_items` are
     FOR SHARE; a release to a successor adds that mail's send rows.
 
   WATCHDOGS · `watchdogs`, `watchdog_tombs`, `lifecycle` FOR UPDATE (caps:

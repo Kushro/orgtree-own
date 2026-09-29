@@ -1377,14 +1377,14 @@ class Probe:
                  patches=[(self.m["reservations"], "_now", foreign_now)],
                  expected_unknown=("sqlite_connect:data:org-db:foreign",
                                    "statement:data:org-db:foreign"))
-        # the retained-row cap
+        # the 512 cap, which counts HELD rows only (user ruling D1, 2026-09-24)
         template = acquire(tool, "cap:template")
 
         def fill(o: Any) -> None:
             rows = o.d.setdefault("reservations", [])
             base = copy.deepcopy(next(r for r in rows if r["id"] == template["id"]))
-            base["state"] = "released"
-            while len(rows) < self.m["reservations"].MAX_RESERVATIONS:
+            base["state"] = "held"
+            while sum(r.get("state") == "held" for r in rows) < self.m["reservations"].MAX_RESERVATIONS:
                 clone = copy.deepcopy(base)
                 clone["id"] = "fixture-" + hashlib.sha256(str(len(rows)).encode()).hexdigest()[:16]
                 clone["resource"] = f"cap:{len(rows)}"
@@ -1393,7 +1393,7 @@ class Probe:
         self.run("reservation.acquire", "refusal:retained-row-cap", "warm", s, "owner", tool,
                  dict(action="acquire", resource="cap:over", item=item, candidate="a" * 40,
                       base="b" * 40, paths=["engine/api.py"]),
-                 refusal="512 retained-row cap reached")
+                 refusal="512 held-row cap reached")
 
     def material(self) -> None:
         s = self.mslug

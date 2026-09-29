@@ -75,14 +75,14 @@
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 287,
+          "start": 260,
+          "end": 309,
           "sha256": "0ce6a1383115623ef3331d6212c62e63d8e31c4751d28427b1d66106889fb1c3"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 525,
+          "start": 476,
+          "end": 567,
           "sha256": "3a31fb6ec0945627ceff6b30c7f7fe66c860934c29f03cccae9591bf46fb87ef"
         },
         {
@@ -232,9 +232,9 @@
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 350,
-          "end": 402,
-          "sha256": "bfc6aa0ab270c1f5d11e58565258d3f2b0413285ba7fe7f52ef9578f36dfb35a"
+          "start": 380,
+          "end": 444,
+          "sha256": "51dd0c5f0eaeb786e05aeb318d038b1b9b4df2e9cc89e386b767ae1c7ea55c8d"
         }
       ],
       "open_questions": [
@@ -269,13 +269,13 @@
         {
           "path": "engine/backend/orgtree/reservations.py",
           "start": 119,
-          "end": 149,
-          "sha256": "250d18de2759b8026d8c00f362d6c4fede13d8930d5b839f80f0bc38621e1e05"
+          "end": 171,
+          "sha256": "a5c40ce2c8118c5c42bcef67cf05cb0dd17e95821c54dadce69f0fc5ed1c833f"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 271,
-          "end": 287,
+          "start": 293,
+          "end": 309,
           "sha256": "82dc4e5c0c1f3bfd79b3f53ea0551eaece8371100350e6166a8eb44692ef4106"
         },
         {
@@ -286,8 +286,8 @@
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 348,
-          "end": 355,
+          "start": 378,
+          "end": 385,
           "sha256": "6aafbe62f5bfc4ca12d5ebcda1b6f6077665b87729403ecfdf773a602f2a5ae4"
         },
         {
@@ -474,8 +474,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         },
         {
@@ -514,7 +514,7 @@
         "Observed per-operation contacts on SYNTHETIC data, which is the evidence class this facet asked for (observed per-operation contacts, not live traffic). The source is the P02 probe tools/p02_operation_contacts.py (landed on v3 at b6568a1, with the agent-level mail-locality layer at 6721cad; method and limits in docs/state-system/p02-operation-contacts.md; P02 artifact r3 on p02-capture-per-operation-contacts-for-the-four, sha256 25cca77ab5b277627b03daf5d2b24c8a65b0bd5cf6599661f94ea7bfe33b10cb). It was re-run independently, and every observed fact below is asserted by tests/test_state_p02_contact_facets.py, which runs the same probe.",
         "Per variant (all 11, under both aliases, cold and warm), a call has exactly one attributed census record, and its statement count equals the harness's SQL-level count. There are 0 unbound statements. Only the primary org store is touched: no sidecar store, no foreign org store, no process or network contact, and no isolation-guard refusal. Cold calls read doc, log_d, log_l, meta and nodes with one new connection; warm calls read doc, meta and nodes on pooled connections. list-read, landing and overlap write nothing; list-scope, acquire, renew, recover, invalidate, release and land write doc; release-notify writes doc, log_d, log_l and nodes. Every write falls inside an explicit transaction on the autocommit primary store.",
         "Callback probes: supervisor.send_message and api.mail_notify are spies, counted and never delivered. release-notify calls each exactly once; no other variant calls either. Cold calls also repeat the os.mkdir(exist_ok) of the orgs directory (store._orgs_dir), a filesystem contact with no durable change.",
-        "Refusals and keyed paths have bounded contacts. 401 (token gate): no record, 0 statements. 403: 0 statements. The 409 halt/killswitch before the lock, the 422 unaddressable successor, the 422 retained-row cap, the 409 keyed conflict, the 422 stale epoch and a keyed replay all read but write nothing and wake nobody. A fresh keyed call writes its receipt (doc, log_l, meta) inside a transaction.",
+        "Refusals and keyed paths have bounded contacts. 401 (token gate): no record, 0 statements. 403: 0 statements. The 409 halt/killswitch before the lock, the 422 unaddressable successor, the 422 held-row cap, the 409 keyed conflict, the 422 stale epoch and a keyed replay all read but write nothing and wake nobody. A fresh keyed call writes its receipt (doc, log_l, meta) inside a transaction.",
         "Hidden-contact negative control: control:hidden-contact (a statement on a pooled connection through a plain cursor) is seen as census hidden_steps >= 1, and every other reservation row shows 0. A separate ORG-STORE control, control:foreign-org-contact, is classified org-db:foreign, and no other reservation row touches a foreign org store. That control is org-store locality only; agent-level mail locality is the next fact.",
         "Agent-level mail-locality negative control (the clause S2b ruling R1 left open). Each row's P02 `agents` block reads which agents an operation touched in two layers. Logical: the org's mail, mail_log, notices, delivering and audiences before and after the call. Physical: node ids in the statement parameters of agent-keyed rows (nodes, log_d). In all four release-notify rows (both aliases, cold and warm), every changed mail and mail_log entry, and every physically written agent row, belongs to the named successor alone (role target). The sender's own entries never change, so the contacts are never self-only, and no third agent is touched. The negative control control:third-agent-mail (a release whose notify step also posts to a third agent) is flagged both logically and physically (third_agent_mail >= 1, third_agent_rows_written >= 1). No other reservation row touches a third agent, and only release-notify produces mail.",
         "The same holds for a successor reachable only through an audience the user granted to the sender (P02 row audience-successor:reservation.release-notify, v3 0679103, S2c finding f1): its mail and mail_log changes and its physical node row belong to that successor alone, and no third agent is touched. Asserted by tests/test_state_p02_contact_facets.py.",
@@ -571,21 +571,21 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -599,9 +599,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -615,9 +615,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -631,9 +631,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -647,21 +647,21 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -675,9 +675,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -691,9 +691,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -708,9 +708,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         }
       ],
       "open_questions": []
@@ -724,21 +724,21 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 333,
-          "end": 340,
-          "sha256": "8f4fd480a407c693020b14b866a19a919ef5029f9964064856e90cb26ea29e2b"
+          "start": 359,
+          "end": 370,
+          "sha256": "a4882b0c42fdec296f8814d0142d7b296a91a2f8fd5843352866bb9f50e16fe1"
         }
       ],
       "open_questions": []
@@ -752,9 +752,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 333,
-          "end": 340,
-          "sha256": "8f4fd480a407c693020b14b866a19a919ef5029f9964064856e90cb26ea29e2b"
+          "start": 359,
+          "end": 370,
+          "sha256": "a4882b0c42fdec296f8814d0142d7b296a91a2f8fd5843352866bb9f50e16fe1"
         }
       ],
       "open_questions": []
@@ -768,9 +768,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 333,
-          "end": 340,
-          "sha256": "8f4fd480a407c693020b14b866a19a919ef5029f9964064856e90cb26ea29e2b"
+          "start": 359,
+          "end": 370,
+          "sha256": "a4882b0c42fdec296f8814d0142d7b296a91a2f8fd5843352866bb9f50e16fe1"
         }
       ],
       "open_questions": []
@@ -784,9 +784,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 333,
-          "end": 340,
-          "sha256": "8f4fd480a407c693020b14b866a19a919ef5029f9964064856e90cb26ea29e2b"
+          "start": 359,
+          "end": 370,
+          "sha256": "a4882b0c42fdec296f8814d0142d7b296a91a2f8fd5843352866bb9f50e16fe1"
         }
       ],
       "open_questions": []
@@ -800,21 +800,21 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 342,
-          "end": 407,
-          "sha256": "9fcf88e0943302399d1a2b89fdb5776e050120e9044d09bc6b0c79a740232c20"
+          "start": 372,
+          "end": 449,
+          "sha256": "a64f197d0837945e3f97d21a145ba3139d5d76acf91cd524920e3f7ea73a3c92"
         }
       ],
       "open_questions": []
@@ -828,9 +828,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 342,
-          "end": 407,
-          "sha256": "9fcf88e0943302399d1a2b89fdb5776e050120e9044d09bc6b0c79a740232c20"
+          "start": 372,
+          "end": 449,
+          "sha256": "a64f197d0837945e3f97d21a145ba3139d5d76acf91cd524920e3f7ea73a3c92"
         }
       ],
       "open_questions": []
@@ -844,9 +844,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 342,
-          "end": 407,
-          "sha256": "9fcf88e0943302399d1a2b89fdb5776e050120e9044d09bc6b0c79a740232c20"
+          "start": 372,
+          "end": 449,
+          "sha256": "a64f197d0837945e3f97d21a145ba3139d5d76acf91cd524920e3f7ea73a3c92"
         }
       ],
       "open_questions": []
@@ -856,16 +856,16 @@
       "status": "specified",
       "facts": [
         "Integration-key resource/scope mismatch refuses before row admission; key never grants authority.",
-        "Retained row count >=512 refuses, INCLUDING terminal rows, before same-owner ordinary replay; keyed replay precedes this cap.",
+        "The cap counts HELD rows only (user ruling D1, 2026-09-24; changed on purpose 2026-09-29, docket reservations-stop-working-for-good-after-an-orga): released, recovered, stale and landed rows are kept as history and never count. Order: keyed replay, then the per-resource pass (same-owner ordinary replay, held-by refusal, recovery, scope-staling), then the cap, immediately before a new row is appended; 512 HELD rows refuse 422 'this organization already holds the maximum of 512 active reservations; release one before acquiring another'. list and landing answer at most 512 rows (ruling D2): the oldest non-held rows are left out first and the answer gains truncated:true and omitted:<n>; below 512 it is unchanged.",
         "Recovery requires quiet heartbeat AND (expired lease OR holder not live); scope change does not bypass it.",
         "Paths <=128, length <=512; resource <=200; item <=96; positive bounded lease/stale <=86400. Preserve source truthy-default semantics."
       ],
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 342,
-          "end": 407,
-          "sha256": "9fcf88e0943302399d1a2b89fdb5776e050120e9044d09bc6b0c79a740232c20"
+          "start": 372,
+          "end": 449,
+          "sha256": "a64f197d0837945e3f97d21a145ba3139d5d76acf91cd524920e3f7ea73a3c92"
         }
       ],
       "open_questions": []
@@ -879,20 +879,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 409,
-          "end": 432,
+          "start": 451,
+          "end": 474,
           "sha256": "85188a08153c9474c652291d7370174e3d06330b99a661385dd53bdf79c72766"
         }
       ],
@@ -907,8 +907,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 409,
-          "end": 432,
+          "start": 451,
+          "end": 474,
           "sha256": "85188a08153c9474c652291d7370174e3d06330b99a661385dd53bdf79c72766"
         }
       ],
@@ -923,8 +923,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 409,
-          "end": 432,
+          "start": 451,
+          "end": 474,
           "sha256": "85188a08153c9474c652291d7370174e3d06330b99a661385dd53bdf79c72766"
         }
       ],
@@ -939,8 +939,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 409,
-          "end": 432,
+          "start": 451,
+          "end": 474,
           "sha256": "85188a08153c9474c652291d7370174e3d06330b99a661385dd53bdf79c72766"
         }
       ],
@@ -955,20 +955,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 467,
-          "end": 479,
+          "start": 509,
+          "end": 521,
           "sha256": "81d306184ded99e52365d65a6b9850a506fe99a888fc96f8736a64f50f4a34f9"
         }
       ],
@@ -983,8 +983,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 467,
-          "end": 479,
+          "start": 509,
+          "end": 521,
           "sha256": "81d306184ded99e52365d65a6b9850a506fe99a888fc96f8736a64f50f4a34f9"
         }
       ],
@@ -999,8 +999,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 467,
-          "end": 479,
+          "start": 509,
+          "end": 521,
           "sha256": "81d306184ded99e52365d65a6b9850a506fe99a888fc96f8736a64f50f4a34f9"
         }
       ],
@@ -1015,8 +1015,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 467,
-          "end": 479,
+          "start": 509,
+          "end": 521,
           "sha256": "81d306184ded99e52365d65a6b9850a506fe99a888fc96f8736a64f50f4a34f9"
         }
       ],
@@ -1031,20 +1031,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 481,
-          "end": 504,
+          "start": 523,
+          "end": 546,
           "sha256": "9890bb1ec07430541ba98609349ed34bf4c2261b833010ad4e1656e018cdcb06"
         }
       ],
@@ -1059,8 +1059,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 481,
-          "end": 504,
+          "start": 523,
+          "end": 546,
           "sha256": "9890bb1ec07430541ba98609349ed34bf4c2261b833010ad4e1656e018cdcb06"
         }
       ],
@@ -1075,8 +1075,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 481,
-          "end": 504,
+          "start": 523,
+          "end": 546,
           "sha256": "9890bb1ec07430541ba98609349ed34bf4c2261b833010ad4e1656e018cdcb06"
         }
       ],
@@ -1092,8 +1092,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 481,
-          "end": 504,
+          "start": 523,
+          "end": 546,
           "sha256": "9890bb1ec07430541ba98609349ed34bf4c2261b833010ad4e1656e018cdcb06"
         }
       ],
@@ -1108,20 +1108,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 453,
-          "end": 465,
+          "start": 495,
+          "end": 507,
           "sha256": "fadf172a503d3d230e696ec2af3f8b70ce73948deb634eca062c0e9b66444188"
         }
       ],
@@ -1136,8 +1136,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 453,
-          "end": 465,
+          "start": 495,
+          "end": 507,
           "sha256": "fadf172a503d3d230e696ec2af3f8b70ce73948deb634eca062c0e9b66444188"
         }
       ],
@@ -1152,8 +1152,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 453,
-          "end": 465,
+          "start": 495,
+          "end": 507,
           "sha256": "fadf172a503d3d230e696ec2af3f8b70ce73948deb634eca062c0e9b66444188"
         }
       ],
@@ -1168,8 +1168,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 453,
-          "end": 465,
+          "start": 495,
+          "end": 507,
           "sha256": "fadf172a503d3d230e696ec2af3f8b70ce73948deb634eca062c0e9b66444188"
         }
       ],
@@ -1184,20 +1184,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1212,8 +1212,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1228,8 +1228,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1244,8 +1244,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1260,20 +1260,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1288,8 +1288,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1304,8 +1304,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1321,8 +1321,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         }
       ],
@@ -1337,20 +1337,20 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 238,
-          "end": 268,
+          "start": 260,
+          "end": 290,
           "sha256": "366922c4fe18bb5ec063da5122fce4ab7d6cc710702ba6dada0df119ab74a805"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 434,
-          "end": 451,
+          "start": 476,
+          "end": 493,
           "sha256": "0eba851c2aa5da51e03dcb54f3de9ebd415ca8754faa82e7d90f01e331eb6477"
         },
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 527,
-          "end": 553,
+          "start": 569,
+          "end": 595,
           "sha256": "8f4a817ad70429fbd9b8759b3e143009851420f466cbfa47bac5d966d9440066"
         }
       ],
@@ -1365,8 +1365,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 527,
-          "end": 553,
+          "start": 569,
+          "end": 595,
           "sha256": "8f4a817ad70429fbd9b8759b3e143009851420f466cbfa47bac5d966d9440066"
         }
       ],
@@ -1381,8 +1381,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 527,
-          "end": 553,
+          "start": 569,
+          "end": 595,
           "sha256": "8f4a817ad70429fbd9b8759b3e143009851420f466cbfa47bac5d966d9440066"
         }
       ],
@@ -1398,8 +1398,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 527,
-          "end": 553,
+          "start": 569,
+          "end": 595,
           "sha256": "8f4a817ad70429fbd9b8759b3e143009851420f466cbfa47bac5d966d9440066"
         }
       ],
@@ -12687,9 +12687,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         },
         {
           "path": "engine/backend/orgtree/api.py",
@@ -12752,9 +12752,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 289,
-          "end": 331,
-          "sha256": "29265653d7b9b0221e24fcc1fa86c4631a98684ae5a7907543a2b394d4ff14af"
+          "start": 311,
+          "end": 357,
+          "sha256": "31af5fe5bf8e62002ae408ff192ed0ef6b7d0818ee00832b5def08648709693f"
         },
         {
           "path": "engine/backend/orgtree/api.py",
@@ -12814,9 +12814,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 333,
-          "end": 340,
-          "sha256": "8f4fd480a407c693020b14b866a19a919ef5029f9964064856e90cb26ea29e2b"
+          "start": 359,
+          "end": 370,
+          "sha256": "a4882b0c42fdec296f8814d0142d7b296a91a2f8fd5843352866bb9f50e16fe1"
         },
         {
           "path": "engine/backend/orgtree/api.py",
@@ -12876,9 +12876,9 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 342,
-          "end": 407,
-          "sha256": "9fcf88e0943302399d1a2b89fdb5776e050120e9044d09bc6b0c79a740232c20"
+          "start": 372,
+          "end": 449,
+          "sha256": "a64f197d0837945e3f97d21a145ba3139d5d76acf91cd524920e3f7ea73a3c92"
         },
         {
           "path": "engine/backend/orgtree/api.py",
@@ -12938,8 +12938,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 409,
-          "end": 432,
+          "start": 451,
+          "end": 474,
           "sha256": "85188a08153c9474c652291d7370174e3d06330b99a661385dd53bdf79c72766"
         },
         {
@@ -13000,8 +13000,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 467,
-          "end": 479,
+          "start": 509,
+          "end": 521,
           "sha256": "81d306184ded99e52365d65a6b9850a506fe99a888fc96f8736a64f50f4a34f9"
         },
         {
@@ -13062,8 +13062,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 481,
-          "end": 504,
+          "start": 523,
+          "end": 546,
           "sha256": "9890bb1ec07430541ba98609349ed34bf4c2261b833010ad4e1656e018cdcb06"
         },
         {
@@ -13124,8 +13124,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 453,
-          "end": 465,
+          "start": 495,
+          "end": 507,
           "sha256": "fadf172a503d3d230e696ec2af3f8b70ce73948deb634eca062c0e9b66444188"
         },
         {
@@ -13188,8 +13188,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         },
         {
@@ -13250,8 +13250,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 525,
+          "start": 548,
+          "end": 567,
           "sha256": "13e5bc7816f34e54b1005ace03007510ba0e2ea97d96aa4309775a22b33defd5"
         },
         {
@@ -13312,8 +13312,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 527,
-          "end": 553,
+          "start": 569,
+          "end": 595,
           "sha256": "8f4a817ad70429fbd9b8759b3e143009851420f466cbfa47bac5d966d9440066"
         },
         {
@@ -33492,7 +33492,7 @@
       ]
     },
     {
-      "id": "e3acd1a95b0e469e20d6f3641d107e0f5da615b1d663d954161a0fab5060b72b",
+      "id": "37ef9b1c6e5011bac7730dd5aa3510f04d5fb50bdad10ca7743d89917a056070",
       "disposition": "mapped",
       "contracts": [
         "reservation.list-read",
@@ -33511,14 +33511,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 281,
-          "end": 282,
+          "start": 303,
+          "end": 304,
           "sha256": "932357b23b16cbcba50389e38804360af26cc3f680fbf1020613eda86ab1e2fc"
         }
       ]
     },
     {
-      "id": "059af2ba2bbbffe8efefbad4bdadda3fe2a664ed5abcabc3893f2eb7840dd9e4",
+      "id": "bd10f40ec9b7f9db8565bd1feb8bd31e1c787e4b4b337490aa7d41a1e3c364a5",
       "disposition": "mapped",
       "contracts": [
         "reservation.acquire",
@@ -33532,14 +33532,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 284,
-          "end": 284,
+          "start": 306,
+          "end": 306,
           "sha256": "eecbefa704e8b1869a89d86d1b98ac8db91706476f8efe6a9cd9f8bc3f008c63"
         }
       ]
     },
     {
-      "id": "c154dfd932cc8c4d06016ddc9523f8badbb5e4636f04213308ebe2301a3c195f",
+      "id": "83201c886bf102a5227bac7cdc8ac632ad20fb28e1453fe479bfb6e5cfa857bb",
       "disposition": "mapped",
       "contracts": [
         "reservation.list-read",
@@ -33549,14 +33549,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 286,
-          "end": 286,
+          "start": 308,
+          "end": 308,
           "sha256": "7ab76b9228d4748a6428ff093fe98409c3df7e35c60850a30a7a02fed0527d3f"
         }
       ]
     },
     {
-      "id": "e4c4f8a7a30c8b37ad8257653c8ea66cc891518433bf274ecca40cdd2d321b67",
+      "id": "93c3b3f748816a41c59fc95cddea0ff8015a884ad409220c206972416959b21d",
       "disposition": "mapped",
       "contracts": [
         "reservation.landing"
@@ -33565,14 +33565,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 333,
-          "end": 333,
+          "start": 359,
+          "end": 359,
           "sha256": "31b4eb1af8e5ac00a9221bc8a3df4d09832e28376fa3d739d8f7f1f28598124c"
         }
       ]
     },
     {
-      "id": "47ae4c5be4e2bc8b8eacc6876b4ca2664743587ea1859100f0a5a51640a85605",
+      "id": "d95c48f8cc05c94797b17e19e59837cbe89013726f720048ae7e214befb3659f",
       "disposition": "mapped",
       "contracts": [
         "reservation.acquire"
@@ -33581,14 +33581,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 341,
-          "end": 341,
+          "start": 371,
+          "end": 371,
           "sha256": "a5150f91d3eb74a460f9c413a17659956758989c954192547671f8ed2d9042b3"
         }
       ]
     },
     {
-      "id": "4eb13b111624ea2766e9110298bfa8269ea0bede113e146b426c92b1dcaa83c7",
+      "id": "82198479f8238e3f529491feaaa79279f5471046451cc2065367f5172e24886b",
       "disposition": "mapped",
       "contracts": [
         "reservation.overlap"
@@ -33597,14 +33597,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 412,
-          "end": 412,
+          "start": 454,
+          "end": 454,
           "sha256": "0c35308fff0500e62f7d6232d3a2d6ebfb7283840825bff27aecb2307d1b7b8b"
         }
       ]
     },
     {
-      "id": "7879a37b839edb5e3748b9965d84ac349c9be4842c5f3f7aba63a7075a8129db",
+      "id": "a607c44083c473ef5dedd74a602e0dddda4ab3e19c00b8e69c9ab5b705c27f50",
       "disposition": "mapped",
       "contracts": [
         "reservation.recover"
@@ -33613,14 +33613,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 437,
-          "end": 437,
+          "start": 479,
+          "end": 479,
           "sha256": "bffe47053c950959402b062d2bf956a7f84647fa83d9d3975f3aa65593dd67b3"
         }
       ]
     },
     {
-      "id": "397db76a54e2ed349f8b0649f7a103f938bca382768f9cc645d07a89bb8a072a",
+      "id": "edaf39c7dfe35a0bb2062ae9ecaf24d4d2352df1c43961ab98ddd967d09ff91b",
       "disposition": "mapped",
       "contracts": [
         "reservation.renew",
@@ -33632,14 +33632,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 451,
-          "end": 451,
+          "start": 493,
+          "end": 493,
           "sha256": "546e24067ac7b11698c1ffd2e6c9d73f62617d2c636f6a6e1845a6c8de8d26d7"
         }
       ]
     },
     {
-      "id": "9597456258ba3543d2bc68ed06bf83269939213ca4ff3008ff006a6c154ab257",
+      "id": "35d3cf26a3220338521e01223a799837dce7ddba5293951f5506fae1b0f8b146",
       "disposition": "mapped",
       "contracts": [
         "reservation.invalidate"
@@ -33648,14 +33648,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 453,
-          "end": 453,
+          "start": 495,
+          "end": 495,
           "sha256": "c1215992dd48cea5e59cb6de6383a26cefd3952a3173525dea211b6d4ab83f20"
         }
       ]
     },
     {
-      "id": "f647c0eac7198acc3255be8fe087cbb4dc1d250f7e972ce7d6ec896e9d57537a",
+      "id": "8ae78837ff8da7b2339df25851aa150390b5e476dde8c1f411873346b437b3ea",
       "disposition": "mapped",
       "contracts": [
         "reservation.renew"
@@ -33664,14 +33664,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 467,
-          "end": 467,
+          "start": 509,
+          "end": 509,
           "sha256": "53ec259296dcfdc7812b4b7f0a348383267b9f66e8e01795ea66dc4a8eb89640"
         }
       ]
     },
     {
-      "id": "949054d5e1f35da977d4730aaebc22cfc0af5cd91f083611a2da70684a1fc0b0",
+      "id": "2479585e3a4ee5ea44a318d24ebaa9949c70c7f0b4a6f69e8e5f0dfae9baa9a2",
       "disposition": "mapped",
       "contracts": [
         "reservation.recover"
@@ -33680,14 +33680,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 481,
-          "end": 481,
+          "start": 523,
+          "end": 523,
           "sha256": "fea42b15594b624a06cbe336367e56d91de99e8fd711d935637002bb06326644"
         }
       ]
     },
     {
-      "id": "444aa72a237a1b3fc4fb890c2c7ca2822a5215b361b24a19643a00e4c07f4428",
+      "id": "a2ad01b2d9e556fa6a70a6ad48952d821325ff602e463720397812a58679c901",
       "disposition": "mapped",
       "contracts": [
         "reservation.release",
@@ -33697,14 +33697,14 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 506,
-          "end": 506,
+          "start": 548,
+          "end": 548,
           "sha256": "ed819270c1268053869e6b056bfb8ef2bd939ec3c5fc0a8d9ecacae8d0f30fe4"
         }
       ]
     },
     {
-      "id": "95adf8015fc42d4848600016430ef4f31ba774fefc0755c27610706deaa65408",
+      "id": "ef2bba76db29f01cf5e7167daceb9ac17f9024113cbb8d3640f83d4b1b22a0b2",
       "disposition": "mapped",
       "contracts": [
         "reservation.land"
@@ -33713,8 +33713,8 @@
       "source_refs": [
         {
           "path": "engine/backend/orgtree/reservations.py",
-          "start": 527,
-          "end": 527,
+          "start": 569,
+          "end": 569,
           "sha256": "5298ab30e775b7ddec0cac20c8d500462d29d512dfe6677c7efa6de1467c8436"
         }
       ]

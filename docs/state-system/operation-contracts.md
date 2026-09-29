@@ -93,9 +93,11 @@ Important source behavior is retained:
 
 - Every action is TX_POST in the public receipt classifier, including a domain
   read. Domain mode must not be presented as the actual database contact set.
-- Integration-key replay precedes the retained-row cap, which precedes ordinary
-  same-owner acquire replay. The cap counts all 512 retained rows, including
-  terminal rows. Its native admission mechanism remains unresolved.
+- Integration-key replay and ordinary same-owner acquire replay both precede
+  the 512 cap, which counts HELD rows only (user ruling D1; changed on purpose
+  2026-09-29). Terminal rows are kept as history; list and landing answer at
+  most 512 rows, marked `truncated`/`omitted` when rows are left out (D2).
+  Its native admission mechanism remains unresolved.
 - A named resource exposes bounded contention metadata, not private item paths,
   receipts or mutation permission.
 - Scope changes do not steal a live claim; recovery requires quiet heartbeat
@@ -706,8 +708,9 @@ organization or PostgreSQL. The suite establishes:
   mint time, including future-skew and later backwards-clock cases. A still
   retained matching receipt can replay even below that watermark.
 
-The reservation cap still counts 512 retained rows across the organization,
-including terminal rows. Its native conflict/admission policy has not been
+The reservation cap counts 512 HELD rows across the organization; terminal
+rows are history and never count (user ruling D1, 2026-09-24). Its native
+conflict/admission policy has not been
 chosen or qualified. Similarly, the legacy receipt watermark is an existing
 mechanism to model, not permission to add a shared write gate to the new system.
 The packet's native per-owner custody and narrow conflicts remain required.

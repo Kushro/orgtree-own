@@ -199,14 +199,22 @@ class OverlappingReservations(unittest.TestCase):
             acquire(self.slug, 'x', spec=under)
         self.assertEqual(self._rows(), [], 'CONTROL FAILED AS DESIGNED: nothing may land')
 
-    def test_the_512_cap_is_unchanged(self) -> None:
+    def test_the_512_cap_counts_held_rows_only(self) -> None:
+        # user ruling D1: finished rows are history, not capacity
         org = store.load_org(self.slug)
         org.d['reservations'] = [{'id': f'res-old{i}', 'owner': 'x', 'resource': f'r{i}',
                                   'state': 'released'} for i in range(reservations.MAX_RESERVATIONS)]
         store.save_org(org)
+        acquire(self.slug, 'y')
+        self.assertEqual(len(self._rows()), reservations.MAX_RESERVATIONS + 1)
+        org = store.load_org(self.slug)
+        org.d['reservations'] = [{'id': f'res-held{i}', 'owner': 'x', 'resource': f'r{i}',
+                                  'state': 'held'} for i in range(reservations.MAX_RESERVATIONS)]
+        store.save_org(org)
         with self.assertRaises(LedgerError) as cm:
             acquire(self.slug, 'y')
-        self.assertIn(str(reservations.MAX_RESERVATIONS), str(cm.exception))
+        self.assertIn(f'maximum of {reservations.MAX_RESERVATIONS} active', str(cm.exception))
+        self.assertEqual(len(self._rows()), reservations.MAX_RESERVATIONS, 'a refusal commits nothing')
 
 
 if __name__ == '__main__':
