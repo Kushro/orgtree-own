@@ -18,17 +18,17 @@ import tempfile
 import unittest
 
 import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
+import child_python
 
 ROOT = Path(__file__).resolve().parents[1]
 SCALE = ROOT / 'tools' / 'scale'
-ROOTS = [ROOT / 'tests', ROOT / 'engine' / 'backend', ROOT, SCALE]
 
 
 def _run(code, env, *args):
     env = {k: v for k, v in env.items() if k not in ('PYTHONPATH', 'PYTHONHOME')}
-    # the bundled runtime's ._pth lists the MAIN checkout: put this one first
-    prelude = f'import sys; sys.path[:0] = {[str(p) for p in ROOTS]!r}\n'
-    return subprocess.run([sys.executable, '-I', '-c', prelude + code, *map(str, args)],
+    # child_python roots the child in THIS checkout; tests/ and tools/scale too
+    return subprocess.run(child_python.argv('-c', code, *map(str, args), flags=('-I',),
+                                            extra_roots=(ROOT / 'tests', SCALE)),
                           env=env, capture_output=True, text=True, timeout=120)
 
 
