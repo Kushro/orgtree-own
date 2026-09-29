@@ -482,3 +482,33 @@ test('(16)  open requests render as ONE composed batch card per agent',
       'the explicit-skip affordance is gone — a tab the user wants to leave '
       + 'unanswered has no honest path, and close-all loses its meaning')
   })
+
+test('(16b) a server-composed batch primed into the header is listed as it came, never recomposed',
+  async () => {
+    // The live-question primer (askprime.patchNodeAsk) stores a node's detail
+    // `ask` — already the composed batch — in `tree.asks` when the selected
+    // tree does not hold that node. It replaces the raw row with the same id.
+    // Recomposing it dropped its option-bearing tabs and its credits/scope
+    // CAS stamps, so the batch submit would be refused (review-sol, befede0).
+    const { patchNodeAsk } = await import('../src/askprime')
+    const { openAsks } = await import('../src/canvas/openasks')
+    const batch = {
+      id: 'q1', node: 'far', kind: 'batch', status: 'open', at: '2026-09-29T09:00:00Z',
+      tabs: [
+        { kind: 'question', question: 'Ship it?', options: [{ label: 'yes' }, { label: 'no' }] },
+        { kind: 'question', question: 'Tonight?', options: [{ label: 'now' }, { label: 'later' }] },
+        { kind: 'credits', id: 'c1', old: 10, new: 20, reason: 'more' },
+        { kind: 'scope', id: 's1', item: { kind: 'tool', tool: 'Bash' }, reason: 'run', label: 'tool: Bash' },
+      ],
+      revs: { ask: 4, credits: 2, scope: 7 }, question: 'Ship it?', rev: 4,
+    }
+    const tree = patchNodeAsk({ roots: [], asks: [
+      { id: 'q1', node: 'far', status: 'open', at: '2026-09-29T10:00:00Z', rev: 4,
+        questions: [{ question: 'Ship it?' }] },
+      { id: 'c1', node: 'far', kind: 'credit', status: 'pending', at: '2026-09-29T09:00:00Z',
+        rev: 2, old: 10, new: 20, reason: 'more' },
+    ] as never }, 'far', batch as never)
+    const listed = openAsks(tree, [])
+    assert.equal(listed.length, 1, 'one card for the agent')
+    assert.deepEqual(listed[0], batch, 'the served batch, tabs and revs untouched')
+  })

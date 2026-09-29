@@ -47,7 +47,13 @@ export function openAsks(tree: Pick<TreePayload, 'asks'> | null | undefined,
     if (askIsOpen(a) && !batched.has(a.node)) loose.set(a.node, [...(loose.get(a.node) ?? []), a])
   }
   for (const [node, rows] of loose) {
-    const batch = composeBatch(node, rows)
+    // ⚠ A SERVER-COMPOSED BATCH WINS. The live-question primer
+    // (askprime.patchNodeAsk) stores a node's detail `ask` — already kind
+    // `batch`, with its real tabs and per-store revs — in the header when the
+    // selected tree does not hold the node. Recomposing it would drop its tabs
+    // and CAS stamps (review-sol, befede0), so it is listed as it came.
+    const served = rows.find((r) => r.kind === 'batch')
+    const batch = served ?? composeBatch(node, rows)
     if (batch) out.push(batch)
   }
   return out.filter(a => !askSubmitted(a.id))
