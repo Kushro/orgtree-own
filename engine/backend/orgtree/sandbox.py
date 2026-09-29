@@ -409,7 +409,12 @@ def on_disk(slug: str) -> bool:
     if hit and time.time() - hit[0] < 10:
         return hit[1]
     try:
-        val = bool(store.load_org(slug).d.get("disk"))
+        # the ONE doc row, not the document: this ran a whole private
+        # load_org every 10 s per org from read_scratch, usage walks and
+        # transcript reads — ~21 MB each at N1000 (N1000 #4)
+        sect = store.read_doc_sections(slug, ("disk",))
+        val = bool((sect if sect is not None
+                    else store.load_org(slug).d).get("disk"))
     except Exception:                                    # noqa: BLE001
         val = False
     _disk_flag[slug] = (time.time(), val)

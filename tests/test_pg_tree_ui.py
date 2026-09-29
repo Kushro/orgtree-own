@@ -93,6 +93,45 @@ class CommittedTree(unittest.TestCase):
         self.assertEqual(tag, self.before)
         self.assertIsNone(body)
 
+    def expire(self):
+        # what IDLE_S does to an entry nobody read for a minute
+        with tree_ui._lock:
+            tree_ui._cache.clear()
+
+    def test_proof_of_freshness_outlives_an_idle_entry(self):
+        """N1000 #4: at N1000 every tree read after a quiet minute published an
+        unknown change set, and the next reader paid a ~21 MB full reload."""
+        self.expire()
+        org = store.load_org(self.slug)
+        org.nodes['boss']['last_status'] = {'summary': 'after idle'}
+        store.save_org(org)
+        loads = dict(store.full_load_counts)
+        with patch.object(store, 'external_change', side_effect=AssertionError('unneeded full refresh')):
+            _, body, _ = self.read()
+        self.assertIn('after idle', body.decode())
+        self.assertEqual(dict(store.full_load_counts), loads)
+
+    def test_control_without_the_proof_an_idle_read_refreshes_in_full(self):
+        self.expire()
+        with tree_ui._lock:
+            tree_ui._verified.clear()
+        seen = []
+        real = store.external_change
+        with patch.object(store, 'external_change',
+                          side_effect=lambda slug, reason='': (seen.append(reason), real(slug, reason))):
+            self.read()
+        self.assertEqual(seen, ['tree_unverified'])
+
+    def test_foreign_commit_after_an_idle_entry_is_still_refreshed(self):
+        stale = store.cached_org(self.slug)
+        self.expire()
+        self.external_name()
+        self.assertNotEqual(stale.d['name'], 'External title')
+        before = store.full_load_counts['unknown:tree_unverified']
+        _, body, _ = self.read()
+        self.assertEqual(json.loads(body)['tree']['name'], 'External title')
+        self.assertEqual(store.full_load_counts['unknown:tree_unverified'], before + 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -60,6 +60,9 @@ class Stats:
     notifications: int = 0
     malformed: int = 0
     gaps: int = 0
+    #: gaps whose every revision was this process's own commit, so the
+    #: callback was given the last one as an ordinary change (N1000 #4)
+    gaps_local: int = 0
     catchups: int = 0
     polls: int = 0
     reconnects: int = 0
@@ -126,6 +129,12 @@ class RevisionFeed:
                 self.stats.gaps += 1
             if changed:
                 self.stats.changes += 1
+        if gap and last is not None and _gap_is_local(org, last, revision):
+            # a poll that read a revision before its NOTIFY was drained, or a
+            # reconnect across commits made HERE: nothing foreign was missed
+            with self._lock:
+                self.stats.gaps_local += 1
+            gap = False
         if changed:
             self._on_change(org, revision, gap)
         with self._lock:
@@ -388,6 +397,25 @@ def _take_local(slug: str, revision: int) -> "bool | None":
                 undecided.discard(min(undecided))
             return None
         return mine
+
+
+def _gap_is_local(slug: str, last: int, revision: int) -> bool:
+    """Were ALL of the revisions a gap skipped, (last, revision), made here,
+    and is ``revision`` itself made here or in flight here? Then no foreign
+    commit hides in the gap, and ``revision`` can be judged like any NOTIFY.
+    The skipped ones are settled (and pruned) now, by the same exact
+    membership test, an in-flight one left undecided for its own answer; any
+    one not made here keeps the gap."""
+    if revision - last - 1 > _LOCAL_CAP:
+        return False
+    with _local_lock:
+        if not any(revision in state.get(slug, ())
+                   for state in (_inflight, _committed, _local_set)):
+            return False
+    for r in range(last + 1, revision):
+        if _take_local(slug, r) is False:
+            return False
+    return True
 
 
 def engine_callback(publish_unknown: Callable[[str], None],

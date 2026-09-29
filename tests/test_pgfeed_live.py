@@ -201,6 +201,47 @@ class Rt9Live(unittest.TestCase):
         self.assertEqual((unknown, told), ([slug], [slug]))
         self.assertGreaterEqual(r.feed.stats.notifications, 2)
 
+    def test_a_slow_commit_answer_is_not_a_full_reload(self) -> None:
+        """N1000 #4 (attempt 7b): under GIL load the committing thread got
+        COMMIT's answer later than the feed's bounded wait, the feed took the
+        commit for foreign, and the next chart/read_scratch reloaded the whole
+        org (~21 MB). Here the answer is held for 3x the wait: the commit must
+        stay a section refresh, and a foreign commit afterwards must still
+        reload (the control that the feed is live and judging)."""
+        slug = _fresh_org("n1000-slow-answer")
+        store.cached_org(slug)                                  # warm
+        told: list = []
+        r = self.rig(pgfeed.engine_callback(store.external_change, told.append))
+        self.assertTrue(_wait(lambda: r.feed.last_seen(slug) == _rev(slug)))
+        real = pgfeed.confirm_local
+        held: list = []
+
+        def slow(s: str, rev: int) -> None:
+            if s == slug:
+                held.append(rev)
+                time.sleep(3 * pgfeed.INFLIGHT_WAIT_S)
+            real(s, rev)
+        loads = dict(store.full_load_counts)
+        with mock.patch.object(pgfeed, "confirm_local", slow):
+            org = store.load_org(slug)
+            org.d["nodes"]["a"]["name"] = "slow-answer"
+            store.save_org(org)
+        rev = _rev(slug)
+        self.assertEqual(held, [rev], "the answer was never held: the probe did nothing")
+        self.assertTrue(_wait(lambda: r.feed.last_seen(slug) == rev))
+        self.assertTrue(_wait(lambda: rev not in pgfeed._undecided.get(slug, set())))
+        self.assertGreaterEqual(pgfeed.causes.get("undecided", 0), 1,
+                                "the NOTIFY did not outrun the held answer")
+        self.assertEqual(store.cached_org(slug).d["nodes"]["a"]["name"], "slow-answer")
+        self.assertEqual(dict(store.full_load_counts), loads)
+        self.assertEqual(told, [])
+        last = _foreign_rename(slug, "foreign-after-slow")
+        self.assertTrue(_wait(lambda: r.feed.last_seen(slug) == last))
+        self.assertTrue(_wait(lambda: told == [slug]), told)
+        self.assertEqual(store.cached_org(slug).d["nodes"]["a"]["name"], "foreign-after-slow")
+        self.assertEqual(store.full_load_counts["unknown:external"],
+                         loads.get("unknown:external", 0) + 1)
+
     def test_a_revision_is_not_reported_published_before_its_changes_are(self) -> None:
         """review f2 (review-astra's probe): inside _publish_changes, after
         COMMIT, the new revision must not yet count as published or known."""

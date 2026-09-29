@@ -309,7 +309,8 @@ class InFlight(unittest.TestCase):
     because its NOTIFY outran COMMIT's answer (foreground-tree F3-0)."""
 
     def setUp(self) -> None:
-        for state in (pgfeed._local, pgfeed._local_set, pgfeed._inflight, pgfeed._committed):
+        for state in (pgfeed._local, pgfeed._local_set, pgfeed._inflight, pgfeed._committed,
+                      pgfeed._undecided):
             state.clear()
             self.addCleanup(state.clear)
         pgfeed._budget.update(window=0.0, spent=0.0)
@@ -346,16 +347,41 @@ class InFlight(unittest.TestCase):
         self.assertLess(self.timed(7), 0.02)              # the abort answered at once
         self.assertEqual((self.unknown, self.sent), (["a"], ["a"]))
 
-    def test_an_unanswered_commit_is_foreign_after_a_bounded_wait(self) -> None:
+    def test_an_unanswered_commit_is_undecided_after_a_bounded_wait(self) -> None:
+        """N1000 #4: an answer that is merely slow (GIL load) no longer costs
+        a full reload; the commit's own confirmation settles it."""
         pgfeed.begin_local("a", 7)
         elapsed = self.timed(7)
-        self.assertEqual((self.unknown, self.sent), (["a"], ["a"]))
+        self.assertEqual((self.unknown, self.sent), ([], []))
         self.assertLess(elapsed, pgfeed.INFLIGHT_WAIT_S + 0.05)
         self.assertGreaterEqual(elapsed, pgfeed.INFLIGHT_WAIT_S - 0.01)
-        self.assertEqual(pgfeed._inflight["a"], set())    # no stale entry is kept
+        self.assertEqual((pgfeed._inflight["a"], pgfeed._undecided["a"]), (set(), {7}))
+        self.assertFalse(pgfeed.snapshot_changes_published(None, "a", 6, 7))
         pgfeed.confirm_local("a", 7)                      # its late confirmation
+        self.assertEqual(pgfeed._undecided["a"], set())
+        self.assertEqual(pgfeed._committed.get("a", set()), set())   # settled, not re-kept
+        pgfeed.note_local("a", 7)
+        self.assertTrue(pgfeed.snapshot_changes_published(None, "a", 6, 7))
         self.cb("a", 8, False)                            # does not make 8 local
-        self.assertEqual(self.unknown, ["a", "a"])
+        self.assertEqual((self.unknown, self.sent), (["a"], ["a"]))
+
+    def test_an_undecided_commit_that_aborts_reloads_then(self) -> None:
+        """The number was freed, so whatever committed it is foreign."""
+        pgfeed.begin_local("a", 7)
+        self.timed(7)
+        self.assertEqual(self.unknown, [])
+        pgfeed.note_local("a", 6)
+        self.assertTrue(pgfeed.snapshot_changes_published(None, "a", 5, 6))   # below it: fine
+        pgfeed.abort_local("a", 7)
+        self.assertEqual((self.unknown, self.sent), (["a"], ["a"]))
+        self.assertEqual(pgfeed._undecided["a"], set())
+        pgfeed.abort_local("a", 7)                        # answered once: acts once
+        self.assertEqual(self.unknown, ["a"])
+
+    def test_control_an_abort_of_a_never_notified_revision_acts_not(self) -> None:
+        pgfeed.begin_local("a", 7)
+        pgfeed.abort_local("a", 7)
+        self.assertEqual((self.unknown, self.sent), ([], []))
 
     def test_the_feed_waits_at_most_its_budget_across_a_backlog(self) -> None:
         for r in range(1, 11):
@@ -364,9 +390,15 @@ class InFlight(unittest.TestCase):
         for r in range(1, 11):
             self.cb("a", r, False)
         elapsed = time.monotonic() - started
-        self.assertEqual(len(self.unknown), 10)
+        self.assertEqual(self.unknown, [])
+        self.assertEqual(pgfeed._undecided["a"], set(range(1, 11)))
         self.assertLess(elapsed, pgfeed.INFLIGHT_BUDGET_S + 0.1)
         self.assertGreater(10 * pgfeed.INFLIGHT_WAIT_S, pgfeed.INFLIGHT_BUDGET_S + 0.1)
+        for r in range(1, 6):
+            pgfeed.confirm_local("a", r)
+        for r in range(6, 11):
+            pgfeed.abort_local("a", r)
+        self.assertEqual(len(self.unknown), 5)
 
     def test_a_confirmation_is_not_a_publication(self) -> None:
         """review f2: the COMMIT answer tells the feed the commit was ours; the
@@ -385,6 +417,71 @@ class InFlight(unittest.TestCase):
         pgfeed.begin_local("a", 7)
         pgfeed.note_local("a", 7)
         self.cb("a", 7, True)
+        self.assertEqual(self.unknown, ["a"])
+
+
+class LocalGaps(unittest.TestCase):
+    """N1000 #4: a poll can read a revision before its NOTIFY is drained, and
+    a reconnect can skip commits made here. A gap made only of this process's
+    own commits hides nothing foreign and must not force a full reload; a gap
+    with any revision not made here still must."""
+
+    def setUp(self) -> None:
+        for state in (pgfeed._local, pgfeed._local_set, pgfeed._inflight, pgfeed._committed,
+                      pgfeed._undecided):
+            state.clear()
+            self.addCleanup(state.clear)
+        pgfeed._budget.update(window=0.0, spent=0.0)
+        self.addCleanup(pgfeed._budget.update, window=0.0, spent=0.0)
+        self.unknown: list[str] = []
+        self.sent: list[str] = []
+        self.calls: list = []
+        cb = pgfeed.engine_callback(self.unknown.append, self.sent.append)
+        self.feed = pgfeed.RevisionFeed(
+            lambda: None, lambda o, r, g: (self.calls.append((o, r, g)), cb(o, r, g)))
+        self.feed.observe("a", 4, source="catchup")      # baseline
+
+    def test_a_poll_ahead_of_its_notify_for_our_commit_is_no_reload(self) -> None:
+        pgfeed.begin_local("a", 5)
+        pgfeed.confirm_local("a", 5)
+        self.feed.observe("a", 5, source="poll")
+        self.feed.observe("a", 5, source="notify")      # the late NOTIFY: ignored
+        self.assertEqual((self.feed.stats.gaps, self.feed.stats.gaps_local), (1, 1))
+        self.assertEqual(self.calls, [("a", 5, False)])
+        self.assertEqual((self.unknown, self.sent), ([], []))
+
+    def test_a_reconnect_across_our_own_commits_is_no_reload(self) -> None:
+        for r in (5, 6, 7):
+            pgfeed.begin_local("a", r)
+            pgfeed.confirm_local("a", r)
+        self.feed.observe("a", 7, source="catchup")
+        self.assertEqual(self.calls, [("a", 7, False)])
+        self.assertEqual(self.unknown, [])
+        self.assertEqual(pgfeed._committed["a"], set())  # every skipped one was settled
+
+    def test_a_foreign_revision_inside_the_gap_still_reloads(self) -> None:
+        for r in (5, 7):                                # 6 was another process's
+            pgfeed.begin_local("a", r)
+            pgfeed.confirm_local("a", r)
+        self.feed.observe("a", 7, source="catchup")
+        self.assertEqual(self.calls, [("a", 7, True)])
+        self.assertEqual((self.unknown, self.sent), (["a"], ["a"]))
+        self.assertEqual(self.feed.stats.gaps_local, 0)
+
+    def test_a_foreign_last_revision_keeps_the_gap(self) -> None:
+        self.feed.observe("a", 5, source="poll")        # nothing of ours at all
+        self.assertEqual(self.calls, [("a", 5, True)])
+        self.assertEqual(self.unknown, ["a"])
+
+    def test_an_in_flight_skipped_revision_is_undecided_not_foreign(self) -> None:
+        pgfeed.begin_local("a", 5)                      # never answered in time
+        pgfeed.begin_local("a", 6)
+        pgfeed.confirm_local("a", 6)
+        self.feed.observe("a", 6, source="poll")
+        self.assertEqual(self.calls, [("a", 6, False)])
+        self.assertEqual(self.unknown, [])
+        self.assertEqual(pgfeed._undecided["a"], {5})
+        pgfeed.abort_local("a", 5)                      # it was not ours after all
         self.assertEqual(self.unknown, ["a"])
 
 
