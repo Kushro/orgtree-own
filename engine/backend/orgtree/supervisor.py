@@ -12152,6 +12152,12 @@ def _edit_deny(path: str, suffix: str = "") -> str:
     return f"Edit({base}/{suffix})" if suffix else f"Edit({base})"
 
 
+#: file names that come and go on their own at a carve level: SQLite's
+#: sidecars beside a live database and atomic-write temporaries. See
+#: `ro_deny_rules` for why they are not named.
+_CARVE_TRANSIENT_SUFFIXES = ("-wal", "-shm", "-journal", ".tmp")
+
+
 def ro_deny_rules(ro_paths: Sequence[str], own_scratch: str) -> list[str]:
     """Render read-only directory grants as CLI permission deny rules.
 
@@ -12190,6 +12196,19 @@ def ro_deny_rules(ro_paths: Sequence[str], own_scratch: str) -> list[str]:
     the same accepted trade in the same place — the chain levels are the
     ancestors between the grant root and own scratch, the rules re-render on
     every spawn, and nothing OUTSIDE the granted folder is reachable either way.
+
+    ⚠ SHORT-LIVED FILES ARE NOT NAMED (item
+    `idle-warm-processes-respawn-every-few-seconds-wh`, 2026-09-29). This JSON
+    rides argv into the warm identity hash, so naming a SQLite `-wal`/`-shm`
+    that exists for seconds changed the hash each time it appeared or went:
+    the keeper marked the parked process dirty and respawned it (reported as
+    ~18,000 `identity-changed` argv respawns on one seat). A chain-level FILE
+    whose name ends in one of `_CARVE_TRANSIENT_SUFFIXES` is therefore left out
+    of the rules — the residual gap above, made permanent for those names
+    only. A pattern rule cannot cover them instead: `*` crosses `/` in this
+    matcher (see the paragraph above), so `Edit(<level>/*-wal)` would also
+    deny such files inside own scratch. Directories keep their subtree clamp
+    whatever they are called.
     """
     own_scratch = os.path.normpath(own_scratch)
     own_key = os.path.normcase(own_scratch)
@@ -12214,6 +12233,9 @@ def ro_deny_rules(ro_paths: Sequence[str], own_scratch: str) -> list[str]:
                     if os.path.normcase(entry) == child_key:
                         continue          # the chain down to own scratch
                     full = os.path.join(level, entry)
+                    if (entry.lower().endswith(_CARVE_TRANSIENT_SUFFIXES)
+                            and os.path.isfile(full)):
+                        continue          # short-lived: naming it churns argv
                     # a plain file has no subtree to deny, and naming it
                     # exactly is what lets the chain directory go unnamed.
                     # Anything else — directory, junction, dangling link,
