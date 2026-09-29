@@ -1,39 +1,45 @@
-// shell/modetoggle.tsx — the prominent Canvas/Attention toggle.
+// shell/modetoggle.tsx — the Canvas/Attention switch.
 //
-// The settled header's one large labelled control. It is a RADIO GROUP, not
-// two buttons and not a switch: there are exactly two modes, one is always
-// current, and neither is an "off" state. That also gets arrow-key movement
-// between them for free, which two buttons would not.
+// ONE SWITCH, ONE WORD (user 2026-09-29). There are exactly two views and one
+// is always current, so this is a single two-position switch: a CIRCULAR knob
+// that slides from one end of the track to the other and carries the current
+// view's icon in its centre, and beside it, in the space the knob is not
+// using, the name of the view you are in. Only that one word is ever shown.
+// The icon and the word swap when the knob flicks across.
 //
-// The labels are never hidden at narrow widths. Everything else in the header
-// drops to icons; this does not, because it is the one control the settled
-// design calls prominent and labelled, and an unlabelled pair of icons is
-// exactly the thing it was specified against.
+// ACCESSIBILITY. It is a `role="switch"` named "Attention view": checked means
+// the Attention view is on, unchecked means the Canvas. Space and Enter flip
+// it (a native button); the arrow keys choose a side directly, which the old
+// radio group offered and a plain switch would otherwise lose.
+import type { KeyboardEvent } from 'react'
 import type { OrgView } from '../attention/mode'
+import { CanvasIcon, NotificationsIcon } from '../icons'
 
-// ⚠ THE "not available in this build yet" STATE IS GONE, and deliberately so.
-// It existed while the toggle shipped ahead of its destination; the Attention
-// view is now rendered into the canvas host's slot, so both radios lead
-// somewhere and a control that hedges about one of them would be lying.
 export function OrgViewToggle({ mode, setMode, attentionCount }: {
   mode: OrgView
   setMode: (mode: OrgView) => void
   /** how many rows are waiting in the attention queue; omitted when unknown */
   attentionCount?: number | null
 }) {
-  const choose = (next: OrgView) => () => { if (next !== mode) setMode(next) }
+  const attention = mode === 'attention'
+  const choose = (next: OrgView) => { if (next !== mode) setMode(next) }
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); choose('canvas') }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); choose('attention') }
+  }
+  const word = attention ? 'Attention' : 'Canvas'
   return (
-    <div className="shell-modes" role="radiogroup" aria-label="Organization view">
-      <button type="button" role="radio" aria-checked={mode === 'canvas'}
-        className={'shell-mode' + (mode === 'canvas' ? ' on' : '')}
-        onClick={choose('canvas')}>Canvas</button>
-      <button type="button" role="radio" aria-checked={mode === 'attention'}
-        className={'shell-mode' + (mode === 'attention' ? ' on' : '')}
-        onClick={choose('attention')}>
-        Attention
-        {typeof attentionCount === 'number' && attentionCount > 0 &&
-          <b className="shell-mode-count">{attentionCount}</b>}
-      </button>
-    </div>
+    <button type="button" role="switch" aria-checked={attention}
+      aria-label="Attention view"
+      title={attention ? 'Attention view — switch to Canvas' : 'Canvas view — switch to Attention'}
+      className={'shell-switch' + (attention ? ' on' : '')}
+      onClick={() => choose(attention ? 'canvas' : 'attention')} onKeyDown={onKey}>
+      <span className="shell-switch-knob" aria-hidden="true">
+        {attention ? <NotificationsIcon fontSize="inherit" /> : <CanvasIcon fontSize="inherit" />}
+      </span>
+      <span className="shell-switch-word">{word}</span>
+      {typeof attentionCount === 'number' && attentionCount > 0 &&
+        <b className="shell-mode-count eye-count">{attentionCount}</b>}
+    </button>
   )
 }

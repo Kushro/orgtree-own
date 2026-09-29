@@ -68,7 +68,10 @@
   align-items: center;
   gap: 8px;
   flex: none;
-  padding: 0 0 0 10px;
+  /* the window controls stretch to this full height, flush with the top and
+   * right edges, so a pointer thrown into the corner lands on Close */
+  min-height: 38px;
+  padding: 0 0 0 8px;
   border-bottom: 1px solid var(--line);
   background: var(--side);
   /* the width question is asked of THIS BAR, not of the screen: an org window
@@ -113,120 +116,166 @@
   flex: none;
 }
 
-/* one direct action button: icon, then its word */
-.shell-action {
+/* THE HEADER BUTTONS ARE ONE SET (user 2026-09-29): the Orgtree menu, Work,
+ * Inbox, Presentations and Org settings are icons only, in the same frame —
+ * same border, background and size — with the same corner count badge
+ * wherever a count applies. Their names are aria-labels and tooltips. */
+.shell-header .shell-menu-button,
+.shell-header-actions > button {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  position: relative;
-  padding: 5px 8px;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: none;
+  justify-content: center;
+  flex: none;
+  gap: 0;
+  width: 32px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
   color: var(--ink);
-  font-size: 13px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
 
-.shell-action:hover { background: var(--panel); border-color: var(--line); }
-.shell-action.u-warn { color: var(--warn); }
-.shell-action.u-bad { color: var(--bad); }
-
-/* ⚠ THE LABEL IS HIDDEN, NEVER REMOVED. `aria-label` carries the same words
- * at every width, so a narrow window is narrower to look at and identical to
- * a screen reader. */
-@container shellheader (max-width: 860px) {
-  .shell-action-label { display: none; }
-  .shell-header-actions { gap: 0; }
+.shell-header .shell-menu-button:hover,
+.shell-header-actions > button:hover,
+.shell-header-actions > .iconbtn:hover {
+  border-color: var(--line-hover);
+  color: var(--ink-strong);
 }
 
-/* The real App also carries Work, Inbox and the kill switch. At the native
- * 640px minimum their intrinsic widths used to overflow the flex region and
- * cover Refresh. Compact only this shell, keeping both mode labels and every
- * action; other native window-control surfaces retain their normal sizing. */
+.shell-header-actions > button.u-warn { color: var(--warn); }
+.shell-header-actions > button.u-bad { color: var(--bad); }
+
+/* one badge, one corner, for every count in the row */
+.shell-header-actions > button > .eye-count {
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.shell-header-guard {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+/* the killswitch latch matches the button row's height */
+.shell-header-guard .kill-latch,
+.shell-header-guard .kill-btn.expanded,
+.shell-header-guard .kill-release { height: 28px; }
+.shell-header-guard .kill-latch { width: 32px; padding: 0; font-size: 14px; border-radius: 6px; }
+.shell-header-guard .kill-latch:not(.open) { background: var(--panel); }
+.shell-header-guard .kill-latch.open { border-radius: 0 6px 6px 0; }
+
+/* the running version where there is no status strip (Home, New
+ * organization), and at the strip's right end in an organization window */
+.shell-version {
+  flex: none;
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The native 640px minimum: everything is icons already, so only the gaps
+ * tighten. The title is the part that yields (it ellipsizes). */
 @container shellheader (max-width: 760px) {
   .shell-header-main { gap: 4px; }
   .shell-header-gap { min-width: 0; }
-  .shell-header-main .shell-menu-button { padding-inline: 6px; }
-  .shell-header-main .shell-mode { padding-inline: 8px; }
-  .shell-header-actions .shell-action,
-  .shell-header-actions .iconbtn { padding-inline: 6px; }
-  /* Arming STOP ALL (or showing HALTED — RELEASE) needs a full-width action
-   * row, rather than squeezing the org name or covering native controls. */
-  .shell-header-main:has(.kill-btn.expanded, .kill-release) { flex-wrap: wrap; padding-block: 4px; }
-  .shell-header-main:has(.kill-btn.expanded, .kill-release) .shell-header-actions { flex-basis: 100%; justify-content: flex-end; }
-  .shell-header > .window-controls { margin-left: 0; }
-  .shell-header > .window-controls .window-control { flex-basis: 32px; width: 32px; }
+  .shell-header > .window-controls .window-control { flex-basis: 34px; width: 34px; }
 }
 
-/* the same treatment for the two existing icon buttons that opt into a word */
-.shell-header-actions .iconbtn {
+.shell-header > .window-controls {
+  align-self: stretch;
+  height: auto;
+  margin-left: 0;
+}
+
+/* ------------------------------------------- the Canvas/Attention switch
+ *
+ * One switch, one word (user 2026-09-29): a circular knob carrying the
+ * current view's icon slides end to end, and the current view's name sits in
+ * the space it leaves. The track is a fixed width so the knob always travels
+ * the same distance, whichever word is showing. */
+
+.shell-switch {
+  --knob: 22px;
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  width: auto;
-  padding: 5px 8px;
-}
-
-/* ------------------------------------------- the Canvas/Attention toggle */
-
-.shell-modes {
-  display: inline-flex;
   flex: none;
-  padding: 2px;
+  width: 108px;
+  height: 28px;
+  padding: 0;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 14px;
   background: var(--bg);
-}
-
-.shell-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 14px;
-  border: 0;
-  border-radius: 5px;
-  background: none;
-  color: var(--dim);
-  font-size: 13px;
+  color: var(--ink);
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
 }
 
-.shell-mode:hover { color: var(--ink); }
+.shell-switch:hover { border-color: var(--line-hover); }
+.shell-switch:focus-visible { outline: 2px solid var(--org-accent); outline-offset: 1px; }
 
-.shell-mode.on {
+.shell-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  display: grid;
+  place-items: center;
+  width: var(--knob);
+  height: var(--knob);
+  border-radius: 50%;
   background: var(--org-accent);
   color: var(--accent-ink);
+  font-size: 14px;
+  transition: left .18s ease;
+}
+
+.shell-switch.on .shell-switch-knob { left: calc(100% - var(--knob) - 2px); }
+
+/* the word fills the side the knob is not on */
+.shell-switch-word {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--knob) + 4px);
+  right: 4px;
+  display: grid;
+  place-items: center;
+  white-space: nowrap;
+}
+
+.shell-switch.on .shell-switch-word {
+  left: 4px;
+  right: calc(var(--knob) + 4px);
 }
 
 .shell-mode-count {
-  padding: 0 5px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, .25);
-  font-size: 11px;
+  position: absolute;
+  top: -5px;
+  right: -7px;
+  font-size: 10px;
+  line-height: 15px;
 }
 
 /* --------------------------------------------------------- the app menu */
 
 .shell-menu { position: relative; flex: none; }
 
-.shell-menu-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--panel);
-  color: var(--ink-strong);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.shell-menu-button:hover { border-color: var(--line-hover); }
+/* the menu button's frame is the header button set's, above */
 
 .shell-menu-panel {
   position: absolute;
@@ -289,6 +338,24 @@
   font-size: 12px;
 }
 
+/* ------------------------------------------------------ flush window edges
+ *
+ * User 2026-09-29: no margin around the window. The shared `main` rule pads
+ * 14px/18px, which left a gap above the header, below the status strip and
+ * down both sides — and put empty space between the pointer and the window
+ * controls in the top-right corner. A v3 window's header, strip and canvas
+ * sit flush with the window's edges instead. The header is the drag region,
+ * so the canvas's 10px drag strips go too. */
+main.shell-window,
+main.solo:has(> .shell-header) { padding: 0; }
+
+main.solo:has(> .shell-header) > .canvas-stage > .window-drag-margin { display: none; }
+
+main.solo:has(> .shell-header) > .canvas-stage > .viewport {
+  border: 0;
+  border-radius: 0;
+}
+
 /* -------------------------------------------- the Homepage / Create pages */
 
 .shell-window { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -345,7 +412,7 @@
   align-items: center;
   gap: 10px;
   flex: none;
-  padding: 4px 10px;
+  padding: 4px 8px;
   border-top: 1px solid var(--line);
   background: var(--side);
   font-size: 11px;

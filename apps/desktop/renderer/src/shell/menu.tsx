@@ -2,8 +2,7 @@
 //
 // The v3 header replaces the expandable organization sidebar, and this is
 // where the navigation that sidebar carried went: opening a window, opening an
-// organization, creating one, the app-wide panels, and what version is
-// running. Everything else on the header is a DIRECT button, because the
+// organization, creating one, and the app-wide panels. Everything else on the header is a DIRECT button, because the
 // settled design keeps the familiar action buttons rather than burying them in
 // traditional menus — this menu is for navigation and app-wide state, and it
 // is deliberately the only menu there is.
@@ -43,10 +42,6 @@ export interface OrgtreeMenuProps {
   onCreateOrg: () => void
   onUsage: () => void
   onAppSettings: () => void
-  /** the real running version, shown inline on the About entry. `null` in a
-   *  plain browser, which has no packaged version and is given no invented
-   *  one — the entry then simply carries no value. */
-  appVersion: string | null
   /** told whenever the organization list inside the menu opens or closes.
    *  ⚠ THIS IS NOT COSMETIC: the org-status poller runs while a list is on
    *  screen and stops when none is, and this menu is a list. Without it the
@@ -77,7 +72,7 @@ function focusItem(panel: HTMLElement | null, from: Element | null,
 
 export function OrgtreeMenu(props: OrgtreeMenuProps) {
   const { orgs, freshness, ageMs, error, currentOrg, isOpenElsewhere,
-    onOpenOrg, onNewWindow, onCreateOrg, onUsage, onAppSettings, appVersion } = props
+    onOpenOrg, onNewWindow, onCreateOrg, onUsage, onAppSettings } = props
   const [open, setOpen] = useState(false)
   const [orgList, setOrgList] = useState(false)
   const [filter, setFilter] = useState('')
@@ -155,7 +150,10 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
 
   return (
     <div className="shell-menu">
+      {/* icon only, like every header button (user 2026-09-29); the name is
+          the aria-label and the tooltip */}
       <button ref={button} type="button" className="shell-menu-button"
+        aria-label="Orgtree menu" title="Orgtree menu"
         aria-haspopup="menu" aria-expanded={open} aria-controls={open ? id : undefined}
         onClick={() => (open ? close() : openWith(false))}
         onKeyDown={(e) => {
@@ -163,7 +161,7 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
             e.preventDefault(); open ? focusItem(panel.current, null, 'first') : openWith(true)
           }
         }}>
-        Orgtree <MenuIcon fontSize="inherit" />
+        <MenuIcon fontSize="inherit" />
       </button>
       {open && (
         <div ref={panel} id={id} className="shell-menu-panel" role="menu"
@@ -235,14 +233,11 @@ export function OrgtreeMenu(props: OrgtreeMenuProps) {
             <SettingsIcon fontSize="inherit" />
             <span className="shell-menu-label">App settings…</span>
           </button>
-          <div className="shell-menu-sep" role="separator" />
-          {/* the REAL running version, inline. The mockup's 3.0.0 was
-              illustrative; a browser has none and is shown none. */}
-          <button type="button" role="menuitem" className="shell-menu-item"
-            onClick={() => run(onAppSettings)}>
-            <span className="shell-menu-label">About Orgtree</span>
-            {appVersion && <span className="shell-menu-value dim">{appVersion}</span>}
-          </button>
+          {/* NO "About Orgtree" ENTRY (user 2026-09-29): it only opened App
+              settings, which the entry above already does. The running
+              version is shown without any click instead — in an organization
+              window's status strip, and beside the title on Home and New
+              organization (shell/header.tsx `version`). */}
         </div>
       )}
     </div>

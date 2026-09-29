@@ -11,11 +11,14 @@
 // layout moves the whole run to a bottom strip (shell/statusbar.tsx) because a
 // compact header has no room for nine of them. That is a move, not a cut.
 //
-// NARROW WIDTHS drop the action labels and keep the icons, through a container
-// query on the header itself rather than a viewport media query: an
-// organization window and a Homepage window can be different widths at the
-// same moment, so the question "is this bar narrow?" is about this bar and not
-// about the screen.
+// THE ACTION BUTTONS ARE ICONS ONLY, at every width (user 2026-09-29): the
+// words were dropped, and each button's name lives in its `aria-label` and
+// tooltip instead. All of them share one frame — border, background, size —
+// and one corner count badge, so the row reads as a set.
+//
+// THE KILLSWITCH HAS ITS OWN SLOT, `guard`, to the LEFT of that row (user
+// 2026-09-29). Arming it expands STOP ALL leftward into the empty gap, so the
+// buttons to its right never move under the pointer.
 import type { ReactNode } from 'react'
 import { UpdateNotice } from '../update-notice'
 import { WindowControls } from '../window-controls'
@@ -32,16 +35,26 @@ export interface ShellHeaderProps {
   modes?: ReactNode
   /** the familiar direct action buttons. Organization windows only. */
   actions?: ReactNode
+  /** the killswitch, placed just LEFT of `actions` so its expansion grows
+   *  into the gap and never shifts the action buttons. */
+  guard?: ReactNode
+  /** the running app version, for windows with no status strip (Home and New
+   *  organization): shown dim beside the title so it is visible without a
+   *  click. Organization windows show it in their status strip instead. */
+  version?: string | null
 }
 
-export function ShellHeader({ menu, title, modes, actions }: ShellHeaderProps) {
+export function ShellHeader({ menu, title, modes, actions, guard, version }: ShellHeaderProps) {
   return (
     <header className={'shell-header' + (desktop() ? ' native-header' : '')}>
       <div className="shell-header-main">
         {menu}
         <h2 className="shell-header-title" title={title}>{title}</h2>
+        {version && <span className="shell-version dim"
+          title={`running Orgtree ${version}`}>Orgtree {version}</span>}
         {modes && <div className="shell-header-modes">{modes}</div>}
         <span className="shell-header-gap" />
+        {guard && <div className="shell-header-guard">{guard}</div>}
         {actions && <div className="shell-header-actions">{actions}</div>}
       </div>
       <UpdateNotice />
@@ -58,13 +71,9 @@ export function ShellHeader({ menu, title, modes, actions }: ShellHeaderProps) {
   )
 }
 
-/** One direct action button, with a label that survives at wide widths and
- *  steps aside at narrow ones.
- *
- *  ⚠ THE LABEL IS HIDDEN WITH CSS, NEVER REMOVED FROM THE DOM. `aria-label`
- *  carries the same words regardless, so a narrow window is narrower to look
- *  at and identical to a screen reader. Removing the text at a breakpoint
- *  would make the accessible name depend on the window's width. */
+/** One direct action button: an icon and, where a count applies, a badge.
+ *  The name is never visible text — `aria-label` carries it for a screen
+ *  reader and `title` shows it as a tooltip. */
 export function ShellAction({ label, title, icon, badge, glow, onClick, className }: {
   label: string
   title?: string
@@ -80,7 +89,6 @@ export function ShellAction({ label, title, icon, badge, glow, onClick, classNam
       className={'shell-action' + (glow ? ' glow' : '') + (className ? ' ' + className : '')}
       aria-label={label} title={title ?? label} onClick={onClick}>
       {icon}
-      <span className="shell-action-label">{label}</span>
       {badge}
     </button>
   )

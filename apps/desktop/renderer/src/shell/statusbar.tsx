@@ -35,9 +35,14 @@ export interface OrgStatusBarProps {
   error: string | null
   /** open Org settings at Connections — the mail-hub chip's click-through */
   onOpenConnections: () => void
+  /** the real running app version, shown at the strip's right end so it is
+   *  visible without opening anything (user 2026-09-29, which removed the
+   *  menu's About entry). `null` in a plain browser, which has no packaged
+   *  version and is shown none. */
+  appVersion?: string | null
 }
 
-export function OrgStatusBar({ tree, orgs, error, onOpenConnections }: OrgStatusBarProps) {
+export function OrgStatusBar({ tree, orgs, error, onOpenConnections, appVersion }: OrgStatusBarProps) {
   const hubs = (tree.net?.hubs ?? []).filter((h) => h.enabled && !h.hidden)
   const up = hubs.filter((h) => h.connected).length
   const queued = hubs.reduce((a, h) => a + h.queued, 0)
@@ -111,6 +116,8 @@ export function OrgStatusBar({ tree, orgs, error, onOpenConnections }: OrgStatus
           <span className="conn-chip-text">{error}</span>
         </span>
       )}
+      {appVersion && <span className="shell-version dim"
+        title={`running Orgtree ${appVersion}`}>Orgtree {appVersion}</span>}
     </footer>
   )
 }

@@ -464,9 +464,10 @@ function SlugText({ item }: { item: WorkItem }) {
 export function DocketToolbarButton({ summary, onClick, label }: {
   summary?: { attention: number; active: number } | null
   onClick?: () => void
-  /** the v3 compact header shows the familiar action buttons with a visible
-   *  word beside the icon at wide widths. Absent everywhere else, so the
-   *  button is byte-identical in every surface that already renders it. */
+  /** the v3 compact header's name for this icon-only button: its
+   *  `aria-label`, never visible text (user 2026-09-29). Absent everywhere
+   *  else, so the button is byte-identical in every surface that already
+   *  renders it. */
   label?: string
 }) {
   const { attention, active } = summary ?? { attention: 0, active: 0 }
@@ -483,13 +484,13 @@ export function DocketToolbarButton({ summary, onClick, label }: {
   const waiting = pending.docket > 0
   return (
     <button className={'iconbtn docket-bell' + (hasAttn ? ' glow' : '')}
+      aria-label={label}
       title={(hasAttn
         ? `work docket — ${attention} item(s) need attention`
         : 'work docket')
         + (waiting ? ` — ${pending.docket} ticket(s) still waiting on you` : '')}
       onClick={onClick}>
       <DocketIcon fontSize="inherit" />
-      {label && <span className="shell-action-label">{label}</span>}
       {waiting && <i className="attn-dot" aria-hidden="true" />}
       {count > 0 && (
         <b className={'eye-count' + (hasAttn ? ' docket-attn asks' : '')}>

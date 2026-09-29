@@ -258,8 +258,9 @@ export const usageTitle = (pres: ProviderPresence): string => {
 export function AskBell({ tree, onOpen, label }: {
   tree: Parameters<typeof attentionPip>[0]
   onOpen: () => void
-  /** the v3 compact header shows a visible word beside the icon at wide
-   *  widths. Absent everywhere else, so every existing surface is unchanged. */
+  /** the v3 compact header's name for this icon-only button: its
+   *  `aria-label`, never visible text (user 2026-09-29). Absent everywhere
+   *  else, so every existing surface is unchanged. */
   label?: string
 }) {
   const pip = attentionPip(tree)
@@ -274,11 +275,11 @@ export function AskBell({ tree, onOpen, label }: {
   const waiting = pending.mail > 0
   return (
     <button className={'iconbtn ask-bell' + (pip?.urgent ? ' glow' : '')}
+      aria-label={label}
       title={(pip?.title ?? 'your inbox')
         + (waiting ? ` — ${pending.mail} request(s) still waiting on you` : '')}
       onClick={onOpen}>
       <MailIcon fontSize="inherit" />
-      {label && <span className="shell-action-label">{label}</span>}
       {waiting && <i className="attn-dot" aria-hidden="true" />}
       {pip && <b className={'eye-count' + (pip.urgent ? ' asks' : '')}>
         {pip.count}</b>}
@@ -1100,7 +1101,7 @@ export default function App() {
   }, [toast])
   const shellMenu = (
     <OrgtreeMenu orgs={orgs} freshness={orgStatus.freshness} ageMs={orgStatus.ageMs}
-      error={orgStatus.error} currentOrg={slug} appVersion={appVersion}
+      error={orgStatus.error} currentOrg={slug}
       onOpenOrg={openOrgFromShell} onNewWindow={newWindow} onCreateOrg={createWindow}
       onUsage={toggleUsage}
       isOpenElsewhere={openElsewhere}
@@ -1174,7 +1175,7 @@ export default function App() {
           same view and no window ever flashes another one. */}
       {v3 && shellView === 'homepage' && (
         <main className="shell-window">
-          <ShellHeader menu={shellMenu} title="Home" />
+          <ShellHeader menu={shellMenu} title="Home" version={appVersion} />
           <HomepageView orgs={orgs} freshness={orgStatus.freshness}
             ageMs={orgStatus.ageMs} error={orgStatus.error}
             onOpenOrg={openOrgFromShell} onCreateOrg={createWindow}
@@ -1196,7 +1197,7 @@ export default function App() {
       )}
       {v3 && shellView === 'create' && (
         <main className="shell-window">
-          <ShellHeader menu={shellMenu} title="New organization" />
+          <ShellHeader menu={shellMenu} title="New organization" version={appVersion} />
           <CreateOrgView
             wrapCreate={!BASE && showOnboarding(deskPrefs, orgs.length, orgsKnown)
               ? ((create) => onboardingCreate(create,
@@ -1274,8 +1275,7 @@ export default function App() {
                   modes={<OrgViewToggle mode={viewMode} setMode={setViewMode} />}
                   actions={<>
                     {/* the familiar action buttons, unchanged in behaviour,
-                        badge and glow — only their container and an optional
-                        visible word are new */}
+                        badge and glow — icons only, named by aria-label */}
                     <DocketToolbarButton label="Work"
                       summary={tree.work_items_summary}
                       onClick={() => toggleSurface('docket', showDocket, setShowDocket)} />
@@ -1298,9 +1298,11 @@ export default function App() {
                     {!tree.public && <ShellAction label="Org settings"
                       icon={<SettingsIcon fontSize="inherit" />}
                       onClick={() => toggleSurface('org-settings', showSettings, setShowSettings)} />}
-                    <KillSwitch slug={slug} toast={toast} refreshTree={refreshTree}
-                      latched={!!tree.killswitch} />
-                  </>} />
+                  </>}
+                  /* LEFT of the action row (user 2026-09-29): arming STOP ALL
+                     grows into the gap and never moves the buttons above */
+                  guard={<KillSwitch slug={slug} toast={toast} refreshTree={refreshTree}
+                    latched={!!tree.killswitch} />} />
               ) : (
               <header className={'orgbar' + (desktop() ? ' native-header' : '')}>
                 <div className="native-header-main">
@@ -1599,6 +1601,7 @@ export default function App() {
                   live in the header's `.bar-detail`, with every visibility
                   rule, tooltip and click-through intact (shell/statusbar.tsx) */}
               {v3 && <OrgStatusBar tree={tree} orgs={orgs} error={error}
+                appVersion={appVersion}
                 onOpenConnections={() => {
                   setSettingsInitialTab('mailserver')
                   if (!showSettings) toggleSurface('org-settings', showSettings, setShowSettings)
