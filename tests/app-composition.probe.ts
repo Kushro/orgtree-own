@@ -183,7 +183,9 @@ app.whenReady().then(async () => {
     return fn(r, ...args)
   })
   const close = (r: AppWindow) => { r.recovery?.dispose(); r.closePopouts?.(); if (!r.window.isDestroyed()) r.window.destroy(); records.delete(r.id); windows.forget(r.id) }
-  const construct = (id: string, org?: string, kind: 'org' | 'homepage' | 'create' = org ? 'org' : 'homepage'): AppWindow => {
+  // `registerNow = false` only for openOrg's create step, which registers by
+  // adopting its reservation - the same rule as main/index.ts buildMainWindow
+  const construct = (id: string, org?: string, kind: 'org' | 'homepage' | 'create' = org ? 'org' : 'homepage', registerNow = true): AppWindow => {
     const window = new BrowserWindow({ show: false, frame: false, width: 1180, height: 820,
       webPreferences: { contextIsolation: true, sandbox: false, nodeIntegration: false,
         preload: path.join(ROOT, 'preload.cjs'), additionalArguments: ['--orgtree-ui-origin=' + origin] } })
@@ -191,7 +193,7 @@ app.whenReady().then(async () => {
     const r: AppWindow = { id, window, documentToken: '', navStarted: 0, navCommitted: 0,
       popouts: new Map(), outbox: windowOutbox<Event>({ hold: t => ['open-org', 'notification-click', 'window-identity', 'restore-skipped'].includes(t) }) }
     records.set(id, r)
-    windows.register({ id, senderId: window.webContents.id, window, kind, org })
+    if (registerNow) windows.register({ id, senderId: window.webContents.id, window, kind, org })
     const popouts = popoutRegistry<BrowserWindow>(state => send(r, { type: 'popout-state', data: state }))
     configureWindow(window, () => origin, true, (child, portal) => { if (portal) child.webContents.setBackgroundThrottling(false) },
       () => { throw Error('Artifacts are outside fixture scope') }, () => { throw Error('External navigation is outside fixture scope') },
@@ -231,7 +233,8 @@ app.whenReady().then(async () => {
   handle('desktop:request-org', async (r, org) => {
     const outcome = await openOrg(windows, org, r.id, {
       focus: entry => { entry.window.restore(); entry.window.focus() },
-      create: async slug => { const c = construct('opened-' + records.size, slug); void c.window.loadURL(origin + '/o/' + slug); return { id: c.id, senderId: c.window.webContents.id, window: c.window } },
+      create: async slug => { const c = construct('opened-' + records.size, slug, 'org', false); return { id: c.id, senderId: c.window.webContents.id, window: c.window } },
+      load: entry => { const c = records.get(entry.id); if (c) void c.window.loadURL(origin + '/o/' + entry.org) },
       discard: entry => { const c = records.get(entry.id); if (c) close(c) },
       deliverReveals: (entry, events) => { for (const event of events) send(records.get(entry.id)!, event) },
     })

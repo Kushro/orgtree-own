@@ -251,6 +251,9 @@ const hostFor = (registry, log = []) => ({
   log,
   focus: entry => log.push(`focus:${entry.id}`),
   create: async org => { log.push(`create:${org}`); return registration(`window-for-${org}`, fakeWindow()) },
+  // records whether the window was already REGISTERED when its load began —
+  // the preload's synchronous identity lookup needs it to be
+  load: entry => log.push(registry.get(entry.id) ? `load:${entry.id}` : `load-unregistered:${entry.id}`),
   discard: created => log.push(`discard:${created.id}`),
   deliverReveals: (entry, reveals) => log.push(`deliver:${entry.id}:${reveals.join(',')}`),
   undeliverable: (org, reveals) => log.push(`undeliverable:${org}:${reveals.join(',')}`),
@@ -264,7 +267,74 @@ test('openOrg finishes the whole transaction natively; no ticket ever reaches th
   assert.equal('ticket' in outcome, false, 'a reservation ticket is native-internal')
   assert.deepEqual(registry.reservedOrgs(), [])
   assert.deepEqual(await openOrg(registry, 'acme', null, host), { action: 'focused', windowId: 'window-for-acme', org: 'acme' })
-  assert.deepEqual(host.log, ['create:acme', 'focus:window-for-acme'])
+  assert.deepEqual(host.log, ['create:acme', 'load:window-for-acme', 'focus:window-for-acme'],
+    'the document loads once, after registration')
+})
+
+// ⚠ THE USER'S BUG (2026-09-29, v3 56ecb80): opening a second organization
+// failed with "Window <id> is already registered". The shipped host's create
+// built the window through a factory that REGISTERED it, and adoption then
+// registered the same id again. The first open worked only because it came
+// from the Homepage, which binds itself and creates nothing.
+test('open, reopen, close and reopen, and a second organization from an org window all work', async () => {
+  const registry = orgWindowRegistry()
+  const log = []
+  const built = new Map()
+  const host = {
+    ...hostFor(registry, log),
+    // like the fixed native host: construct only - never register, never load
+    create: async org => {
+      const window = fakeWindow()
+      const id = `window-${built.size + 1}-${org}`
+      built.set(id, window)
+      log.push(`create:${org}`)
+      return registration(id, window)
+    },
+  }
+  add(registry, 'home', 'homepage')
+  // 1. the first organization binds the Homepage that asked
+  assert.deepEqual(await openOrg(registry, 'acme', 'home', host), { action: 'bound', windowId: 'home', org: 'acme' })
+  // 2. a SECOND organization, asked from the now org-bound window, opens a new one
+  const beta = await openOrg(registry, 'beta', 'home', host)
+  assert.equal(beta.action, 'opened', 'a second organization opens its own window')
+  assert.equal(registry.byOrg('beta')?.id, beta.windowId)
+  assert.equal(registry.byOrg('acme')?.id, 'home', 'and the asking window keeps its organization')
+  // 3. asking again focuses it instead of building another
+  assert.deepEqual(await openOrg(registry, 'beta', 'home', host), { action: 'focused', windowId: beta.windowId, org: 'beta' })
+  // 4. close it, then open it again
+  built.get(beta.windowId).destroyed = true
+  const again = await openOrg(registry, 'beta', 'home', host)
+  assert.equal(again.action, 'opened', 'a closed organization opens again')
+  assert.notEqual(again.windowId, beta.windowId, 'in a new window')
+  // 5. a third organization from the second window, and one from nowhere (tray)
+  assert.equal((await openOrg(registry, 'gamma', again.windowId, host)).action, 'opened')
+  assert.equal((await openOrg(registry, 'delta', null, host)).action, 'opened')
+  assert.deepEqual(registry.list().map(e => e.org).sort(), ['acme', 'beta', 'delta', 'gamma'])
+  assert.deepEqual(registry.reservedOrgs(), [], 'no claim is left behind')
+  assert.deepEqual(log.filter(l => l.startsWith('load')),
+    [`load:${beta.windowId}`, `load:${again.windowId}`, 'load:window-3-gamma', 'load:window-4-delta'],
+    'every new window is loaded exactly once, and only after it is registered')
+  assert.equal(log.filter(l => l.startsWith('discard')).length, 0, 'nothing was built and thrown away')
+})
+
+test('NEGATIVE CONTROL: a host whose create registers its own window reproduces the user\'s error', async () => {
+  // This is the shape the shipped host had. It must fail loudly here, so the
+  // contract ("create must not register") is enforced by a failing test and
+  // not only by a comment.
+  const registry = orgWindowRegistry()
+  const log = []
+  const host = {
+    ...hostFor(registry, log),
+    create: async org => {
+      const window = fakeWindow()
+      registry.register({ ...registration('self-registered', window), kind: 'org', org })
+      return registration('self-registered', window)
+    },
+    discard: created => { log.push(`discard:${created.id}`); created.window.destroyed = true },
+  }
+  await assert.rejects(() => openOrg(registry, 'beta', null, host), /Window self-registered is already registered/)
+  assert.deepEqual(log, ['discard:self-registered'], 'the window is taken back and never loaded')
+  assert.equal(registry.byOrg('beta'), undefined)
 })
 
 test('a failed open clears its claim immediately and reports what it could not deliver', async () => {

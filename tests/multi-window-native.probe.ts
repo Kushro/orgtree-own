@@ -137,6 +137,7 @@ app.whenReady().then(async () => {
       const loser = hidden()
       return { id: 'gamma-loser', senderId: loser.webContents.id, window: loser }
     },
+    load: () => { throw new Error('a discarded window must never be loaded') },
     discard: created => { discarded = created.window; created.window.destroy() },
   })
   assert.deepEqual(outcome, { action: 'focused', windowId: 'gamma-winner', org: 'gamma' })

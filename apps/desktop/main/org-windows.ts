@@ -451,8 +451,22 @@ export interface OrgOpenHost<W extends MainWindowLike, Reveal> {
    *  — the last of those cannot work at all, since the preload resolves its
    *  identity synchronously through sender lookup and the window is not
    *  addressable until it is REGISTERED, which is the step this returns to.
-   *  So: construct, return, register, then load the document. */
+   *  So: construct, return, register, then load the document.
+   *
+   *  ⚠ AND IT MUST NOT REGISTER THE WINDOW ITSELF. Registration is
+   *  `adoptReservation`'s job, because it is the step that turns the
+   *  reservation into a held organization in one move. A host that also
+   *  registered here made adoption register the same id twice, and every open
+   *  of a second organization failed with "Window <id> is already registered"
+   *  (user report 2026-09-29, v3 56ecb80). Nor may it start the document
+   *  load: that is `load`, which runs only once the window is registered. */
   create(org: string): Promise<{ id: string; senderId: number; window: W }>
+  /** Start the document of a window that has just been REGISTERED by
+   *  adoption. Required, for the same reason `discard` is: without it the
+   *  adopted window is never navigated and stays blank and hidden. Called
+   *  after registration, never before, so the preload's synchronous identity
+   *  lookup always finds the window. */
+  load(entry: OrgWindowEntry<W>): void
   /** ⚠ DISPOSE OF A WINDOW THAT COULD NOT BE ADOPTED. Required, not
    *  optional: `create` has already put a real window on the user's screen by
    *  the time adoption can fail, and a host with no way to take it back leaves
@@ -515,11 +529,9 @@ export async function openOrg<W extends MainWindowLike, Reveal>(
     if (stranded.length) host.undeliverable?.(decision.org, stranded)
     throw error
   }
+  let identity: OrgWindowIdentity
   try {
-    const identity = registry.adoptReservation(decision.ticket, created)
-    const entry = registry.get(identity.windowId)
-    if (entry) deliver(entry)
-    return { action: 'opened', windowId: identity.windowId, org: decision.org }
+    identity = registry.adoptReservation(decision.ticket, created)
   } catch (error) {
     // ⚠ THE WINDOW EXISTS. It is on the user's screen right now, and it is
     // not registered — so `resolveNativeSender` refuses its every bridge
@@ -542,6 +554,10 @@ export async function openOrg<W extends MainWindowLike, Reveal>(
     if (stranded.length) host.undeliverable?.(decision.org, stranded)
     throw error
   }
+  // REGISTERED, so now — and only now — the document may load.
+  const entry = registry.get(identity.windowId)
+  if (entry) { host.load(entry); deliver(entry) }
+  return { action: 'opened', windowId: identity.windowId, org: decision.org }
 }
 
 // --------------------------------------------------------------- sender trust

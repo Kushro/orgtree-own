@@ -181,6 +181,16 @@ test('a window is registered BEFORE its document loads', () => {
   // itself - the document is loaded by the caller, after registration
   assert.doesNotMatch(build, /await [\w.]*loadURL/, 'the factory itself never awaits a navigation')
   assert.match(main, /const openWindow = async \(\{ kind, org \}: \{ kind: OrgWindowKind; org\?: string \}\) => \{\s*\r?\n\s*const record = buildMainWindow\(kind, org\)\s*\r?\n\s*await record\.window\.loadURL/)
+  // ⚠ openOrg's create registers NOTHING and loads NOTHING: adoption
+  // registers the window, then openOrg calls `load`. A create that registered
+  // too made every second-organization open fail with "Window <id> is already
+  // registered" (user report 2026-09-29).
+  const request = main.slice(main.indexOf('requestOrgWindow = async'), main.indexOf('const openStartupWindows ='))
+  const create = request.slice(request.indexOf('create: async slug =>'), request.indexOf('load: entry =>'))
+  assert.ok(create.length > 0 && request.includes('load: entry =>'), 'the host has a create and a load step')
+  assert.match(create, /buildMainWindow\('org', slug, \{ register: false \}\)/, 'create builds without registering')
+  assert.doesNotMatch(create, /loadURL|windows\.register|adoptReservation/, 'and neither loads nor registers')
+  assert.match(build, /if \(registerNow\) windows\.register\(/, 'the factory registers only when asked to')
   // ⚠ the identity is answered SYNCHRONOUSLY, before the bridge exists - and
   // it lives in held-events.ts now, with the two channels that depend on the
   // token it mints

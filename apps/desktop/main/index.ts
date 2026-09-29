@@ -1775,7 +1775,11 @@ else {
        *  Everything that v2 did once, inline, for its single window happens
        *  here per window: its own popout registry, its own load recovery, its
        *  own placement key, its own close rules. */
-      const buildMainWindow = (kind: OrgWindowKind, org?: string) => {
+      /** `register: false` is for `openOrg`'s create step ONLY: there the
+       *  window is registered by adopting its reservation, and registering it
+       *  here too made that adoption throw "already registered" (user report
+       *  2026-09-29). Every other caller registers here, before its load. */
+      const buildMainWindow = (kind: OrgWindowKind, org?: string, { register: registerNow = true }: { register?: boolean } = {}) => {
         const id = randomUUID()
         const key = placementKey({ kind, org })
         const saved = key ? placement?.restoreWindow(key, displays()) : undefined
@@ -1798,7 +1802,7 @@ else {
             data: { ...state, reason: record.tearingDown ? 'parent-teardown' : 'user' } })),
         }
         records.set(id, record)
-        windows.register({ id, senderId: window.webContents.id, window, kind, ...(org ? { org } : {}) })
+        if (registerNow) windows.register({ id, senderId: window.webContents.id, window, kind, ...(org ? { org } : {}) })
         window.setIcon(runtimeIcon())
         const capture = () => savePlacement(record)
         window.on('moved', capture)
@@ -1973,13 +1977,23 @@ else {
       requestOrgWindow = async (org: unknown, callerId: string | null): Promise<OrgOpenOutcome> => {
         const outcome = await openOrg(windows, org, callerId, {
           focus: entry => { const record = records.get(entry.id); if (record) revealWindow(record) },
-          // ⚠ RESOLVES AT CONSTRUCTION, NOT AT LOAD. See buildMainWindow: the
-          // window must be registered before its document runs, so waiting for
-          // the document here would wait for something this call enables.
+          // ⚠ CONSTRUCT ONLY: NOT REGISTERED, NOT LOADED. openOrg registers
+          // the window by adopting its reservation and then calls `load`
+          // below. Registering here as well made the adoption throw "Window
+          // <id> is already registered", so every open of a second
+          // organization failed (user report 2026-09-29).
           create: async slug => {
-            const record = buildMainWindow('org', slug)
-            void record.window.loadURL(engine.origin + `/o/${slug}`).then(() => revealWindow(record)).catch(() => {})
+            const record = buildMainWindow('org', slug, { register: false })
             return { id: record.id, senderId: record.window.webContents.id, window: record.window }
+          },
+          // Registered now, so its document may run; the preload's
+          // synchronous identity lookup will find it.
+          load: entry => {
+            const record = records.get(entry.id)
+            if (!record) return
+            announceOwnership()
+            publishOpenOrgs()
+            void record.window.loadURL(engine.origin + `/o/${entry.org}`).then(() => revealWindow(record)).catch(() => {})
           },
           // The registry could not adopt it, so it is a window nothing can
           // command. Take it back rather than leaving it on screen.
