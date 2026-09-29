@@ -285,7 +285,7 @@ class OperatorVariantsBoundary(unittest.TestCase):
         self.assertEqual((self.reap.call_count, self.hub.call_count), (1, 1))
         self.assertEqual([c.args[1:3] for c in self.notify.call_args_list], [('leafy', 'renamed')])
 
-    def test_archiving_operations_interrupt_first_and_delete_does_not(self):
+    def test_archiving_operations_interrupt_first(self):
         for body, target in (({'op': 'retire', 'node': 'leaf'}, 'leaf'), ({'op': 'dissolve', 'node': 'mid'}, 'mid'),
                              ({'op': 'rescind', 'node': 'sib'}, 'sib')):
             with self.subTest(op=body['op']):
@@ -294,7 +294,8 @@ class OperatorVariantsBoundary(unittest.TestCase):
                 self.assertEqual(self.reap.call_count, 1)
         r, _, _, _ = self.act(self.op({'op': 'delete', 'node': 'top2'}))
         self.assertEqual(r.status_code, 200, r.text)
-        self.interrupt.assert_not_called()
+        # a user-actor delete interrupts first too, which stops the target's background tasks
+        self.assertEqual([c.args[2] for c in self.interrupt.call_args_list], ['top2'])
         self.assertEqual([sorted(c.args[1]) for c in self.forget.call_args_list], [['top2']])
         self.assertEqual(self.reap.call_count, 1)
 

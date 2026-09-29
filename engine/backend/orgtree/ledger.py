@@ -5239,11 +5239,8 @@ class Org:
             # design motto: asking for what's already true is a no-op, not an error
             return {"freed": 0,
                     "warnings": [f"{nid} was already archived — nothing to do"]}
-        if self.node(nid).get("bg_open"):
-            raise LedgerError(
-                f"{nid} still owns open background tasks — wait for their "
-                "terminal notification (or provider-loss recovery) before "
-                "retiring it")
+        # Open background tasks do not refuse this (user ruling 2026-09-29):
+        # the door stops them first — `supervisor.interrupt_before_archive`.
         live_kids = self.children(nid)
         if live_kids:
             if actor == nid:
@@ -5572,10 +5569,8 @@ class Org:
         if n["state"] != "live":
             raise LedgerError(f"{nid} is {n['state']} — cheap-compact "
                               f"replaces a LIVE agent's session")
-        if n.get("bg_open"):
-            raise LedgerError(
-                f"{nid} still owns open background tasks — cheap compaction "
-                "would replace the only session observing their outcome")
+        # Open background tasks do not refuse this (user ruling 2026-09-29):
+        # the door stops them first — `supervisor.stop_background`.
         standing = self._open_request_kinds(nid)
         pred_id, old_sid = self._archive_session_in_place(nid)
         # The unread NOTICE backlog is still folded: a notice is a diff, and
@@ -5905,12 +5900,6 @@ class Org:
         parent = self.node(nid)["parent"]
         # §8.5: dissolve takes each node's ENTIRE lineage stack with it
         order = sorted(self._taken_with(nid), key=self.depth, reverse=True)
-        open_nodes = [k for k in order if self.nodes[k].get("bg_open")]
-        if open_nodes:
-            raise LedgerError(
-                "cannot dissolve while background tasks are open on: "
-                + ", ".join(open_nodes)
-                + " — wait for terminal notification/provider-loss recovery")
         freed = 0.0
         for k in order:
             n = self.nodes[k]
@@ -5962,13 +5951,6 @@ class Org:
         parent = n["parent"]
         peers = self._peers_of(parent, nid)
         doomed_set = self._taken_with(nid)
-        open_nodes = [k for k in sorted(doomed_set)
-                      if self.nodes[k].get("bg_open")]
-        if open_nodes:
-            raise LedgerError(
-                "cannot delete while background tasks are open on: "
-                + ", ".join(open_nodes)
-                + " — wait for terminal notification/provider-loss recovery")
         # bank the burn BEFORE the nodes go — cost is history (see cost_total)
         lost = round(sum(float((self.nodes.get(k) or {}).get("cost_usd") or 0.0)
                          for k in doomed_set), 6)
@@ -11406,10 +11388,6 @@ class Org:
         is retired IN PLACE as an archived knowledge bearer at 0 credits, locked
         read-only. Lineage is a second axis — the predecessor is NOT a child."""
         n = self.node(nid)
-        if n.get("bg_open"):
-            raise LedgerError(
-                f"{nid} still owns open background tasks — compaction would "
-                "replace the session observing their outcome")
         gen = n.get("generation", 0)
         pred_id = f"{nid}@{gen}"
         pred = cast(NodeDoc, dict(n))  # dict() copy loses the TypedDict

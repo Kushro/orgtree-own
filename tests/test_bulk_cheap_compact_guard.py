@@ -99,13 +99,16 @@ class IfIdleGuardTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 422)
 
     def test_if_idle_keeps_the_existing_eligibility_checks(self) -> None:
-        # an agent with open background tasks is refused by the ledger exactly
-        # as the single action is — the guard adds a check, it removes none
-        self.org.node("worker")["bg_open"] = True
+        # an agent that is not live is refused by the ledger exactly as the
+        # single action is — the guard adds a check, it removes none. (This
+        # used to be the `bg_open` refusal, which nothing in the product ever
+        # set; open background tasks are now stopped, never refused — user
+        # ruling 2026-09-29, tests/test_background_tasks_stop.py.)
+        self.org.retire(USER, "worker")
         with self.assertRaises(api.HTTPException) as raised:
             self._op(node="worker", if_idle=True)
         self.assertEqual(raised.exception.status_code, 422)
-        self.assertIn("background", str(raised.exception.detail))
+        self.assertIn("LIVE agent", str(raised.exception.detail))
 
 
 if __name__ == "__main__":

@@ -23369,7 +23369,21 @@ def _run_one_turn_recorded(slug: str, nid: str,
                         orphans = [(t, d, bg_out.get(t, "")) for t, d
                                    in bg_live.items()]
                         bg_live.clear()
-                    if orphans:
+                    with _state_lock:
+                        stopped_on_purpose = bool(st.pop("bg_stop_requested",
+                                                         None))
+                    if orphans and stopped_on_purpose:
+                        # `stop_background` ended this process to retire,
+                        # delete or compact the agent: the tasks were STOPPED
+                        # on purpose. The mail still records it, but it must
+                        # not drive a new turn — that would restart the very
+                        # agent being archived, or run a turn on the session
+                        # being replaced.
+                        _bg_orphaned(slug, nid, orphans,
+                                     "stopped by orgtree because the agent was "
+                                     "retired, dissolved, deleted or compacted",
+                                     sid=ran_sid, wake=False)
+                    elif orphans:
                         # The cleanup's kill is BOUNDED, so a tree that
                         # outlived it — or one this sweep reached past a
                         # raise — still reads `returncode` None here.
@@ -25783,7 +25797,7 @@ def _bg_task_output(sid: str | None, task_id: str) -> str:
 
 def _bg_orphaned(slug: str, nid: str,
                  orphans: list[tuple[str, str, str]], why: str,
-                 sid: str | None = None) -> None:
+                 sid: str | None = None, *, wake: bool = True) -> None:
     """A CLI died holding live background subagents: tell their parent, so it
     UNBLOCKS (user ruling 2026-08-20 — fail loud, never fail silent).
 
@@ -25847,6 +25861,8 @@ def _bg_orphaned(slug: str, nid: str,
         print(f"[orgtree] {slug}/{nid}: {len(orphans)} background subagent(s) "
               f"orphaned — {why}")
         mail_spark(slug, "@system", nid)   # same hand the entry is signed with
+        if not wake:
+            return      # stopped on purpose (`stop_background`): record only
         # …and DRIVE it. The mailbox alone is not a wake: an idle node reads
         # its box at the next turn, and "there is no next turn" is the bug.
         send_message(slug, nid,
@@ -29809,6 +29825,13 @@ def interrupt_before_archive(slug: str, org: Org, nid: str,
         with _state_lock:
             st["queue"].clear()
             st["steer"] = []
+        # background work is STOPPED outright, not asked to settle (user
+        # ruling 2026-09-29): a turn with live background children cannot
+        # settle until they end. `stop_background` has the whole rule.
+        stopped = _stop_bg(slug, t)
+        if stopped is not None:
+            warnings.append(stopped)
+            continue
         # ⚠ AN ARCHIVE IS NOT CANCELLED BY A FAILED INTERRUPT. `interrupt_turn`
         # is defensive now, but this is the ONE call site where a raise would
         # be worst — it would abort retire/dissolve/rescind before the ledger
@@ -29890,6 +29913,66 @@ def interrupt_before_archive(slug: str, org: Org, nid: str,
                 f"mid-flight and any tool call it had already started may "
                 f"have landed only partly")
     return warnings
+
+
+def stop_background(slug: str, org: Org, nid: str, *,
+                    subtree: bool) -> list[str]:
+    """STOP the background tasks of `nid` (and, with `subtree`, of every live
+    descendant) before an op that retires, removes or replaces its session.
+
+    User ruling 2026-09-29: retiring, dissolving, deleting or compacting an
+    agent that still has background tasks running GOES AHEAD and stops those
+    tasks — no refusal, no force option. The ledger's old `bg_open` refusals
+    were never reachable (nothing wrote that field) and are gone.
+
+    A background task is a child of the agent's CLI process, and a process
+    with live background children is never parked: its turn stays busy,
+    draining, until the last child ends (`_run_one_turn`). So there is no
+    graceful way to stop only the children, and waiting for the turn to
+    settle would wait on the very tasks being stopped. The process tree is
+    ended with halt's cross-lane teardown (`halt.cut_for_archive`), the turn's
+    `finally` reports the tasks it lost (`_bg_orphaned`), and each stopped
+    node yields one warning for the caller's result.
+
+    Only nodes that HAVE background tasks are touched; a busy turn without
+    any is left to the caller's own rule. Must run with `store.DOC_LOCK` NOT
+    held, for `interrupt_before_archive`'s reason: the cut turn's `finally`
+    needs that lock to settle."""
+    if nid not in org.nodes or org.node(nid)["state"] != "live":
+        return []
+    targets = [nid] + (org.descendants(nid, live_only=True) if subtree else [])
+    return [w for w in (_stop_bg(slug, t) for t in targets) if w is not None]
+
+
+def _stop_bg(slug: str, t: str) -> str | None:
+    """`stop_background` for ONE node: None when it has no background tasks
+    (nothing touched), else the warning that says what was done."""
+    st = state(slug, t)
+    with _state_lock:
+        count = int(st.get("bg_tasks") or 0)
+        if count > 0:
+            # read by the turn's `finally`: these tasks are stopped on
+            # purpose, so their death notice records but does not wake
+            st["bg_stop_requested"] = True
+    if count <= 0:
+        return None
+    try:
+        from . import halt as _halt                        # noqa: PLC0415
+        _halt.cut_for_archive(slug, t)
+    except Exception as e:                                 # noqa: BLE001
+        # nothing was stopped, so a task that dies later in this turn is a
+        # real death again: its notice must wake the agent
+        with _state_lock:
+            st.pop("bg_stop_requested", None)
+        return (f'"{t}" had {count} background task(s) running and stopping '
+                f"them failed ({type(e).__name__}: {e}) — they may still be "
+                f"running")
+    settle = time.monotonic() + ARCHIVE_REAP_SETTLE_S
+    while state(slug, t)["busy"] and time.monotonic() < settle:
+        time.sleep(0.1)
+    return (f'"{t}" had {count} background task(s) running; they were '
+            f"stopped (its CLI process tree was ended, cutting its turn), and "
+            f"any work they had in flight may have landed only partly")
 
 
 def _resumable(n: NodeDoc) -> FrozenInfo | None:

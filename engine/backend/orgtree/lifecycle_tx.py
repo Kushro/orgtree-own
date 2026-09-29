@@ -433,7 +433,7 @@ def rehire(slug: str, actor: str, nid: str, grant: float | None = None,
 # `marked`) so a new per-node record the census learns about is locked here
 # without touching this file.
 #   nodes FOR UPDATE: `_taken_with(nid)` — the subtree and every lineage stack
-#     to a fixpoint (all popped; `bg_open` on any of them refuses);
+#     to a fixpoint (all popped);
 #   nodes FOR SHARE: the PARENT and every ancestor. The parent's children are
 #     the peers notified, and a hire under the parent locks it FOR UPDATE, so
 #     the peer list cannot change under the delete;

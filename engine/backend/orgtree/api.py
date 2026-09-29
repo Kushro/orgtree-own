@@ -6144,6 +6144,10 @@ def node_message(slug: str, nid: str, body: Message,
                 # nothing the successor lacks.
                 raise HTTPException(422, "just compacted — nothing to compact "
                                          "until it takes a turn")
+            # background tasks do not block a compaction: they are stopped
+            # (user ruling 2026-09-29); any other running turn still refuses
+            bg_stopped = supervisor.stop_background(slug, org, nid,
+                                                    subtree=False)
             if supervisor.state(slug, nid)["busy"]:
                 raise HTTPException(409, "busy — wait for the current turn to finish")
 
@@ -6155,8 +6159,10 @@ def node_message(slug: str, nid: str, body: Message,
 
             threading.Thread(target=run, daemon=True).start()
             r: dict[str, Any] = {"accepted": True, "compacting": True}
+            if bg_stopped:
+                r["warnings"] = bg_stopped
             if stripped != "/compact":
-                r["warnings"] = ["/compact arguments are ignored — org "
+                r["warnings"] = r.get("warnings", []) + ["/compact arguments are ignored — org "
                                  "compaction preserves the whole session as "
                                  "a knowledge bearer"]
             return r
@@ -6541,6 +6547,9 @@ def node_compact(slug: str, nid: str) -> dict[str, Any]:
     if supervisor.halt.org_killswitch(slug):
         raise HTTPException(409, "the org killswitch is latched — release it "
                                  "before compacting")
+    # background tasks do not block a compaction: they are stopped (user
+    # ruling 2026-09-29); any other running turn still refuses
+    bg_stopped = supervisor.stop_background(slug, org, nid, subtree=False)
     if supervisor.state(slug, nid)["busy"]:
         raise HTTPException(409, "busy — wait for the current turn to finish")
 
@@ -6553,7 +6562,7 @@ def node_compact(slug: str, nid: str) -> dict[str, Any]:
             pass          # raced into busy — the 409 precheck caught most; harmless
 
     threading.Thread(target=run, daemon=True).start()
-    return {"started": True}
+    return {"started": True, **({"warnings": bg_stopped} if bg_stopped else {})}
 
 
 @app.post("/api/orgs/{slug}/lineage/{nid}/recover")
@@ -13560,6 +13569,18 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
             raise HTTPException(422, str(e))
         _archive_warnings = supervisor.interrupt_before_archive(
             body.org, _pre_org, _arch_node)
+    elif body.tool == "orgtree_cheap_compact":
+        # the target's background tasks are STOPPED before its session is
+        # replaced (user ruling 2026-09-29) — outside the lock for the same
+        # reason, behind the same pre-guard; the ledger re-checks under it
+        _cc_node = str(a.get("node") or "")
+        try:
+            _pre_org = store.load_org(body.org)
+            _pre_org._require_authority(body.node, _cc_node)
+        except LedgerError as e:
+            raise HTTPException(422, str(e))
+        _archive_warnings = supervisor.stop_background(
+            body.org, _pre_org, _cc_node, subtree=False)
     # ⚠ OUT HERE FOR A DIFFERENT REASON THAN THE ARCHIVE WAIT ABOVE, and the
     # same reason `orgtree_continue_on` is out here: choosing a new OpenRouter
     # agent's harness is a LIVE PROVIDER READ that spawns a Codex process, and
@@ -14189,6 +14210,8 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
                 # FR-24: superior-only by _require_authority; the transcript
                 # copy rides the same locked save window as the ledger change
                 result = org.cheap_compact(body.node, a.get("node"))  # type: ignore[arg-type]
+                if _archive_warnings:
+                    result.setdefault("warnings", []).extend(_archive_warnings)
                 supervisor.export_predecessor_transcript(
                     org, str(a.get("node") or ""),
                     old_sid=cast(str, result.get("old_session")),
@@ -16183,16 +16206,31 @@ def org_op(slug: str, body: Op, request: Request) -> dict[str, Any]:
     # OUTSIDE the lock: the wait needs DOC_LOCK free for the interrupted
     # turn's own `finally` to acquire it. The authority check here is a
     # pre-guard only; the real op re-validates under the lock below.
+    # DELETE takes the same step (2026-09-29): it removes a live subtree and
+    # drops its runtime state, which left a running CLI — background tasks
+    # included — working on for a seat that no longer existed. Delete is the
+    # user's alone, so a non-user actor is left to the ledger's refusal
+    # without anything being interrupted first.
+    # CHEAP COMPACTION stops the target's background tasks only (user ruling
+    # 2026-09-29), and never for a bulk `if_idle` run, which skips a busy
+    # agent instead of touching it.
     _archive_warnings: list[str] = []
-    if body.op in ("retire", "dissolve", "rescind") and body.node:
+    _stop_first = body.op in ("retire", "dissolve", "rescind") or (
+        body.op == "delete" and ledger_mod.actor_kind(body.actor) == "user")
+    _stop_bg = body.op == "cheap_compact" and not body.if_idle
+    if (_stop_first or _stop_bg) and body.node:
         try:
             _pre_org = store.load_org(slug)
             _pre_org._require_authority(
-                body.actor, body.node, allow_self=(body.op != "dissolve"))
+                body.actor, body.node,
+                allow_self=(body.op not in ("dissolve", "cheap_compact")))
         except LedgerError as e:
             raise HTTPException(422, str(e))
-        _archive_warnings = supervisor.interrupt_before_archive(
-            slug, _pre_org, body.node)
+        _archive_warnings = (
+            supervisor.interrupt_before_archive(slug, _pre_org, body.node)
+            if _stop_first else
+            supervisor.stop_background(slug, _pre_org, body.node,
+                                       subtree=False))
     # ⚠ OFF DOC_LOCK for the same class of reason as the wait above, though
     # not the same reason: a new OpenRouter agent's harness is chosen by a
     # LIVE PROVIDER READ that spawns a Codex process, and provider reads never

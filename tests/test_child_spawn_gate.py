@@ -57,6 +57,7 @@ ALLOWED = {
     'test_antigravity_parity.py': (5, NOIMPORT),
     'test_antigravity_turn_result.py': (2, NOIMPORT),
     'test_assert_repo_import.py': (2, SELF),
+    'test_background_tasks_stop.py': (2, NOIMPORT),
     'test_census_contact_overhead.py': (1, TOOL),
     'test_child_python.py': (2, HELPER),
     'test_claude_pipe_lifecycle.py': (3, NOIMPORT),

@@ -1426,8 +1426,9 @@ TOOLS: list[dict[str, Any]] = [
              "cold-cache prices). The seat, parent, scope, charter, grant and "
              "team stay; the old session is archived as a knowledge bearer "
              "(<node>@<gen>) and the successor starts with zero context, reading "
-             "only the history it chooses. Refused on yourself and on nodes with "
-             "open background tasks."),
+             "only the history it chooses. Refused on yourself. Background "
+             "tasks still running on the target are stopped first, which also "
+             "cuts its current turn."),
         "inputSchema": {"type": "object",
                         "properties": {"node": {"type": "string"}},
                         "required": ["node"]},

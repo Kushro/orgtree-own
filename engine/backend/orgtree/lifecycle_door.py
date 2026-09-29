@@ -400,6 +400,9 @@ def _split_rows(snap: Any, call: Any, a: dict[str, Any]
 def _cheap_compact(org: Any, hn: Any, hs: Any, tx: pgdoor.AgentTx) -> Any:
     nid = str(tx.args.get("node") or "")
     result = lt.cheap_compact_body(org, hn, hs, tx.node, nid)
+    warns = tx.pre.get("archive_warnings")     # background tasks it stopped
+    if warns and isinstance(result, dict):
+        result.setdefault("warnings", []).extend(warns)
     old_sid = result.get("old_session") if isinstance(result, dict) else None
     if old_sid:
         from . import supervisor
