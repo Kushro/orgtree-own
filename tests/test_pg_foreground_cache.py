@@ -269,6 +269,69 @@ class ForegroundCache(unittest.TestCase):
         self.assertIn('newcomer', response['nodes'])
         self.assertEqual(self.builds, 2)
 
+    # N1000 attempt 9: four windows shared one busy entry and nearly every
+    # read was a full snapshot. A base several versions old must still answer
+    # with a delta, and an entry must not be evicted by the read that served it.
+    def test_a_base_several_versions_behind_still_gets_a_delta(self):
+        oldest, _, _ = self.read()
+        tags = [oldest]
+        for i in range(6):                  # other windows read after each change
+            self.status(f'change {i}')
+            tag, _, _ = self.read(tags[-1])
+            tags.append(tag)
+        self.assertEqual(len(set(tags)), 7)
+        with patch.object(fg, 'select_foreground', side_effect=AssertionError('rebuilt')):
+            for base in tags[:-1]:
+                tag, body, _ = self.read(base)
+                self.assertEqual(tag, tags[-1])
+                response = json.loads(body)
+                self.assertEqual(response['kind'], 'delta', base)
+                self.assertEqual(response['base'], cache._base(base))
+                self.assertEqual(response['nodes']['boss']['set']['last_status'], {'summary': 'change 5'})
+        self.assertEqual(self.builds, 1)
+
+    def test_shared_rows_count_once_toward_the_byte_budget(self):
+        org = store.load_org(self.slug)
+        org.hire(ledger.USER, 'boss', 'luna', 0, 'bystander', charter='Unchanging text. ' * 2000)
+        store.save_org(org)
+        tag, _, _ = self.read()
+        tags = [tag]
+        for i in range(4):
+            self.status(f'change {i}')
+            tag, _, _ = self.read(tags[-1])
+            tags.append(tag)
+        (entry,) = [e for k, e in cache._cache.items() if k[1] == self.slug]
+        versions = list(entry['versions'].values())
+        self.assertEqual(len(versions), 5)
+        # An unchanged row is one object in every version; only the current
+        # version keeps a full body.
+        self.assertEqual(len({id(v['nodes']['bystander']) for v in versions}), 1)
+        self.assertTrue(all(v['wire'] is None for t, v in entry['versions'].items() if t != entry['token']))
+        naive = sum(len(v['top']) + sum(map(len, v['nodes'].values())) for v in versions)
+        self.assertLess(entry['bytes'], naive - 3 * len(versions[0]['nodes']['bystander']))
+        # Room for one more changed row: counted per object it fits, so the
+        # oldest window's base is still there.
+        with patch.object(cache, 'MAX_BYTES', entry['bytes'] + 20_000):
+            self.status('within budget')
+            tag, body, _ = self.read(tags[0])
+        self.assertEqual(json.loads(body)['kind'], 'delta')
+        self.assertEqual(self.builds, 1)
+
+    def test_an_entry_over_budget_on_its_own_survives_its_read_minus_old_bases(self):
+        tag, _, _ = self.read()
+        self.status('second')
+        second, _, _ = self.read(tag)
+        with patch.object(cache, 'MAX_BYTES', 1):
+            self.status('third')
+            third, body, _ = self.read(second)
+            self.assertEqual(json.loads(body)['kind'], 'delta')
+            (entry,) = [e for k, e in cache._cache.items() if k[1] == self.slug]
+            self.assertEqual(list(entry['versions']), [cache._base(third)])
+            same, body, _ = self.read(third)
+        self.assertEqual(same, third)
+        self.assertIsNone(body)
+        self.assertEqual(self.builds, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

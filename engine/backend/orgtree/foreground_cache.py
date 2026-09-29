@@ -20,7 +20,12 @@ from . import foreground_store as storage, foreground_view as view
 from . import pgfeed, store, tree_changes, tree_delta, tree_fast
 
 MAX_ENTRIES = 8
-MAX_VERSIONS = 3
+#: versions kept per entry as delta bases. Unchanged rows share their bytes
+#: across versions, so an extra version costs its changed rows, not a copy of
+#: the tree. Several windows re-reading one busy tree each need their own base
+#: still here (N1000 attempt 9: 3 versions and 4 windows meant a full 7.7 MB
+#: answer for almost every read).
+MAX_VERSIONS = 16
 MAX_BYTES = 32 * 1024 * 1024
 #: entries that keep a reusable projection (a whole context: O(selected
 #: nodes) in memory); older entries drop it and rebuild on their next change
@@ -57,13 +62,15 @@ def _wire(payload):
     return body, gzip.compress(body, compresslevel=1, mtime=0)
 
 
-def _version(payload, previous=None):
+def _version(payload, previous=None, same=None):
     """Encoded rows and hashes of a payload. `previous` = (version, rows) of
     the version this one replaces: a node whose projected dict compares equal
     keeps its bytes and hash instead of being encoded and hashed again
     (foreground-tree F3b-3). Python equality treats True/1/1.0 and 0.0/-0.0 as
     equal; such a type-only flip keeps the previous spelling until that node
-    changes otherwise (the decoded value is the same)."""
+    changes otherwise (the decoded value is the same). `same` = a version
+    whose byte-identical rows are shared instead of kept twice (a full
+    rebuild after a change the cache could not prove)."""
     old, rows = previous if previous is not None else (None, {})
     nodes, hashes = {}, {}
     for nid, row in payload['nodes'].items():
@@ -71,7 +78,11 @@ def _version(payload, previous=None):
             nodes[nid], hashes[nid] = old['nodes'][nid], old['hashes'][nid]
         else:
             nodes[nid] = tree_delta.encode(row)
-            hashes[nid] = hashlib.sha256(nodes[nid]).hexdigest()
+            kept = same['nodes'].get(nid) if same is not None else None
+            if kept is not None and kept == nodes[nid]:
+                nodes[nid], hashes[nid] = kept, same['hashes'][nid]
+            else:
+                hashes[nid] = hashlib.sha256(nodes[nid]).hexdigest()
     return {'top': tree_delta.encode({k: v for k, v in payload.items() if k != 'nodes'}),
             'nodes': nodes, 'hashes': hashes, 'wire': None}
 
@@ -115,11 +126,41 @@ def _delta(before, after, base, token, watermarks):
 
 
 def _size(entry):
-    # Conservative double-counting of shared byte rows keeps the cap strict.
-    return sum(len(v['top']) + sum(map(len, v['nodes'].values())) +
-               (sum(map(len, v['wire'])) if v['wire'] else 0)
-               for v in entry['versions'].values()) + \
-        sum(sum(map(len, wire)) for wire in entry['deltas'].values())
+    """Bytes the entry retains. Versions share unchanged rows (the same bytes
+    object), so each object counts once: counting it once per version made
+    three versions of an N1000 tree exceed MAX_BYTES and evicted the only
+    entry, so the next read rebuilt from nothing and sent the whole tree."""
+    seen = set()
+    total = 0
+    def count(blob):
+        nonlocal total
+        if id(blob) not in seen:
+            seen.add(id(blob))
+            total += len(blob)
+    for version in entry['versions'].values():
+        count(version['top'])
+        for blob in version['nodes'].values():
+            count(blob)
+        for blob in version['wire'] or ():
+            count(blob)
+    for wire in entry['deltas'].values():
+        for blob in wire:
+            count(blob)
+    return total
+
+
+def _shed(entry):
+    """Drop an entry's cached deltas and oldest bases (never its current
+    version) until it fits the byte budget on its own."""
+    versions = entry['versions']
+    entry['deltas'] = {}
+    while len(versions) > 1 and _size(entry) > MAX_BYTES:
+        oldest = next(iter(versions))
+        if oldest == entry['token']:
+            versions.move_to_end(oldest)
+        else:
+            del versions[oldest]
+    entry['bytes'] = _size(entry)
 
 
 def _db(stamp):
@@ -254,7 +295,7 @@ def read(slug, public, since, *, include=(), runtime, sync_revision, build,
                     built = build(raw, graph)
                     payload, saved = built if isinstance(built, tuple) else (built, None)
                     payload.update(watermarks)
-                    version = _version(payload)
+                    version = _version(payload, same=entry['versions'][entry['token']] if entry else None)
                     rows = payload['nodes']
                     hashes = {nid: tree_fast.signature(row['node']) for nid, row in graph['rows'].items()}
                 version['top'] = tree_delta.encode({**json.loads(version['top']), **watermarks})
@@ -264,6 +305,11 @@ def read(slug, public, since, *, include=(), runtime, sync_revision, build,
                 versions.move_to_end(token)
                 while len(versions) > MAX_VERSIONS:
                     versions.popitem(last=False)
+                # Only the current version is ever sent whole; an older base
+                # answers with a delta, so its full body is dead weight.
+                for other, kept in list(versions.items()):
+                    if other != token and kept['wire'] is not None:
+                        versions[other] = {**kept, 'wire': None}
                 entry = {'stamp': db, 'runtime': run, 'token': token, 'rows': rows,
                          'versions': versions, 'deltas': {}, 'used': now, 'saved': saved,
                          'fast': {'seq': stamp['seq'], 'hashes': hashes}}
@@ -287,12 +333,18 @@ def read(slug, public, since, *, include=(), runtime, sync_revision, build,
                        'X-Orgtree-Catalog-Rev': f"{stamp['org_id']}:{stamp['catalog_revision']}"}
             return _tag(token), result, headers
         result = storage.read_snapshot(slug, refresh)
+        entry['bytes'] = _size(entry)
         with _lock:
             _cache[key] = entry
             _cache.move_to_end(key)
             for older in list(_cache.values())[:-MAX_SAVED]:
                 older['saved'] = None
-            while len(_cache) > MAX_ENTRIES or sum(_size(e) for e in _cache.values()) > MAX_BYTES:
+            # The entry just served is the newest and is never evicted by its
+            # own read: older entries go first, then its own oldest bases.
+            while len(_cache) > MAX_ENTRIES or sum(e['bytes'] for e in _cache.values()) > MAX_BYTES:
+                if len(_cache) == 1:
+                    _shed(entry)
+                    break
                 _cache.popitem(last=False)
             if _cache:
                 _arm_sweep()
