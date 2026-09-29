@@ -11352,11 +11352,13 @@ def _codex_lost_kind(exc: Exception) -> str:
 
 
 # ---------------------------------- manual-inbox input evidence (P08b)
-# A manual delivery is confirmed only from the runtime's own durable echo of
-# a keyed chunk call, matched per chunk by `inbox.codex_chunk_evidence`, for
-# EVERY chunk of EVERY message (`inbox.confirmation_complete`). Only the Codex
-# leg writes such an echo; every other runtime, and any delivery short of
-# complete evidence, keeps the ordinary turn-end fold and is redelivered.
+# A manual delivery is confirmed only from the runtime's own record that the
+# answer reached the agent, for EVERY chunk of EVERY message
+# (`inbox.confirmation_complete`): the Codex leg's durable echo of a keyed
+# chunk call (`inbox.codex_chunk_evidence`), or a Claude-harness agent's own
+# CLI session file (`inbox.claude_session_evidence`). Every other runtime, and
+# any delivery short of complete evidence, keeps the ordinary turn-end fold
+# and is redelivered.
 #
 # ⚠ NOT YET COVERED, said plainly: an echo that is journaled only AFTER this
 # turn-end scan (a late record after the fold) and a restart before the scan
@@ -11374,12 +11376,10 @@ def scan_manual_records(slug: str, nid: str) -> dict[str, int]:
         # PG-3d: a lock-free read; the confirmation below is its own
         # row transaction (_confirm_delivered)
         org = store.load_runtime_org(slug)
-        found = _manual_candidates(org, nid)
+        found, toks = _manual_proven_toks(org, slug, nid)
         if not found:
             return counts
-        incarnation = _transcript_incarnation(org, nid)
         counts["candidates"] = len(found)
-        toks = _manual_complete_toks(slug, nid, found, incarnation)
         counts["complete"] = len(toks)
         if toks:
             _confirm_delivered(slug, nid, toks, provider_ack=False,
@@ -11389,7 +11389,7 @@ def scan_manual_records(slug: str, nid: str) -> dict[str, int]:
     return counts
 
 
-def _manual_candidates(org: Org, nid: str
+def _manual_candidates(org: Org, nid: str, *, need_chunk_calls: bool = True
                        ) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
     """This node's journaled manual batches that could carry chunk evidence:
     a well-formed record of the node's CURRENT mailbox, generation and seat,
@@ -11409,7 +11409,8 @@ def _manual_candidates(org: Org, nid: str
             continue
         att = atts.get(record["delivery_id"]) if isinstance(atts, dict) else None
         if (not isinstance(att, dict) or att.get("tok") != b.get("tok")
-                or not att.get("chunk_calls") or "seat" not in record
+                or (need_chunk_calls and not att.get("chunk_calls"))
+                or "seat" not in record
                 or record.get("seat") != node.get("seat_id")
                 or record.get("generation") != node.get("generation")
                 or record.get("mailbox") != node.get("mailbox_id")
@@ -11442,6 +11443,71 @@ def _manual_complete_toks(slug: str, nid: str,
     return toks
 
 
+def _manual_proven_toks(org: Org, slug: str, nid: str
+                        ) -> tuple[list[Any], list[str]]:
+    """(candidates, the tokens whose every chunk is proven) for one node.
+    Two proofs, either sufficient: the durable journal's Codex echo of every
+    keyed chunk call (P08b; only deliveries that recorded chunk calls, and
+    only the Codex leg writes the echo's origin marker), and, for a Claude-
+    harness agent, its own CLI session file (landing 2 of the door, option
+    A 2026-09-29). Reads only; a read that fails raises."""
+    from . import desktop_native                              # noqa: PLC0415
+    node = org.nodes.get(nid) or {}
+    found = _manual_candidates(org, nid, need_chunk_calls=False)
+    if not found:
+        return found, []
+    keyed = [c for c in found if c[2].get("chunk_calls")]
+    toks = (_manual_complete_toks(slug, nid, keyed, _transcript_incarnation(org, nid))
+            if keyed else [])
+    if desktop_native.provider_for(node) in {"claude", "openrouter"}:
+        toks += [t for t in _claude_manual_complete_toks(
+            org, nid, [c for c in found if c[0] not in toks]) if t not in toks]
+    return found, toks
+
+
+def _claude_session_lines(path: str, needles: Iterable[bytes]) -> list[bytes]:
+    """The COMPLETE lines of a Claude session file that contain any needle.
+    A line still being written (no newline yet) is not read."""
+    wanted = [n for n in needles if n]
+    out: list[bytes] = []
+    with open(path, "rb") as f:
+        for raw in f:
+            if not raw.endswith(b"\n"):
+                break
+            if any(n in raw for n in wanted):
+                out.append(raw)
+    return out
+
+
+def _claude_manual_complete_toks(
+        org: Org, nid: str,
+        found: Iterable[tuple[str, dict[str, Any], dict[str, Any]]]) -> list[str]:
+    """The Claude candidates whose every chunk of every message the CLI's own
+    session file proves the agent received (`inbox.claude_session_evidence`,
+    `inbox.confirmation_complete`). No file, no proof: the batch is folded
+    back and redelivered as before."""
+    node = org.nodes.get(nid) or {}
+    root = _transcript_root(org, nid) or os.path.expanduser("~/.claude")
+    toks = []
+    for tok, record, _att in found:
+        session = str(record.get("session") or "")
+        path = (transcript_path_for_node(org, nid)
+                if session and session == str(node.get("session_id") or "")
+                else transcript_path(session, root) if session else None)
+        if not path:
+            continue
+        try:
+            lines = _claude_session_lines(
+                path, [inbox.TOOL.encode("utf-8"),
+                       str(record.get("delivery_id") or "").encode("utf-8")])
+        except OSError:
+            continue
+        evidence, _rejected = inbox.claude_session_evidence(record, lines)
+        if inbox.confirmation_complete(record, evidence):
+            toks.append(tok)
+    return toks
+
+
 #: The per-node sections `_confirm_locked` writes, staged by the startup pass
 #: so a failure part-way leaves the caller's document exactly as it was.
 _MANUAL_CONFIRM_SECTIONS = ("delivering", "mail_transitions")
@@ -11469,11 +11535,9 @@ def _reconcile_manual_records(org: Org, *, net_ids: list[str] | None = None) -> 
         try:
             if nid not in org.nodes or _reclaim_blocked(org, nid):
                 continue
-            found = _manual_candidates(org, nid)
+            found, toks = _manual_proven_toks(org, slug, nid)
             if not found:
                 continue
-            toks = _manual_complete_toks(slug, nid, found,
-                                         _transcript_incarnation(org, nid))
         except Exception:                                    # noqa: BLE001
             continue
         if not toks:

@@ -66,11 +66,12 @@ ATTEMPTS_KEEP: Final = 40
 #: recorded call is ever evicted.
 CHUNK_CALLS_PER_CHUNK: Final = 4
 
-#: Why no fetch can be confirmed yet. Returned on every fetch result.
+#: Why a fetch is not confirmed when it is served. Returned on every fetch.
 WILL_REDELIVER_REASON: Final = (
-    "no trusted input-evidence adapter exists for this runtime yet, so this "
-    "fetch cannot be confirmed: the mail returns to your mailbox when this turn "
-    "ends and you will see it again")
+    "this mail returns to your mailbox when this turn ends and you will see it "
+    "again, unless your own session record shows this answer reached you "
+    "(Claude: the tool result in your session file; Codex: the runtime's echo "
+    "of each chunk call)")
 
 #: The single refusal for anything that tries to name a mailbox. It is a
 #: constant so it cannot depend on the value, on the document, or on whether
@@ -689,4 +690,122 @@ def codex_chunk_evidence(record: Any, attempt: Any, rows: Iterable[tuple[Any, An
             continue
         evidence.setdefault((mid, k), {"ref": ref, "op_id": call["op_id"],
                                        "item_id": origin["item_id"]})
+    return evidence, rejected
+
+
+# --------------------------------------------------------------------------
+# Claude session-file evidence (landing 2 of the door; option A, 2026-09-29)
+# --------------------------------------------------------------------------
+
+#: The Claude CLI names an MCP tool `mcp__<server>__<tool>`.
+_CLAUDE_TOOL_SUFFIX: Final = "__" + TOOL
+
+
+def _claude_result_text(block: Mapping[str, Any]) -> str | None:
+    """The text of one successful tool_result block, or None. The CLI writes
+    the MCP answer as a list of text blocks (one, for our tool) or a string."""
+    if block.get("type") != "tool_result" or block.get("is_error") is True:
+        return None
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if (isinstance(content, list) and len(content) == 1 and isinstance(content[0], Mapping)
+            and content[0].get("type") == "text" and isinstance(content[0].get("text"), str)):
+        return content[0]["text"]
+    return None
+
+
+def claude_session_evidence(record: Any, lines: Iterable[Any]
+                            ) -> tuple[dict[tuple[str, int], dict[str, Any]], dict[str, int]]:
+    """Which chunks of a manual delivery the Claude CLI's own session file
+    proves reached the agent. Pure.
+
+    `record` is the journal row's manual record and `lines` the session
+    file's JSON lines (bytes or str). A chunk k of message m is proven by a
+    tool_result, in a record of the record's own session, that answers a
+    tool_use of THIS tool, is not an error, and parses to an answer that:
+
+      target   names the record's delivery_id, and message m, chunk k;
+      digest   carries content whose sha256 is the plan's digest for chunk
+               k, and says so (chunk_sha256, and body_sha256 on a fetch).
+
+    A fetch answer proves every item it served whole or in part; a chunk
+    answer proves its one chunk. The delivery_id is random per fetch, and
+    the digest is of the content itself, so an answer for another delivery,
+    a truncated or reformatted answer, and a receipt replay (which carries
+    no content) prove nothing. Returns `({(message_id, chunk_index):
+    evidence}, rejected counts)`."""
+    rejected: dict[str, int] = {}
+
+    def no(why: str) -> None:
+        rejected[why] = rejected.get(why, 0) + 1
+
+    if not isinstance(record, Mapping):
+        return {}, {"unreadable_record": 1}
+    session, did, plan = record.get("session"), record.get("delivery_id"), record.get("plan")
+    if (not isinstance(session, str) or not session or not isinstance(did, str) or not did
+            or not isinstance(plan, Mapping)):
+        return {}, {"unreadable_record": 1}
+    uses: set[str] = set()
+    evidence: dict[tuple[str, int], dict[str, Any]] = {}
+
+    def prove(item: Mapping[str, Any], ref: str) -> None:
+        mid, k, content = item.get("message_id"), item.get("chunk_index"), item.get("content")
+        entry = plan.get(mid) if isinstance(mid, str) else None
+        chunks = entry.get("chunks") if isinstance(entry, Mapping) else None
+        if (isinstance(k, bool) or not isinstance(k, int) or not isinstance(chunks, list)
+                or not 0 <= k < len(chunks) or not isinstance(chunks[k], Mapping)):
+            no("target")
+            return
+        want = chunks[k].get("sha256")
+        if (not isinstance(content, str) or not isinstance(want, str)
+                or _sha(content.encode("utf-8")) != want or item.get("chunk_sha256") != want
+                or ("body_sha256" in item and item["body_sha256"] != entry.get("body_sha256"))):
+            no("digest")
+            return
+        evidence.setdefault((mid, k), {"ref": ref})
+
+    for n, line in enumerate(lines):
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        msg = rec.get("message") if isinstance(rec, Mapping) else None
+        blocks = msg.get("content") if isinstance(msg, Mapping) else None
+        if not isinstance(blocks, list):
+            continue
+        if rec.get("sessionId") != session:
+            no("session")
+            continue
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                continue
+            if (block.get("type") == "tool_use" and isinstance(block.get("id"), str)
+                    and str(block.get("name") or "").endswith(_CLAUDE_TOOL_SUFFIX)):
+                uses.add(block["id"])
+                continue
+            if block.get("type") != "tool_result":
+                continue
+            if block.get("tool_use_id") not in uses:
+                no("not_this_tool")
+                continue
+            text = _claude_result_text(block)
+            try:
+                answer = json.loads(text) if text is not None else None
+            except ValueError:
+                answer = None
+            if not isinstance(answer, Mapping) or answer.get("ok") is not True:
+                no("not_a_result")
+                continue
+            if answer.get("delivery_id") != did:
+                no("target")
+                continue
+            ref = f"line:{n}"
+            fetched = answer.get("fetched")
+            if isinstance(fetched, list):
+                for item in fetched:
+                    if isinstance(item, Mapping) and item.get("delivery_id") == did:
+                        prove(item, ref)
+            elif "chunk_index" in answer:
+                prove(answer, ref)
     return evidence, rejected
