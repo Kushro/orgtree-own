@@ -6,13 +6,11 @@
 // claims are unfalsifiable there and are checked here instead, in Chromium,
 // with the real stylesheets:
 //
-//   A. The compact header's labels collapse at narrow widths through a
-//      CONTAINER QUERY. jsdom does not evaluate container queries at all and
-//      performs no layout, so the suite could only assert that the markup
-//      exists — never that it responds. And the accessibility half of the
-//      claim ("hidden with CSS, never removed, so `aria-label` carries the
-//      same words at every width") is exactly the kind of thing that is true
-//      in the DOM and false on screen.
+//   A. The header's action buttons draw NO words at any width (icons only
+//      since 2026-09-29), their `aria-label` names are the same at every
+//      width, and the Canvas/Attention switch shows exactly one word. jsdom
+//      performs no layout, so "nothing is drawn" is a claim only a painted
+//      frame can answer.
 //
 //   B. The organization list's FIRST USABLE DISPLAY. This is the acceptance
 //      condition the reviewer could not close: does opening the list show
@@ -73,15 +71,15 @@ const TREE = {
 } as unknown as TreePayload
 
 const actions = <>
-  <ShellAction label="Work" icon={<span>W</span>} onClick={() => {}} />
-  <ShellAction label="Inbox" icon={<span>I</span>} onClick={() => {}} />
-  <ShellAction label="Presentations" icon={<span>P</span>} onClick={() => {}} />
-  <ShellAction label="Usage" icon={<span>U</span>} onClick={() => {}} />
-  <ShellAction label="Org settings" icon={<span>S</span>} onClick={() => {}} />
+  <ShellAction label="Work" icon={<svg width="14" height="14" aria-hidden="true" />} onClick={() => {}} />
+  <ShellAction label="Inbox" icon={<svg width="14" height="14" aria-hidden="true" />} onClick={() => {}} />
+  <ShellAction label="Presentations" icon={<svg width="14" height="14" aria-hidden="true" />} onClick={() => {}} />
+  <ShellAction label="Usage" icon={<svg width="14" height="14" aria-hidden="true" />} onClick={() => {}} />
+  <ShellAction label="Org settings" icon={<svg width="14" height="14" aria-hidden="true" />} onClick={() => {}} />
 </>
 
 async function run() {
-  // ---------------------------------------------- A. the container query
+  // ------------------------------------------- A. icons only, named
   mark('A-wide')
   host.style.width = '1400px'
   render(
@@ -91,34 +89,30 @@ async function run() {
       actions={actions} />)
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
 
-  const labelsWide = qa('.shell-action-label').map((el) => css(el, 'display'))
-  const wideBoxes = qa('.shell-action-label').map((el) => (el as HTMLElement).offsetWidth)
+  // ⚠ ICONS ONLY AT EVERY WIDTH since 2026-09-29 (the user dropped the words):
+  // the claim is now that no action button draws text at either width, and
+  // that the accessible names are the same at both.
+  const drawnText = () => qa('.shell-action').map((el) => (el as HTMLElement).innerText.trim())
+  const textWide = drawnText()
   const ariaWide = qa('.shell-action').map((el) => el.getAttribute('aria-label'))
-  // the toggle is the one control that must NOT collapse — it is the
-  // "prominent labelled" control the settled design names
-  const modeWide = qa('.shell-mode').map((el) => (el as HTMLElement).offsetWidth)
+  const switchWide = qa('.shell-switch').map((el) => (el as HTMLElement).innerText.trim())
 
   mark('A-narrow')
   host.style.width = '700px'
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
-  const labelsNarrow = qa('.shell-action-label').map((el) => css(el, 'display'))
-  const narrowBoxes = qa('.shell-action-label').map((el) => (el as HTMLElement).offsetWidth)
+  const textNarrow = drawnText()
   const ariaNarrow = qa('.shell-action').map((el) => el.getAttribute('aria-label'))
-  const modeNarrow = qa('.shell-mode').map((el) => (el as HTMLElement).offsetWidth)
-  const narrowText = qa('.shell-mode').map((el) => el.textContent)
+  const switchNarrow = qa('.shell-switch').map((el) => (el as HTMLElement).innerText.trim())
 
   PROBE.A = {
-    labelsWide, labelsNarrow,
-    // the whole point: present and laid out at wide, present but zero-box at narrow
-    anyWideLabelDrawn: wideBoxes.some((w) => w > 0),
-    allNarrowLabelsCollapsed: narrowBoxes.every((w) => w === 0),
-    labelsStillInDom: qa('.shell-action-label').length,
-    // ⚠ the accessibility claim, which is the half that could have been false
+    textWide, textNarrow,
+    noWordsDrawn: [...textWide, ...textNarrow].every((t) => t === ''),
+    // ⚠ the accessibility claim: the names do not depend on the width
     ariaUnchanged: JSON.stringify(ariaWide) === JSON.stringify(ariaNarrow),
     ariaWide,
-    // the prominent toggle keeps its words at both widths
-    modeKeepsLabels: modeNarrow.every((w) => w > 0) && modeWide.every((w) => w > 0),
-    modeText: narrowText,
+    // the view switch shows exactly one word, the current view, at both widths
+    switchOneWord: [...switchWide, ...switchNarrow].every((t) => t === 'Canvas'),
+    switchText: switchNarrow,
   }
 
   // ------------------------------------- B. the FIRST USABLE DISPLAY
