@@ -186,14 +186,19 @@ def _patch_saved(saved, changes):
 
 
 def read(slug, public, since, *, include=(), runtime, sync_revision, build,
-         compressed=False, feed=None, reproject=None, advance=None):
+         compressed=False, feed=None, reproject=None, advance=None, piles=None):
     """build(raw, graph) returns an annotated/scrubbed foreground snapshot, or
     (snapshot, saved) when reproject(saved) can repeat its in-memory
     projection (context, header, annotation) without reading storage, and
     advance(raw, saved, stamp, rows) moves saved to a newer snapshot given the
-    fresh rows of exactly the nodes that changed."""
+    fresh rows of exactly the nodes that changed.
+
+    ``piles`` (saved fronts) also selects every visible retired pile's edge
+    rows. They move only with ``catalog_revision``, and a changed catalog
+    already rebuilds (`_changes`), so the delta paths below stay exact."""
     selected = tuple(sorted(storage._wanted(include)))
-    key = (str(store.DATA_ROOT), slug, public, selected)
+    fronts = None if piles is None else storage._fronts(dict(piles))
+    key = (str(store.DATA_ROOT), slug, public, selected, fronts)
     with _lock:
         builder = _builders.setdefault(key, threading.RLock())
     with builder:
@@ -245,7 +250,7 @@ def read(slug, public, since, *, include=(), runtime, sync_revision, build,
                                        if rows is not None else None)
                     rows = payload['nodes']
                 else:
-                    graph = storage.select_foreground(raw, stamp, selected)
+                    graph = storage.select_foreground(raw, stamp, selected, piles=fronts)
                     built = build(raw, graph)
                     payload, saved = built if isinstance(built, tuple) else (built, None)
                     payload.update(watermarks)

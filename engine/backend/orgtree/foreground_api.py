@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import gzip
 import importlib
+import json
 import threading
 import time
 
@@ -273,6 +274,22 @@ def _unavailable(slug):
         code=409, headers={'Cache-Control': 'no-store'})
 
 
+def _piles(query):
+    """`piles=1` asks the snapshot to carry every visible retired pile's edge
+    rows, resolved in its own committed snapshot, instead of the client paging
+    first/last children per parent. `fronts` is a JSON object of the saved
+    fronts (parent, '' for roots -> retired child id)."""
+    if query.get('piles') != '1':
+        if 'fronts' in query:
+            raise ValueError('fronts require piles=1')
+        return None
+    try:
+        fronts = json.loads(query.get('fronts') or '{}')
+    except ValueError as error:
+        raise ValueError('fronts must be a JSON object') from error
+    return foreground_store._fronts(fronts)
+
+
 def read(slug: str, request: Request, *, mode='snapshot', nid=None) -> Response:
     from . import api
     public_slug = api._public_slug(request)
@@ -286,7 +303,7 @@ def read(slug: str, request: Request, *, mode='snapshot', nid=None) -> Response:
         if mode == 'snapshot':
             etag, body, watermarks = foreground_cache.read(
                 slug, public_slug is not None, request.headers.get('if-none-match', ''),
-                include=query.getlist('include'), compressed=compressed,
+                include=query.getlist('include'), piles=_piles(query), compressed=compressed,
                 runtime=lambda: api._tree_runtime_stamp(slug),
                 sync_revision=lambda: api._current_sync_rev(slug), feed=api._REV_FEED,
                 build=lambda raw, graph: _project(raw, slug, graph, request,

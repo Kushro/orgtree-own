@@ -242,30 +242,15 @@ def foreground_answer(response):
     return body
 
 
-def visible_parents(snapshot):
-    """treeview.ts `visibleParents` with no saved fronts: the LAST retired sibling fronts each pile."""
-    out, nodes = [], snapshot["nodes"]
-    stack = [(snapshot["roots"], "", snapshot["header"].get("hidden_retired_roots", 0))]
-    while stack:
-        ids, parent, omitted = stack.pop()
-        rows = [nodes[i] for i in ids]
-        retired = [row for row in rows if row.get("state") == "archived"]
-        if omitted + len(retired) > 0:
-            out.append(parent)
-        front = retired[-1] if retired else None
-        stack += [(row.get("children", []), row["id"], row.get("hidden_retired_children", 0))
-                  for row in reversed(rows) if row.get("state") != "archived" or row is front]
-    return out
-
-
 class ForegroundTree:
     """App's tree read since e1be6a2: api.getAppTree -> TreeViewReader -> ForegroundTreeReader.
 
     Selection is the saved desk identity only, hideRetired off (the product
-    default), no saved fronts, no browse. A (re)plan costs one first-child and
-    one last-child page per visible pile parent, then a re-read; later reads are
-    one conditional GET while the catalog holds. A compatibility answer falls
-    back to the legacy conditional full read for 30 s (inferred) or 600 s.
+    default), no saved fronts, no browse. Every read is one GET with `piles=1`:
+    the server resolves each visible retired pile's edge rows in the same
+    snapshot (no per-parent child pages), conditional while the catalog holds.
+    A compatibility answer falls back to the legacy conditional full read for
+    30 s (inferred) or 600 s.
     """
     def __init__(self, slug, include=()):
         self.base = f"/api/orgs/{slug}/foreground-tree"
@@ -283,7 +268,9 @@ class ForegroundTree:
         names = sorted(set(include))
         key, hit = tuple(names), self.key == tuple(names)
         for _ in range(2):
-            query = "&".join("include=" + quote(i, safe="") for i in names)
+            # hideRetired off: the saved fronts ({} here) ask for server-side piles
+            query = "&".join(["include=" + quote(i, safe="") for i in names]
+                             + ["piles=1", "fronts=" + quote("{}", safe="")])
             response = send("org_tree", self.base + ("?" + query if query else ""), self.etag if hit else None)
             if response.status_code == 304:
                 catalog = response.headers.get("x-orgtree-catalog-rev")
@@ -320,10 +307,6 @@ class ForegroundTree:
         full()
         return None
 
-    def page(self, send, parent, edge=None):
-        url = f"{self.base}/children?parent={quote(parent, safe='')}&limit=1" + ("&edge=last" if edge else "")
-        return foreground_answer(send("org_tree_page", url, None))
-
     def read(self, send, full, held):
         """getAppTree -> TreeViewReader.get. `full` is getCompleteTree: an uncached
         whole-history read. `held` is the conditional getTree used only while a
@@ -345,32 +328,14 @@ class ForegroundTree:
                     return None
                 if attempt == 0 and plan and plan[1] == answer["catalog_revision"]:
                     return answer
-                if attempt == 0 and plan:
+                if attempt == 0 and plan and set(plan[0]) != requested:
                     answer = self.get(send, requested, full)
                     if answer is None:
                         return None
-                catalog, resolved = answer["catalog_revision"], set()
-                while True:
-                    for parent in [p for p in visible_parents(answer) if p not in resolved]:
-                        resolved.add(parent)
-                        for edge in (None, "last"):
-                            page = self.page(send, parent, edge)
-                            if page["catalog_revision"] != catalog:
-                                raise ForegroundControl("reset")
-                            requested.update(page["matches"])
-                    if len(requested) > 128:
-                        return full_view()
-                    answer = self.get(send, requested, full)
-                    if answer is None:
-                        return None
-                    if answer["catalog_revision"] != catalog:
-                        raise ForegroundControl("reset")
-                    if all(p in resolved for p in visible_parents(answer)):
-                        break
-                self.plan = (sorted(requested), catalog)
+                self.plan = (sorted(requested), answer["catalog_revision"])
                 return answer
             except ForegroundControl as exc:
-                if exc.kind == "compatibility":         # from a page read: no hold is set there
+                if exc.kind == "compatibility":
                     return full_view()
         return full_view()                              # catalog churn across both attempts
 

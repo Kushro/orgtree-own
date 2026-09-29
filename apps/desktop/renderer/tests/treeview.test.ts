@@ -15,9 +15,13 @@ function fixture(count: number) {
     parent: null, axis: 'org', children: [], hidden_retired_children: 0,
     lineage_loaded: false, lineage_count: 0 } as FlatTreeNode)
   const reader = {
-    async get(_org: string, include: readonly string[] = []) {
-      calls.push(`get:${include.join(',')}`)
-      const chosen = ids.filter(id => include.includes(id))
+    async get(_org: string, include: readonly string[] = [], fronts?: Readonly<Record<string, string>>) {
+      calls.push(`get:${include.join(',')}${fronts ? `|piles:${JSON.stringify(fronts)}` : ''}`)
+      if (fail) throw new Error('503 unavailable')
+      // The server's pile resolution: the first retired root anchors the
+      // pile, and the last is its front unless the saved front is a retiree.
+      const edges = fronts ? [ids[0]!, ...(ids.includes(fronts[''] ?? '') ? [] : [ids[count - 1]!])] : []
+      const chosen = ids.filter(id => include.includes(id) || edges.includes(id))
       // First archived sibling precedes a live sibling; the default front is
       // later. The canvas needs both identities to preserve pile placement.
       const roots = [...chosen.filter(id => id === ids[0]), 'live', ...chosen.filter(id => id !== ids[0])]
@@ -58,7 +62,7 @@ test('collapsed view keeps first sibling position and last sibling front with fl
     assert.deepEqual(got.snapshot!.roots, ['retired-0', 'live', `retired-${count - 1}`])
     assert.equal(got.snapshot!.header.hidden_retired_roots, count - 2)
     sizes.push(Object.keys(got.snapshot!.nodes).length)
-    assert.equal(f.calls.filter(c => c.startsWith('page:')).length, 2)
+    assert.deepEqual(f.calls, ['get:|piles:{}'], 'one read; the server resolves every pile edge')
     assert.equal(f.legacy, 0)
     f.calls.length = 0
     await f.view.get('org', selection())
@@ -67,18 +71,27 @@ test('collapsed view keeps first sibling position and last sibling front with fl
   assert.deepEqual(sizes, [3, 3])
 })
 
+test('shown piles never fall back to the complete tree, however many piles there are (N1000 attempt 7b)', async () => {
+  const f = fixture(1000)
+  const got = await f.view.get('org', selection({ include: Array.from({ length: 100 }, (_, i) => `retired-${i + 1}`) }))
+  assert.ok(got.snapshot, 'answered by the selected tree')
+  assert.equal(f.legacy, 0)
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls.filter(c => c.startsWith('page:')).length, 0)
+})
+
 test('saved front is exact, missing saved front falls back, hide-retired excludes implicit edges', async () => {
   const f = fixture(20)
   const saved = await f.view.get('org', selection({ fronts: { '': 'retired-7' } }))
   assert.deepEqual(saved.snapshot!.roots, ['retired-0', 'live', 'retired-7'])
-  assert.ok(!f.calls.some(c => c.endsWith(':last')))
+  assert.deepEqual(f.calls, ['get:retired-7|piles:{"":"retired-7"}'], 'the saved front travels with the read')
   const missing = await f.view.get('org', selection({ fronts: { '': 'gone' } }))
   assert.ok(missing.snapshot!.roots.includes('retired-19'))
   assert.deepEqual(missing.snapshot!.missing_requested, ['gone'])
   f.calls.length = 0
   const hidden = await f.view.get('org', selection({ hideRetired: true, include: ['retired-4'], fronts: { '': 'retired-7' } }))
   assert.deepEqual(hidden.snapshot!.roots, ['live', 'retired-4'])
-  assert.equal(f.calls.filter(c => c.startsWith('page:')).length, 0)
+  assert.deepEqual(f.calls, ['get:retired-4'], 'hidden retirees ask for no piles')
 })
 
 test('explicit pile browser loads coherent identities then closing releases them', async () => {
@@ -93,10 +106,10 @@ test('explicit pile browser loads coherent identities then closing releases them
   assert.equal(larger.legacy, 1, 'explicit surface beyond128 keeps every identity via whole legacy read')
 })
 
-test('catalog churn retries coherently then uses whole compatibility answer; ordinary errors propagate', async () => {
+test('catalog churn during a browse retries coherently then uses whole compatibility answer; ordinary errors propagate', async () => {
   const f = fixture(20)
   f.reset()
-  assert.equal((await f.view.get('org', selection())).snapshot, null)
+  assert.equal((await f.view.get('org', selection({ browse: { kind: 'children', parent: '' } }))).snapshot, null)
   assert.equal(f.legacy, 1)
   assert.equal(f.calls.filter(c => c.startsWith('page:')).length, 2)
   const bad = fixture(20)
@@ -105,15 +118,18 @@ test('catalog churn retries coherently then uses whole compatibility answer; ord
   assert.equal(bad.legacy, 0)
 })
 
-test('changed catalog invalidates old implicit fronts before recomputing visible branches', async () => {
+test('changed catalog re-resolves piles on the server and keeps no old implicit fronts', async () => {
   const f = fixture(20)
-  await f.view.get('org', selection())
+  await f.view.get('org', selection({ include: ['retired-5'] }))
+  const plan = await f.view.get('org', selection({ include: ['retired-0'] }))   // covered: keeps the plan
+  assert.ok(plan.snapshot!.nodes['retired-5'])
   f.calls.length = 0
   f.setCatalog('c2')
-  await f.view.get('org', selection())
-  assert.ok(f.calls[0]!.startsWith('get:retired-0,retired-19'))
-  assert.equal(f.calls[1], 'get:', 'old fronts are not a source of retained historical branches')
-  assert.equal(f.calls.filter(c => c.startsWith('page:')).length, 2)
+  const fresh = await f.view.get('org', selection({ include: ['retired-0'] }))
+  assert.deepEqual(f.calls, ['get:retired-5|piles:{}', 'get:retired-0|piles:{}'],
+    'the old plan is re-read only to see the catalog moved, then only explicit targets are asked for')
+  assert.equal(fresh.snapshot!.nodes['retired-5'], undefined, 'an old plan is not a source of retained rows')
+  assert.equal(f.calls.filter(c => c.startsWith('page:')).length, 0)
 })
 
 test('a focus on an id the current plan already carries keeps the plan: one read, no edge re-plan (review f5)', async () => {
@@ -123,9 +139,10 @@ test('a focus on an id the current plan already carries keeps the plan: one read
   const flat = (id: string) => ({ id, state: id === 'live' ? 'live' : 'archived', parent: null, axis: 'org',
     children: [], hidden_retired_children: 0, lineage_loaded: false, lineage_count: 0 })
   const reader = {
-    async get(_org: string, include: readonly string[] = []) {
+    async get(_org: string, include: readonly string[] = [], fronts?: Readonly<Record<string, string>>) {
       calls.push(`get:${[...include].sort().join(',')}`)
-      const chosen = ids.filter(id => include.includes(id))
+      const edges = fronts ? [ids[0]!, ids[count - 1]!] : []
+      const chosen = ids.filter(id => include.includes(id) || edges.includes(id))
       const roots = [...chosen.filter(id => id === ids[0]), 'live', ...chosen.filter(id => id !== ids[0])]
       const snapshot = { format: FOREGROUND_TREE_FORMAT, kind: 'snapshot', revision: 'c1', catalog_revision: 'c1',
         org_rev: 1, sync_rev: 1, nodes: Object.fromEntries(roots.map(id => [id, flat(id)])), roots,
@@ -151,5 +168,5 @@ test('a focus on an id the current plan already carries keeps the plan: one read
   }
   calls.length = 0
   await view.get('org', sel(['retired-7']))   // a genuinely omitted retiree still re-plans
-  assert.ok(calls.some(c => c.includes('retired-7')) && calls.length > 1, 'an uncovered id is still requested')
+  assert.ok(calls.some(c => c.includes('retired-7')), 'an uncovered id is still requested')
 })

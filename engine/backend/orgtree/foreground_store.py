@@ -310,21 +310,104 @@ def read_snapshot(slug: str, read: Callable[[Any, dict], Any]) -> Any:
         return read(raw, stamp)
 
 
-def select_foreground(raw: Any, stamp: dict, include=()) -> dict:
-    """Select the foreground using an already-open snapshot, e.g. on cache miss."""
+def _fronts(value) -> tuple[tuple[str, str], ...]:
+    """Saved pile fronts, parent ('' for roots) -> retired child id, as a
+    canonical sorted tuple (it is part of cache keys)."""
+    if not isinstance(value, dict) or len(value) > MAX_INCLUDE or any(
+            not isinstance(p, str) or not isinstance(v, str) or not v for p, v in value.items()):
+        raise ValueError(f'fronts must map at most {MAX_INCLUDE} parents to nonempty IDs')
+    return tuple(sorted(value.items()))
+
+
+def _visible_parents(rows: dict, hidden: dict, fronts: dict) -> list[str]:
+    """Parents whose retired pile shows: the renderer's walk (treeview.ts
+    visibleParents) over live rows and each pile's front, on index rows."""
+    from .foreground_view import topology
+    roots, children = topology({'rows': rows})
+    result = []
+    stack = [(roots, '', hidden.get('', 0))]
+    while stack:
+        ids, parent, omitted = stack.pop()
+        retired = [nid for nid in ids if rows[nid]['meta']['state'] == 'archived']
+        if omitted + len(retired) > 0:
+            result.append(parent)
+        saved = fronts.get(parent)
+        front = saved if saved in retired else (retired[-1] if retired else None)
+        stack.extend((children[nid], nid, hidden.get(nid, 0)) for nid in ids
+                     if rows[nid]['meta']['state'] != 'archived' or nid == front)
+    return result
+
+
+def _pile_edges(raw: Any, ids: list[str], fronts: dict) -> list[str]:
+    """Every visible retired pile's FIRST child (its position among live
+    siblings) and, unless the saved front still is one of its retired org
+    children, its LAST (the default front), repeated until no new pile shows.
+    The same rows the renderer used to fetch with two child pages per pile."""
+    rows: dict = {}
+    counts: dict = {}
+    extra: list[str] = []
+    resolved: set = set()
+    new = _ancestors(raw, ids)
+    while True:
+        for nid, ordinal, meta in raw.execute(
+                'SELECT id,ord,meta FROM node_index WHERE id=ANY(%s)', (new,)).fetchall():
+            rows[nid] = {'meta': meta, 'ordinal': ordinal}
+        wanted = [p for p in ['', *new] if p not in counts]
+        counts.update({p: 0 for p in wanted})
+        counts.update(dict(raw.execute(
+            'SELECT parent,retired_children FROM foreground_parents WHERE parent=ANY(%s)',
+            (wanted,)).fetchall()))
+        hidden = dict(counts)
+        for row in rows.values():
+            meta = row['meta']
+            if meta['state'] == 'archived' and not meta['successor']:
+                hidden[meta['parent']] = hidden.get(meta['parent'], 0) - 1
+        parents = [p for p in _visible_parents(rows, hidden, fronts) if p not in resolved]
+        if not parents:
+            return extra
+        resolved.update(parents)
+        last = []
+        for parent in parents:
+            saved = rows.get(fronts.get(parent, ''))
+            last.append(saved is None or saved['meta']['state'] != 'archived'
+                        or bool(saved['meta']['successor']) or saved['meta']['parent'] != parent)
+        # One statement for every new pile; each scalar subquery walks the
+        # node_index_children index from one end (the child page's own order).
+        pile = ("SELECT id FROM node_index WHERE meta->>'parent'=p.parent "
+                "AND meta->>'state'='archived' AND meta->>'successor'='' ORDER BY ")
+        order = "(meta->>'order')::numeric{0},meta->>'created'{0},ord{0},id{0} LIMIT 1"
+        found = raw.execute(
+            'SELECT (' + pile + order.format('') + '), CASE WHEN p.last THEN (' + pile +
+            order.format(' DESC') + ') END FROM unnest(%s::text[],%s::boolean[]) p(parent,last)',
+            (parents, last)).fetchall()
+        new = [nid for pair in found for nid in pair if nid is not None and nid not in rows]
+        new = list(dict.fromkeys(new))
+        extra.extend(new)
+
+
+def select_foreground(raw: Any, stamp: dict, include=(), *, piles=None) -> dict:
+    """Select the foreground using an already-open snapshot, e.g. on cache miss.
+
+    ``piles`` (saved fronts, parent -> id) also selects every visible retired
+    pile's edge rows in this same snapshot. They depend only on node
+    parent/state/successor/order/created/ord, every change to which bumps
+    ``catalog_revision``. They are bounded by the live tree, not MAX_INCLUDE."""
     wanted = _wanted(include)
     ids = [row[0] for row in raw.execute(
         "SELECT id FROM node_index WHERE meta->>'state'<>'archived' ORDER BY ord,id").fetchall()]
     ids.extend(wanted)
+    if piles is not None:
+        ids.extend(_pile_edges(raw, ids, dict(_fronts(dict(piles)))))
     return _graph(raw, stamp, ids, wanted)
 
 
-def read_foreground(slug: str, include=(), *, project: Projector | None = None) -> Any:
+def read_foreground(slug: str, include=(), *, project: Projector | None = None,
+                    piles=None) -> Any:
     wanted = _wanted(include)
     with _snapshot(slug) as (raw, stamp):
         # This predicate has its own partial index. It must never be replaced
         # by a full-row scan followed by a Python filter.
-        return _project(raw, select_foreground(raw, stamp, wanted), project)
+        return _project(raw, select_foreground(raw, stamp, wanted, piles=piles), project)
 
 
 def _remembered(memo: Memo | None, stamp: dict) -> Any:

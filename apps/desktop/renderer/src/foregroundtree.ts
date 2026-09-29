@@ -177,9 +177,14 @@ export class ForegroundTreeReader {
 
   invalidate(): void { ++this.generation; this.cache.clear(); this.pending.clear(); this.owners.clear() }
 
-  get(org: string, include: readonly string[] = []): Promise<ForegroundRead> {
+  /** `fronts` (saved pile fronts, parent -> retired id; '' = roots) asks the
+   * server to also select every visible retired pile's first and default-front
+   * rows, resolved in the same committed snapshot. */
+  get(org: string, include: readonly string[] = [],
+      fronts?: Readonly<Record<string, string>>): Promise<ForegroundRead> {
     const names = [...new Set(include)].sort()
-    const key = JSON.stringify([org, names])
+    const piles = fronts && Object.fromEntries(Object.entries(fronts).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+    const key = JSON.stringify([org, names, piles ?? null])
     const waiting = this.pending.get(key)
     if (waiting) return waiting
     const generation = this.generation
@@ -188,9 +193,10 @@ export class ForegroundTreeReader {
     let task!: Promise<ForegroundRead>
     task = (async () => {
       // Preserve explicit surfaces beyond the server's selection limit.
-      if (names.length <= 128) for (let attempt = 0; attempt < 2; ++attempt) {
+      if (names.length <= 128 && Object.keys(piles ?? {}).length <= 128) for (let attempt = 0; attempt < 2; ++attempt) {
         try {
-          const query = names.map(id => `include=${encodeURIComponent(id)}`).join('&')
+          const query = [...names.map(id => `include=${encodeURIComponent(id)}`),
+            ...piles ? ['piles=1', `fronts=${encodeURIComponent(JSON.stringify(piles))}`] : []].join('&')
           const response = await this.read(`/api/orgs/${encodeURIComponent(org)}/foreground-tree`
             + (query ? '?' + query : ''), hit?.etag)
           if (response.status === 304) {
