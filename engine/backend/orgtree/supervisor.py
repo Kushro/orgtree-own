@@ -3420,6 +3420,42 @@ def capture_reply_stream(slug: str, nid: str, payload: dict[str, Any]) -> dict[s
     return {**payload, 'event_id':eid, 'reply_quote':text}
 
 
+def wire_reply_frame(payload: dict[str, Any]) -> dict[str, Any]:
+    """The websocket form of a captured frame: a prose delta carries only
+    what the client lacks.
+
+    `capture_reply_stream` returns the whole message so far in
+    `assistant_row`, so sending it as-is made every delta frame as long as
+    the reply up to that point -- bytes per reply grew with the square of its
+    length (234 KB mean frames and a 448 MB send queue at N1000, attempt 10).
+    Here an appending delta on a partial row is cut to the new fragment plus
+    the revision it extends (`assistant_base_revision`); the renderer appends
+    it to that revision and refetches the chat on a gap. Every other frame --
+    the first of a message, a reset, a completion, a late frame on a complete
+    row -- keeps the full row, which is also what a fetch returns.
+
+    `reply_quote` is the first 4000 characters of the text, so once the text
+    before this delta is that long the quote cannot change and is not sent;
+    the top-level copy duplicates the row's and is dropped."""
+    row = payload.get('assistant_row')
+    if (payload.get('kind') != 'delta' or not isinstance(row, dict)
+            or row.get('assistant_state') != 'partial'):
+        return payload
+    delta = str(payload.get('text') or '')
+    full = str(row.get('text') or '')
+    revision = row.get('assistant_revision')
+    if (not delta or not isinstance(revision, int) or revision < 2
+            or len(full) <= len(delta) or not full.endswith(delta)):
+        return payload        # a reset or first frame: the row is this delta
+    slim = {**row, 'text': delta, 'assistant_delta': True,
+            'assistant_base_revision': revision - 1}
+    if len(full) - len(delta) >= 4000:
+        slim.pop('reply_quote', None)
+    out = {key: value for key, value in payload.items() if key != 'reply_quote'}
+    out['assistant_row'] = slim
+    return out
+
+
 def _limit_cache_result_state(
         st: dict[str, Any], usage: dict[str, Any], limited: bool,
 ) -> tuple[str | None, dict[str, Any] | None]:

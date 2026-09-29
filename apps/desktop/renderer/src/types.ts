@@ -1024,6 +1024,10 @@ export interface ChatMessage {
   assistant_state?: 'partial' | 'complete'
   assistant_pending?: boolean
   assistant_materialized?: boolean
+  /** stream frames only (supervisor.wire_reply_frame): `text` is just what
+   *  was added since `assistant_base_revision` */
+  assistant_delta?: boolean
+  assistant_base_revision?: number
   row_id?: string
   /** THE SHARED DURABLE IDENTITY (user ruling 2026-09-11). The CLI/journal
    *  record uuid this row was projected from (supervisor read_chat:

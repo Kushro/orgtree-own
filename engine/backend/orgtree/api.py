@@ -1489,7 +1489,8 @@ async def _wire_notify() -> None:  # type: ignore[unused-function]  # registered
     mail_notify = _mail
 
     def stream(slug: str, node: str, payload: dict[str, Any]) -> None:
-        payload = supervisor.capture_reply_stream(slug, node, payload)
+        payload = supervisor.wire_reply_frame(
+            supervisor.capture_reply_stream(slug, node, payload))
         if payload.get("kind") in ("cache_forecast", "mcp_tool_count",
                                    "mcp_readiness"):
             # these frames patch the rendered tree in place on every client;

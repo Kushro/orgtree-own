@@ -24,7 +24,7 @@ import { BASE, getChat } from './api'
 import { decodeEventRow, record } from './events/decode'
 import { segmentClientOps, segmentMailIds } from './events/wire'
 import type { ChatMessage, ChatPayload } from './types'
-import { assistantIds, isAssistantSnapshot, mergeAssistantRows, uniqueFileCards } from './assistantMessages'
+import { applyAssistantDelta, assistantIds, isAssistantDelta, isAssistantSnapshot, mergeAssistantRows, uniqueFileCards } from './assistantMessages'
 import type { LiveRow, PulseEvent, StreamEvent } from './canvas/shared'
 import { useCallback, useSyncExternalStore } from 'react'
 
@@ -205,6 +205,9 @@ const BLANK: Convo = {
 
 interface Entry {
   assistantRows: Map<string, ChatMessage>
+  /** delta frames whose base revision has not arrived yet, per assistant id
+   *  (bounded); chained as soon as a frame or a fetch supplies the base */
+  assistantGaps: Map<string, ChatMessage[]>
   assistantNative: Set<string>
   committedRows: Map<string, ChatMessage>
   pageInFlight?: boolean
@@ -453,7 +456,7 @@ export function dropConvo(slug: string, nid: string): void {
 function entry(k: string): Entry {
   let e = M.get(k)
   if (!e) {
-    e = { assistantRows: new Map(), assistantNative: new Set(), committedRows: new Map(), ownerKey: k, ownerVersion: 0, s: BLANK, subs: new Set(), thinkT0: 0, clock: null, nudge: null,
+    e = { assistantRows: new Map(), assistantGaps: new Map(), assistantNative: new Set(), committedRows: new Map(), ownerKey: k, ownerVersion: 0, s: BLANK, subs: new Set(), thinkT0: 0, clock: null, nudge: null,
           textSeen: 0, epochBoot: null,
           live: null, liveRaf: null, liveTimer: null,
           staleDraft: false, staleThink: false, staleAt: 0, streamAt: 0,
@@ -844,12 +847,19 @@ export function refreshConvo(slug: string, nid: string,
     e.installed = requestSerial
     e.fetchedAt = Date.now()
     if (changedConversation) e.committedRows.clear()
-    if (changedAssistantScope) { e.assistantRows.clear(); e.assistantNative.clear() }
+    if (changedAssistantScope) { e.assistantRows.clear(); e.assistantGaps.clear(); e.assistantNative.clear() }
     if (!changedConversation && e.s.paged && e.s.chat && c.messages.length) {
       const first = c.messages[0]!.seq
       const older = e.s.chat.messages.filter(row => typeof row.seq === 'number' && typeof first === 'number' && row.seq < first)
       c = { ...c, messages: [...older, ...c.messages],
         before: e.s.chat.before, has_older: e.s.chat.has_older }
+    }
+    // deltas held for a missing base: the fetched pending row may be it
+    for (const id of [...e.assistantGaps.keys()]) {
+      const fetched = c.messages.find(row => assistantIds(row).includes(id))
+      if (!fetched) continue
+      const latest = drainAssistantGaps(e, id, fetched)
+      if (latest !== fetched) e.assistantRows.set(id, latest)
     }
     c = mergeCommitted(e, c, true)
     // A pending ghost graduates once the SERVER'S OWN copy is visible — by
@@ -1263,6 +1273,42 @@ export function markBusy(slug: string, nid: string): void {
 }
 
 // ------------------------------------------------------------------ ingest
+/** The newest row this client holds for an assistant id: the streamed one or
+ *  the fetched one, whichever has the later revision. */
+function knownAssistantRow(e: Entry, id: string): ChatMessage | undefined {
+  const streamed = e.assistantRows.get(id)
+  const fetched = e.s.chat?.messages.find(row => assistantIds(row).includes(id))
+  if (!streamed || !fetched) return streamed ?? fetched
+  if (!fetched.assistant_pending) return fetched
+  return (fetched.assistant_revision ?? 0) > (streamed.assistant_revision ?? 0) ? fetched : streamed
+}
+
+const GAP_HOLD = 64
+
+function holdAssistantGap(e: Entry, delta: ChatMessage): void {
+  const id = delta.assistant_id!
+  const held = [...(e.assistantGaps.get(id) ?? []), delta]
+  e.assistantGaps.set(id, held.slice(-GAP_HOLD))
+}
+
+/** Chain every held delta that now has its base; drop the ones it passed. */
+function drainAssistantGaps(e: Entry, id: string, row: ChatMessage): ChatMessage {
+  const held = e.assistantGaps.get(id)
+  if (!held) return row
+  let latest = row
+  for (;;) {
+    const next = held.find(d => d.assistant_base_revision === latest.assistant_revision)
+    const out = next && applyAssistantDelta(latest, next)
+    if (!out || typeof out === 'string') break
+    latest = out
+  }
+  const rest = held.filter(d => (d.assistant_base_revision ?? 0) >= (latest.assistant_revision ?? 0))
+  if (rest.length && latest.assistant_pending && latest.assistant_state !== 'complete') {
+    e.assistantGaps.set(id, rest)
+  } else e.assistantGaps.delete(id)
+  return latest
+}
+
 /** Called ONCE per websocket frame, at the app level — not per mounted view.
  *
  *  Since P2 this does NOT assemble a conversation. Anything a view must still
@@ -1281,7 +1327,7 @@ export function ingestStream(slug: string, ev: StreamEvent): void {
   // tokens were buffered at all; only the number of notifications changed.
   if (ev.kind !== 'delta' && ev.kind !== 'thinking') flushLive(e)
   if (isAssistantSnapshot(ev.assistant_row)) {
-    const row = ev.assistant_row
+    let row = ev.assistant_row
     if (e.s.chat?.assistant_scope && e.s.chat.assistant_scope !== row.assistant_scope) {
       nudge(slug, ev.node)
       return
@@ -1296,6 +1342,19 @@ export function ingestStream(slug: string, ev: StreamEvent): void {
       return
     }
     if (assistantIds(row).some(id => e.assistantNative.has(id))) return
+    if (isAssistantDelta(row)) {
+      // only the text added since assistant_base_revision rides the frame
+      // (supervisor.wire_reply_frame); a missing base costs one refetch
+      const out = applyAssistantDelta(knownAssistantRow(e, row.assistant_id!), row)
+      if (out === 'stale') return
+      if (out === 'gap') {
+        holdAssistantGap(e, row)
+        nudge(slug, ev.node)
+        return
+      }
+      row = out
+    }
+    row = drainAssistantGaps(e, row.assistant_id!, row)
     const current = e.s.chat ?? { busy: true, queued: 0, responding: true,
       last_error: null, occupancy: null, messages: [], mail_pending: 0, pending_mail: [] }
     const prior = e.assistantRows.get(row.assistant_id!)
@@ -1520,6 +1579,7 @@ export function resetConvos(): void {
     e.pendingKeep = undefined
     e.dirty = false
     e.assistantRows.clear()
+    e.assistantGaps.clear()
     e.assistantNative.clear()
     e.committedRows.clear()
     e.s = BLANK
