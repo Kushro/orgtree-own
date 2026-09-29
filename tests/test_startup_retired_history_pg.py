@@ -290,5 +290,117 @@ class StartupReadsLiveRows(unittest.TestCase):
         self.assertGreaterEqual(self.delta(before)['listing_loads'], 2)
 
 
+@unittest.skipUnless(f.ADMIN, 'disposable PostgreSQL required: NOT RUN')
+class RetiredRowsStillReached(StartupReadsLiveRows):
+    """pg-supervisor-a's review of 33c6879: the walks that must still reach a
+    RETIRED row (or a row changed in this transaction), each pinned."""
+
+    # run only these, not the inherited tests again
+    locals().update({n: None for n in dir(StartupReadsLiveRows) if n.startswith('test_')})
+
+    class Abort(Exception):
+        pass
+
+    def test_halt_recovery_reaches_a_retired_row_holding_a_halt(self):   # S11
+        from orgtree import halt
+        self.edit(lambda org: org.nodes['r13'].__setitem__('halt', {'phase': 'halting'}))
+        self.addCleanup(supervisor._state.pop, (self.slug, 'r13'), None)
+        with self.assertRaises(self.Abort):
+            with orgtx.org_tx(self.slug, whole=True) as tx:
+                with patch.object(halt, '_settled', return_value=False):
+                    halt.recover(tx.org)
+                raise self.Abort()
+        self.assertTrue(supervisor.state(self.slug, 'r13').get('halt_requested'))
+
+    def test_reconcile_resumes_a_retired_halt_queue_and_kills_a_retired_pid(self):  # S12, S19
+        def mark(org):
+            org.nodes['r14']['halt_queue'] = [{'kind': 'x'}]
+            org.nodes['r4']['remote_controlled'] = {'pid': 4242}
+        self.edit(mark)
+        resumed, killed = [], []
+        with patch.object(supervisor.halt, 'resume_pending',
+                          side_effect=lambda slug, nid: resumed.append(nid)), \
+                patch.object(supervisor, '_reconcile_kill', side_effect=killed.append), \
+                patch.object(supervisor, '_transcript_evidence', return_value={}), \
+                patch.object(supervisor, 'send_message'):
+            supervisor.reconcile(self.slug, active_only=True)
+        self.assertIn('r14', resumed)
+        self.assertIn(4242, killed)
+        self.assertNotIn('remote_controlled', self.whole().nodes['r4'])
+
+    def test_the_settle_reaches_a_retired_delivery_journal_owner(self):  # S10
+        self.edit(lambda org: org.d.setdefault('delivering', {}).__setitem__(
+            'r15', [{'tok': 't-r15', 'mail_ids': ['m1']}]))
+        settled = []
+        self.addCleanup(supervisor._state.pop, (self.slug, 'r15'), None)
+        with patch.object(supervisor, '_reconcile_mail_journal', return_value=1), \
+                patch.object(supervisor.mailruntime, 'resolve_reclaims',
+                             side_effect=lambda org, st, nid=None: settled.append(nid) or {}), \
+                patch.object(supervisor.mailruntime, 'settle_confirmation',
+                             return_value=frozenset()), \
+                patch.object(supervisor, '_transcript_evidence', return_value={}), \
+                patch.object(supervisor, 'send_message'):
+            supervisor.reconcile(self.slug, active_only=True)
+        self.assertIn('r15', settled)
+        self.assertTrue(set(LIVE) <= set(settled))
+        self.assertFalse((set(RETIRED) - {'r15'}) & set(settled))
+
+    def test_restart_wake_drops_an_armed_wake_of_a_retired_seat(self):   # S18
+        from orgtree import restart_wake
+        key = f'{self.slug}:r16'
+        d = restart_wake._wakes_read()
+        d.setdefault('wakes', {})[key] = {'org': self.slug, 'node': 'r16', 'mode': 'one_shot'}
+        restart_wake._wakes_write(d)
+        restart_wake._reset_startup_done_for_tests()
+        self.addCleanup(restart_wake._reset_startup_done_for_tests)
+        sent = []
+        with patch.object(supervisor, 'send_message',
+                          side_effect=lambda slug, nid, *a, **k: sent.append((slug, nid))):
+            out = restart_wake.on_backend_startup()
+        self.assertIn(key, [f"{w['org']}:{w['node']}" for w in out['dropped']])
+        self.assertNotIn((self.slug, 'r16'), sent)
+        self.assertNotIn(key, restart_wake._wakes_read().get('wakes') or {})
+
+    def test_cutover_still_skips_a_sandboxed_keyless_org(self):   # S17
+        self.edit(lambda org: org.d.__setitem__('sandbox', {'image': 'x'}))
+        row = registry.create_account(
+            'claude', f'org key ({self.slug})',
+            {'kind': 'token', 'token_ref': f'org-api-key:{self.slug}'},
+            origin_org=self.slug)
+        with patch.object(registry_migration, 'apikey_cutover_done', return_value=False):
+            report = registry_migration.run_apikey_cutover()
+        self.assertIn(self.slug, report['skipped_sandboxed'])
+        self.assertNotIn(row['id'], report['orphaned_rows'])
+        self.assertNotEqual(registry.get_account(row['id']).get('auth'), 'unauthenticated')
+
+    def test_a_row_changed_here_so_it_no_longer_qualifies_is_excluded(self):   # S3
+        self.edit(lambda org: org.nodes['w1'].__setitem__('halt', {'phase': 'halting'}))
+        with self.assertRaises(self.Abort):
+            with orgtx.org_tx(self.slug, whole=True) as tx:
+                nodes = tx.org.nodes
+                nodes['w1'].pop('halt')                  # decoded, no longer carries it
+                nodes['w2']['state'] = 'archived'        # decoded, no longer live
+                self.assertNotIn('w1', store.node_ids_with(tx.org, 'halt'))
+                self.assertNotIn('w2', store.live_node_ids(tx.org))
+                raise self.Abort()
+
+    def test_field_values_and_owners_follow_this_transaction(self):   # S5, S6, S7
+        def setup(org):
+            org.nodes['w0']['account'] = 'acct-old'
+            org.d.setdefault('steer_attempts', {})['r2'] = {'d1': {'state': 'x'}}
+        self.edit(setup)
+        with self.assertRaises(self.Abort):
+            with orgtx.org_tx(self.slug, whole=True) as tx:
+                tx.org.nodes['w1']['account'] = 'acct-new'     # decoded binding changed
+                self.assertIn('acct-new', store.node_field_values(tx.org, 'account'))
+                sec = tx.org.d.get('steer_attempts')
+                sec['w3x'] = {'d9': {'state': 'y'}}             # owner added here
+                del sec['r2']                                   # owner dropped here
+                owners = store.section_owners(sec)
+                self.assertIn('w3x', owners)
+                self.assertNotIn('r2', owners)
+                raise self.Abort()
+
+
 if __name__ == '__main__':
     unittest.main()
