@@ -378,6 +378,20 @@ class InFlight(unittest.TestCase):
         pgfeed.abort_local("a", 7)                        # answered once: acts once
         self.assertEqual(self.unknown, ["a"])
 
+    def test_a_tree_never_trusts_a_range_the_feed_passed_undecided(self) -> None:
+        """The feed has APPLIED the revision (its callback returned), so only
+        the undecided set stands between a tree read and a snapshot that may
+        miss a foreign commit of that number."""
+        feed = pgfeed.RevisionFeed(lambda: None, self.cb)
+        feed.observe("a", 6, source="catchup")           # baseline
+        pgfeed.begin_local("a", 7)
+        feed.observe("a", 7, source="notify")             # waits, then undecided
+        self.assertEqual(feed.applied_since("a", 6), 7)
+        self.assertFalse(pgfeed.snapshot_changes_published(feed, "a", 6, 7))
+        pgfeed.confirm_local("a", 7)
+        self.assertTrue(pgfeed.snapshot_changes_published(feed, "a", 6, 7))
+        self.assertEqual(self.unknown, [])
+
     def test_control_an_abort_of_a_never_notified_revision_acts_not(self) -> None:
         pgfeed.begin_local("a", 7)
         pgfeed.abort_local("a", 7)
