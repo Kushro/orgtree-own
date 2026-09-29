@@ -318,14 +318,23 @@ class RetiredRowsStillReached(StartupReadsLiveRows):
             org.nodes['r4']['remote_controlled'] = {'pid': 4242}
         self.edit(mark)
         resumed, killed = [], []
+
+        def kill(pid):
+            # FR-01: the kill must PRECEDE the pop of the flag. A pid missed
+            # before the transaction is still killed after the commit
+            # (`_kill_late`), so record whether the stored row still held the
+            # flag at the moment of the kill.
+            with self.raw() as raw:
+                val = raw.execute("SELECT val FROM nodes WHERE id='r4'").fetchone()[0]
+            killed.append((pid, 'remote_controlled' in json.loads(val)))
         with patch.object(supervisor.halt, 'resume_pending',
                           side_effect=lambda slug, nid: resumed.append(nid)), \
-                patch.object(supervisor, '_reconcile_kill', side_effect=killed.append), \
+                patch.object(supervisor, '_reconcile_kill', side_effect=kill), \
                 patch.object(supervisor, '_transcript_evidence', return_value={}), \
                 patch.object(supervisor, 'send_message'):
             supervisor.reconcile(self.slug, active_only=True)
         self.assertIn('r14', resumed)
-        self.assertIn(4242, killed)
+        self.assertIn((4242, True), killed, 'the retired pid was not killed before the pop')
         self.assertNotIn('remote_controlled', self.whole().nodes['r4'])
 
     def test_the_settle_reaches_a_retired_delivery_journal_owner(self):  # S10
