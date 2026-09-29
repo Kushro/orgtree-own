@@ -211,6 +211,21 @@ class ResourceReservationTests(unittest.TestCase):
         # every held claim, the newest history, and storage order kept
         self.assertEqual(got, released[88:] + held)
 
+    def test_list_keeps_every_held_row_even_the_oldest(self):
+        # the held claims are the OLDEST rows here, so dropping by age alone
+        # would drop them first; D2 says every held row survives
+        held = self.hold(200)
+        released = []
+        for i in range(400):
+            rid = self.acquire(resource=f"new{i}", integration_key=None)
+            self.call("owner", action="release",
+                      reservation=rid["reservation"]["id"])
+            released.append(rid["reservation"]["id"])
+        rows = self.call("owner", action="list")
+        self.assertEqual((rows["count"], rows["omitted"]), (self.CAP, 88))
+        got = [r["id"] for r in rows["reservations"]]
+        self.assertEqual(got, held + released[88:])
+
     def test_landing_answers_stop_at_512_newest_landings(self):
         landed = []
         for i in range(self.CAP + 5):
