@@ -1,4 +1,3 @@
-import { ImportSettings } from './importsettings'
 import { AccountRegistrySection, AddAccountDialog, useAccountRegistry } from './accountsregistry'
 import type { AccountProvider } from './accountsregistry'
 import { ThemeSetting } from '../themes'
@@ -213,7 +212,7 @@ export function UsageBars({ u }: { u: AccountUsage }) {
 }
 
 type AppSettingsTab = 'about' | 'providers' | 'runtime' | 'mailhub'
-  | 'display' | 'import' | 'defaults' | 'developer'
+  | 'display' | 'defaults' | 'developer'
 const APP_TABS: SettingsTab<AppSettingsTab>[] = [
   // About is FIRST and is where the panel opens: what is actually running.
   // The v3 shell removes the sidebar that used to carry the version badge and
@@ -228,7 +227,6 @@ const APP_TABS: SettingsTab<AppSettingsTab>[] = [
   // organization's Connections tab, which is where they did not belong
   { id: 'mailhub', label: 'Mail hub' },
   { id: 'display', label: 'Display' },
-  { id: 'import', label: 'Import' },
   // Default org settings USED TO BE ITS OWN WINDOW, opened from the sidebar
   // that v3 removes. It is app-wide — every new organization is born with
   // these values — so it belongs here rather than in one organization's
@@ -712,7 +710,6 @@ export function AccountsPanel({ toast, close, initialTab }: {
       <SetGroup title="Desk"><DeskTextSize /><CrowdStackToggle /><HideRetiredToggle /><AgentShortcutsToggle /><ModalOverlapSettings /><CanvasAnchorSettings /></SetGroup>
       <SetGroup title="Startup"><StartupWindowsSetting /><StartupView /></SetGroup>
     </SettingsTabPanel>
-    <SettingsTabPanel id="import" idBase="app-settings" active={tab === 'import'}><ImportSettings active={tab === 'import'} /></SettingsTabPanel>
     <SettingsTabPanel id="defaults" idBase="app-settings" active={tab === 'defaults'}>
       <div className="dim modalpin-subtitle">applied to every NEW organization</div>
       <DefaultsForm toast={toast} onDone={close} />

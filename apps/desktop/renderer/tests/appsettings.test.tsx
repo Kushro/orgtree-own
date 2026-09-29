@@ -81,11 +81,6 @@ function stubFetch(seen: Seen[], initial = ON): void {
         blockedDocketRemindersEnabled = runtime.blocked_docket_reminders_enabled
     }
     const payload = path === '/api/accounts' ? ACCOUNTS
-      // The Import tab mounts ImportSettings, which polls for a running
-      // import. Unmodelled, the stub rejected it and the panel entered its
-      // "progress unavailable" state — an unrelated failure for a tab test.
-      // `{ job: null }` is the server's own answer when nothing is running.
-      : path === '/api/desktop/import-v1/jobs/current' ? { job: null }
       : path === '/api/providers' ? initial
         : path === '/api/app-settings/runtime' && method === 'GET'
           ? { warming_enabled: warmingEnabled,
@@ -151,7 +146,7 @@ test('§1 stable accessible tabs navigate by key without swapping identity',
       // absorbed the standalone window that sidebar opened. Developer (the
       // engine debug view, 2026-09-26) comes last.
       assert.deepEqual([...tabs].map((b) => b.textContent?.trim()),
-        ['About', 'Providers', 'Runtime', 'Mail hub', 'Display', 'Import',
+        ['About', 'Providers', 'Runtime', 'Mail hub', 'Display',
           'Default org settings', 'Developer'])
       assert.equal(tabs[4]!.querySelector('.app-settings-scope'), null,
         'Display has no device-label pill while retaining its tab identity')
@@ -170,8 +165,8 @@ test('§1 stable accessible tabs navigate by key without swapping identity',
           key: 'End', bubbles: true,
         }))
       })
-      assert.equal(tabs[7]!.getAttribute('aria-selected'), 'true')
-      assert.equal(document.activeElement, tabs[7])
+      assert.equal(tabs[6]!.getAttribute('aria-selected'), 'true')
+      assert.equal(document.activeElement, tabs[6])
       const last = view.el.querySelector('#app-settings-panel-developer')!
       assert.equal(last.hasAttribute('hidden'), false)
       // the engine debug view's toggle lives here, and is off by default

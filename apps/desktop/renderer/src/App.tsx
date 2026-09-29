@@ -801,7 +801,6 @@ export default function App() {
   // the mount fetch lives in useOrgStatus now — it refreshes on mount and on
   // every change of visibility, so a second one here would only double the
   // first request of the session
-  useEffect(() => { const imported = () => { void refreshOrgs() }; window.addEventListener('orgtree:organizations-imported', imported); return () => window.removeEventListener('orgtree:organizations-imported', imported) }, [refreshOrgs])
   // G1 — THE TREE HEARTBEAT. Everything on screen that is not the conversation
   // — every card, credit meter, occupancy bar, roster row, resume timer and
   // inbox badge — is rendered from this one payload, and until now it was
