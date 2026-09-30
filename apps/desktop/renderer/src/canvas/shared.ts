@@ -1532,6 +1532,15 @@ export function peerOrder(ids: string[], target: Map<string, Pt>, circular: bool
   return circular ? ids : [...ids].sort((p, q) => (target.get(p)?.x ?? 0) - (target.get(q)?.x ?? 0))
 }
 
+// Ring view: sibling order runs clockwise, so below the eye "before" points to
+// the screen right. Maps the side a coworker button points to on screen to the
+// order the hire pins (left = before, right = after); row layout is unchanged.
+export function ringInsertSide(side: 'left' | 'right', anchor: Pt | undefined, eye: Pt | undefined,
+  circular: boolean): 'left' | 'right' {
+  if (!circular || !anchor || !eye || anchor.y - eye.y < 1) return side
+  return side === 'left' ? 'right' : 'left'
+}
+
 export function layoutCircular(root: CanvasNode, hidden: Map<string, string> = new Map()): Map<string, Pt> {
   const vis = (n: CanvasNode) => !hidden.has(n.id)
   const leaves = new Map<string, number>()

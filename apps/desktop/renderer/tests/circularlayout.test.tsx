@@ -4,7 +4,7 @@ declare const __SRC_DIR__: string
 import { inAct, mountView } from './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chartLayoutOf, layout, NODE_H, NODE_W, peerOrder, setChartLayout, USER } from '../src/canvas/shared'
+import { chartLayoutOf, layout, NODE_H, NODE_W, peerOrder, ringInsertSide, setChartLayout, USER } from '../src/canvas/shared'
 import type { CanvasNode } from '../src/canvas/shared'
 import { ChartLayoutSetting } from '../src/canvas/accounts'
 
@@ -122,4 +122,31 @@ test('the animated sibling route uses the same neighbour order as the drawn line
   assert.match(body, /peerOrder\(/, 'the route orders siblings through peerOrder')
   assert.doesNotMatch(body, /\.sort\(/, 'and does not x-sort them itself')
   assert.match(body, /wireRef\.current\.peerSeg/, 'with the latest wire builders, since launchSpark is memoised once')
+})
+
+test('hire-coworker buttons insert on the side they point to, all the way round the ring', () => {
+  for (const n of [12, 7, 5]) {
+    const kids = Array.from({ length: n }, (_, i) => node('k' + i))
+    const t = layout(eye(kids), new Map(), 'circular')
+    const eyeAt = t.get(USER)
+    const ids = kids.map(k => k.id)
+    let checked = 0, bottom = 0, top = 0
+    for (let i = 0; i < n; i++) {
+      const me = centre(t.get(ids[i]!)!)
+      for (const side of ['left', 'right'] as const) {
+        const pin = ringInsertSide(side, t.get(ids[i]!), eyeAt, true)
+        // the new sibling lands between the anchor and its ring neighbour on the pinned order side (wraps at the seam)
+        const nb = centre(t.get(ids[(i + (pin === 'left' ? n - 1 : 1)) % n]!)!)
+        const other = centre(t.get(ids[(i + (pin === 'left' ? 1 : n - 1)) % n]!)!)
+        if (Math.abs(nb.x - me.x) < 1 || (nb.x - me.x) * (other.x - me.x) >= 0) continue
+        checked++
+        if (me.y > centre(eyeAt!).y) bottom++; else top++
+        assert.equal(nb.x < me.x, side === 'left', `${n} siblings, #${i}, ${side}: new sibling appears on the pressed side`)
+      }
+    }
+    assert.ok(checked >= n && bottom > 0 && top > 0, `${n}: covered top, bottom and seam (${checked}, ${top}, ${bottom})`)
+  }
+  assert.equal(ringInsertSide('left', { x: 0, y: 500 }, { x: 0, y: 0 }, true), 'right', 'below the eye the sides swap')
+  assert.equal(ringInsertSide('left', { x: 0, y: -500 }, { x: 0, y: 0 }, true), 'left', 'above the eye they do not')
+  assert.equal(ringInsertSide('left', { x: 0, y: 500 }, { x: 0, y: 0 }, false), 'left', 'row layout is unchanged')
 })

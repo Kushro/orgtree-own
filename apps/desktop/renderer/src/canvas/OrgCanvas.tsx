@@ -27,7 +27,7 @@ import {
 import {
   ago, ALL_TIER_SEAT, anyTierSeat, attentionPip, codexTierOffer, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DOG_H, DOG_W, DRAFT, ease, edgeJumpPlacement, type EJForm, EXTERN, familyOffer, flatten, fmtCredits, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, hireOf, INBOX, INBOX_H, legacyMark, optInLegacyHidden, useShowLegacyModels, jumpTo, layout, NODE_H, NODE_W, noteTierModels, openrouterTierIds, orgPxc, presenceOf, segD, setOpenRouterTiers,
   providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
-  peerOrder, treeParents, USER_W, withDraftTree, withPendingMoves, Z_DESK, Z_MAX, Z_MINI,
+  peerOrder, ringInsertSide, treeParents, USER_W, withDraftTree, withPendingMoves, Z_DESK, Z_MAX, Z_MINI,
 } from './shared'
 import type {
   CanvasNode, DraftScope, DraftState, FamilyOffer, MailEvent, MailLinkFn,
@@ -3084,8 +3084,10 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   // F-03: hire a COWORKER — same superior, placed to the chosen side of the
   // anchor. Top-level agents side-hire more top-levels (parent is the user).
   const spawnBeside = (n: CanvasNode, tier: string, side: 'left' | 'right') => {
+    const pin = ringInsertSide(side, targetRef.current.get(n.id), targetRef.current.get(USER),
+      chartLayout === 'circular')
     setDraft({ parent: !n.parent || n.parent === USER ? null : n.parent, tier,
-               beside: { anchor: n.id, side } })
+               beside: { anchor: n.id, side: pin } })
     setTimeout(() => centerOn(
       DRAFT, Math.min(2.05, Math.max(1.7, viewRef.current.z))), 60)
   }
@@ -4146,7 +4148,9 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
                     // promised ordering (best-effort, cosmetic); above = the
                     // FR-25 splice (loud on failure — it IS the point)
                     if (placement === 'left' || placement === 'right') {
-                      void reorderNode(slug, born, placement === 'left'
+                      const pin = ringInsertSide(placement, targetRef.current.get(a.id),
+                        targetRef.current.get(USER), chartLayout === 'circular')
+                      void reorderNode(slug, born, pin === 'left'
                         ? { before: a.id } : { after: a.id }).catch(() => {})
                     }
                     if (placement === 'above') {
