@@ -144,8 +144,7 @@ export function waitingNow(p: PendingAttention): WaitingRow[] {
     && !(w.kind !== 'question' && readLocally(w.org, w.source)))
 }
 
-/** Hear every changed aggregate (attndismiss.ts, outside React). */
-export function subscribe(listener: () => void): () => void {
+function subscribe(listener: () => void): () => void {
   listeners.add(listener)
   return () => { listeners.delete(listener) }
 }
