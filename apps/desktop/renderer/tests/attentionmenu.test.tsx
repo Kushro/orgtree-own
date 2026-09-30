@@ -63,4 +63,21 @@ test('large Attention drawer switches agent desks and opens both agent menus', a
     // `actual` serialises its whole document on failure (attentionaudit §5)
     assert.equal(!!document.querySelector('.ctxmenu'), false, `${selector}: Escape closes the menu`)
   }
+  // Opening a menu was the old regression. Also execute Focus: it changes the
+  // selected desk through the Canvas-owned menu builder while Canvas is hidden.
+  for (const id of ['beta', 'alpha', 'beta']) {
+    await inAct(() => { v.el.querySelector<HTMLButtonElement>('.attn-agents-toggle')!.click() })
+    const target = v.el.querySelector(`[data-attn-agent="${id}"]`)!
+    await inAct(() => { target.dispatchEvent(new window.MouseEvent('contextmenu',
+      { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 30 })) })
+    const focus = [...document.querySelectorAll<HTMLButtonElement>('.ctxmenu button')]
+      .find(button => button.textContent?.trim() === 'Focus')
+    assert.equal(!!focus, true, 'canonical Focus action is present')
+    await inAct(() => { focus!.click() })
+    await inAct(() => flush(4))
+    assert.equal(!!document.querySelector('.ctxmenu'), false, 'Focus closes the menu')
+    assert.equal(v.el.querySelector('[data-attn-agent][aria-selected=true]')?.getAttribute('data-attn-agent'), id)
+    assert.equal(v.el.querySelector('.attn-desk .cc-head-left')?.textContent?.includes(id), true,
+      'Focus renders the requested desk in Attention')
+  }
 })

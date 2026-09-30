@@ -1292,6 +1292,8 @@ interface NodeSquareProps {
    *  tier block, name, status, last-turn stamp — no desk, no chips, no drag.
    *  Taps are arbitrated by the viewport (the sheet opens there). */
   mapMode?: boolean
+  /** A hidden Canvas world retains its camera/card but cannot own the desk. */
+  deskEligible?: boolean
   /** D-125 ②: watchdogs hide from the compact map; the owner card carries
    *  their count as a dot instead */
   dogs?: number
@@ -1449,7 +1451,7 @@ export function NodeSquare({ node, pos, lod, focused: deskOpen, dragging, isDrop
   toast, pxc, zoom, onSpawn, onSpawnSide, onSpawnTop, onConfig, onInbox, onDocket, onTeamDocket, onLineage, onOpenDoc, onOpenAgentGallery,
   onRecenter, onJump, pub, kioskRemaining, cascadeAlloc, maxTop, pile, compactAt, maxTier,
   onMailLink, onWorkLink, onDragStart, onDragMove, onDragEnd, onDragCancel,
-  mapMode, dogs, oneShotDogs, pinned, pinnedFocus, onPin, onShowPin,
+  mapMode, deskEligible = true, dogs, oneShotDogs, pinned, pinnedFocus, onPin, onShowPin,
   onOpenTemporary,
   revealHire, onHireRevealed, onDismiss }: NodeSquareProps) {
   // `focused` below is the card's LAYOUT state — desk-sized, head hidden, no
@@ -1981,6 +1983,7 @@ export function NodeSquare({ node, pos, lod, focused: deskOpen, dragging, isDrop
       )}
       {deskOpen && (
         <DeskChat node={node} map={map} op={op} slug={slug}
+          eligible={deskEligible}
           toast={toast}
           onLineage={onLineage} onConfig={onConfig} compactAt={compactAt}
           onRecenter={onRecenter} onJump={onJump} maxTop={maxTop} pxc={pxc}

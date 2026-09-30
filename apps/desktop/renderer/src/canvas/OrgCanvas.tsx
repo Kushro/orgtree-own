@@ -3592,6 +3592,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
           const pileHere = pileByFront.get(n.id)
           const square = (
             <NodeSquare key={n.id} node={n} pos={p} lod={lod} focused={n.id === focusId}
+              deskEligible={!worldHidden}
               /* FR-3: the camera is on this card but its desk is a pinned
                  window — placeholder instead of a (second) desk */
               pinnedFocus={n.id === pinnedFocusId}
