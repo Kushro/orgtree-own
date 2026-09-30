@@ -210,6 +210,30 @@ class RecordsTests(unittest.TestCase):
         self.assertLess(page[-1]["seq"], newer[0]["seq"])
         self.assertEqual([r["seq"] for r in page], sorted(r["seq"] for r in page))
 
+    def test_pages_descending_from_a_newer_window_stop_above_older_ranked_rows(self):
+        # the shape a rebuild leaves (attn-sol, 2026-09-30): an older page was
+        # ranked on its own, the desk reloaded the newest window, and pages
+        # now descend from that window towards the already-ranked older rows
+        oldest = [{"event_id": n} for n in "abcd"]
+        records.order(self.source, oldest, older=True)
+        window = [{"event_id": n} for n in "wxyz"]
+        records.order(self.source, window)
+        for page_ids in ("mnop", "ijkl", "efgh"):
+            page = [{"event_id": n} for n in page_ids] + [{"event_id": window[0]["event_id"]}]
+            records.order(self.source, page, older=True)
+            self.assertGreater(page[0]["seq"], oldest[-1]["seq"], f"page {page_ids} must stay above the older rows")
+            self.assertEqual([r["seq"] for r in page], sorted(r["seq"] for r in page))
+            window = page
+        self.assertEqual(records.order(self.source, []), 0, "no rebuild was needed")
+
+    def test_a_new_tail_stops_below_a_higher_ranked_row(self):
+        with records.database() as conn:
+            conn.executemany("INSERT INTO transcript_order VALUES (?,?,?)",
+                             [(self.source, "known", 0.0), (self.source, "stray", 100.0)])
+        tail = [{"event_id": "known"}, {"event_id": "t1"}, {"event_id": "t2"}]
+        records.order(self.source, tail)
+        self.assertTrue(0.0 < tail[1]["seq"] < tail[2]["seq"] < 100.0)
+
     def test_contradicting_ranks_are_rebuilt_once_and_the_epoch_moves(self):
         # the live state of 2026-09-30: an older row ranked after a newer one
         with records.database() as conn:

@@ -1018,6 +1018,13 @@ def _source_extent(conn, source):
                         (source,)).fetchone()
 
 
+def _nearest(conn, source, rank, *, below):
+    """The source's nearest existing rank strictly below (or above) `rank`."""
+    sql = ("SELECT MAX(rank) FROM transcript_order WHERE source=? AND rank<?" if below else
+           "SELECT MIN(rank) FROM transcript_order WHERE source=? AND rank>?")
+    return conn.execute(sql, (source, rank)).fetchone()[0]
+
+
 def _assign_ranks(conn, source, rows, known, *, force=False, older=False) -> bool:
     """One assignment pass. New ranks are written only when every one is
     STRICTLY between its neighbours — a float midpoint that lands on a
@@ -1026,20 +1033,27 @@ def _assign_ranks(conn, source, rows, known, *, force=False, older=False) -> boo
     can't-happen fallback after a renumber, kept so ordering degrades to the
     old collision behaviour rather than an exception.
 
-    A call with NO ranked row at all is placed against the source's existing
-    ranks — before the lowest for an older page (`older`), after the highest
-    otherwise. It used to be numbered from 0, into the middle of whatever
-    the source already held, and the collision was then kept for good
-    (item v3-loading-earlier-agent-messages-fails-couldn-t, 2026-09-30)."""
+    A run of new rows is bounded by the SOURCE's ranks, not only by its
+    neighbours in this call (item v3-loading-earlier-agent-messages-fails-
+    couldn-t, 2026-09-30). It used to take 1024-steps away from its one
+    ranked neighbour — or from 0 when the call had none — straight into
+    ranks the source already held for other rows, and first-rank-wins kept
+    that collision for good: older pages then sorted after the visible rows.
+    Now a run with a ranked neighbour on one side stops short of the
+    source's nearest rank on the other side (1024-steps while they fit,
+    otherwise an even split of the gap), and a call with no ranked row at
+    all goes before the source's lowest rank for an older page (`older`)
+    and after its highest otherwise."""
+    rows = list(rows)
     i, pending, ok = 0, [], True
     if rows and not any(row["event_id"] in known for row in rows):
         low, high = _source_extent(conn, source)
         if low is not None:
             if older:
                 known = {**known, None: low}
-                rows = [*rows, {"event_id": None}]
+                rows.append({"event_id": None})
             else:
-                rows = [{"event_id": None, "seq": high}, *rows]
+                rows.insert(0, {"event_id": None, "seq": high})
                 i = 1
     while i < len(rows):
         identity = rows[i]["event_id"]
@@ -1053,8 +1067,16 @@ def _assign_ranks(conn, source, rows, known, *, force=False, older=False) -> boo
         left = rows[i - 1]["seq"] if i else None
         right = known[rows[end]["event_id"]] if end < len(rows) else None
         count = end - i
-        if left is None:
-            left = (right if right is not None else 0) - 1024 * (count + 1)
+        room = 1024 * (count + 1)
+        if left is None and right is not None:
+            floor = _nearest(conn, source, right, below=True)
+            left = floor if floor is not None and right - floor <= room else right - room
+        elif right is None and left is not None:
+            ceiling = _nearest(conn, source, left, below=False)
+            if ceiling is not None and ceiling - left <= room:
+                right = ceiling
+        elif left is None:
+            left = -room
         step = (right - left) / (count + 1) if right is not None else 1024
         prev = left
         for j in range(i, end):
