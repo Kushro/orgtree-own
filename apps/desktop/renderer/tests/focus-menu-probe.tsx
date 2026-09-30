@@ -29,7 +29,7 @@ const messages = Array.from({ length: 3000 }, (_, i) => ({
 }))
 window.fetch = async input => {
   const path = new URL(String(input), location.href).pathname
-  if (path.endsWith('/foreground-tree')) return new Response('{}', { status: 409 })
+  if (path.endsWith('/foreground-tree')) return new Response('{"kind":"compatibility"}', { status: 409 })
   const body = path === '/api/orgs' ? [{ slug, name: slug, live: 2, seats: 2 }]
     : path === `/api/orgs/${slug}` ? tree
     : /\/detail$/.test(path) ? node(path.includes('/beta/') ? 'beta' : 'alpha')
@@ -54,5 +54,15 @@ function Fixture() {
     </div></main></div></CurrentOrg.Provider>
 }
 const fullApp = location.hash === '#app'
-if (fullApp) window.history.replaceState(null, '', `/o/${slug}`)
+if (fullApp) {
+  const identity = { windowId: 'focus-window', kind: 'org', org: slug, notificationOwner: false }
+  Object.assign(window, { orgtreeDesktop: {
+    windowIdentity: identity, getWindowIdentity: async () => identity,
+    requestOrg: async () => ({ action: 'focused', org: slug }),
+    onEvent: () => noop, getPreferences: async () => ({}),
+    notify: async () => true, syncNotifications: async () => {},
+    getAppVersion: async () => '3.0.0-alpha.9',
+  } })
+  window.history.replaceState(null, '', `/o/${slug}`)
+}
 createRoot(document.getElementById('root')!).render(fullApp ? <App /> : <Fixture />)

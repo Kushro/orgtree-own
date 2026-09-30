@@ -37,7 +37,12 @@ try:
         scene = '#app' if len(sys.argv) > 2 and sys.argv[2] == 'app' else ''
         page.goto(f'http://127.0.0.1:{server.server_port}/probe.html' + scene)
         page.wait_for_timeout(2200)
-        page.locator('[data-first-use-agent="alpha"]').click()
+        try:
+            page.locator('[data-first-use-agent="alpha"]').click()
+        except Exception:
+            result['startupBody'] = page.locator('body').inner_text()
+            page.screenshot(path=str(OUT / 'startup-failure.png'))
+            raise
         page.wait_for_selector('[data-first-use-agent="alpha"].desk .cc-composer')
         page.wait_for_timeout(2000)
         result['camera'] = page.locator('.space').get_attribute('style')
