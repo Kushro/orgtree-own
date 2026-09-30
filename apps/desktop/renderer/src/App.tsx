@@ -720,7 +720,9 @@ export default function App() {
   // card manages its own live copy once shown
   const [deskPrefs, setDeskPrefs] = useState<NativePreferences | null>(null)
   const persistAttentionOrgs = useCallback((slug: string, view: OrgView) => {
-    desktop()?.setPreferences({ orgView: { slug, view } }).catch(() => {})
+    // a bridge without setPreferences (an older preload, a test double) must
+    // not throw out of the effect that restores the view
+    desktop()?.setPreferences?.({ orgView: { slug, view } })?.catch(() => {})
   }, [])
   useEffect(() => {
     const bridge = desktop()
