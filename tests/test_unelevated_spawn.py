@@ -71,11 +71,19 @@ class PolicyTests(unittest.TestCase):
         popen.assert_called_once_with(["x"], cwd="c")
         token.assert_not_called()
 
-    def test_service_host_starts_the_engine_through_popen_unelevated(self):
+    def test_service_host_starts_the_engine_through_the_spawner(self):
         source = inspect.getsource(service_host.main)
         launch = source[source.index('launcher = Path(__file__)'):source.index("ready: dict")]
-        self.assertIn("child = popen_unelevated(", launch)
+        self.assertIn("spawn = engine_spawner()", launch)
+        self.assertIn("child = spawn(", launch)
         self.assertNotIn("subprocess.Popen(", launch)
+
+    def test_the_engine_drops_admin_rights_unless_the_setting_is_on(self):
+        with patch.object(service_host, "run_as_administrator_enabled", return_value=False):
+            self.assertIs(service_host.engine_spawner(), unelevated.popen_unelevated)
+        with patch.object(service_host, "run_as_administrator_enabled", return_value=True):
+            self.assertIs(service_host.engine_spawner(), subprocess.Popen)
+
 
     def test_the_environment_block_is_sorted_and_double_terminated(self):
         if os.name != "nt":
@@ -94,9 +102,13 @@ class PolicyTests(unittest.TestCase):
 
     def test_service_host_repairs_access_before_it_starts_the_engine(self):
         source = inspect.getsource(service_host.main)
+        # Only when the rights are really being dropped: with "Run Orgtree as
+        # administrator" on, the engine keeps them and needs no repair.
         repair = source.index("repair_user_access(root)")
-        self.assertLess(source.index("if process_is_elevated():"), repair)
-        self.assertLess(repair, source.index("popen_unelevated("))
+        self.assertLess(source.index("spawn = engine_spawner()"),
+                        source.index("if spawn is popen_unelevated and process_is_elevated():"))
+        self.assertLess(source.index("if spawn is popen_unelevated and process_is_elevated():"), repair)
+        self.assertLess(repair, source.index("child = spawn("))
 
     def test_repair_candidates_are_the_root_its_folders_and_the_profiles(self):
         base = Path(tempfile.gettempdir()) / f"orgtree-candidates-{uuid.uuid4().hex}"
@@ -106,6 +118,53 @@ class PolicyTests(unittest.TestCase):
         (base / "file.txt").write_text("x", encoding="utf-8")
         found = {Path(p).relative_to(base).as_posix() for p in unelevated.user_access_candidates(base)}
         self.assertEqual(found, {".", "profiles", "orgs", "profiles/claude-a"})
+
+
+class RunAsAdministratorSettingTests(unittest.TestCase):
+    """The setting is read from HKLM only; the registry is mocked, never written."""
+
+    def setUp(self):
+        if os.name != "nt":
+            raise unittest.SkipTest("UNEXECUTED: the setting is a Windows registry value")
+        import winreg
+        self.winreg = winreg
+
+    def read(self, value=None, error=None):
+        opened = []
+
+        class Key:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+
+        def open_key(hive, path, reserved, access):
+            opened.append((hive, path, access))
+            if error:
+                raise error
+            return Key()
+        with patch.object(self.winreg, "OpenKey", open_key), \
+             patch.object(self.winreg, "QueryValueEx", return_value=value):
+            result = unelevated.run_as_administrator_enabled()
+        return result, opened
+
+    def test_only_dword_one_turns_it_on(self):
+        dword, sz = self.winreg.REG_DWORD, self.winreg.REG_SZ
+        self.assertTrue(self.read((1, dword))[0])
+        for value in ((0, dword), (2, dword), ("1", sz), (1, self.winreg.REG_QWORD)):
+            self.assertFalse(self.read(value)[0], value)
+
+    def test_missing_or_unreadable_means_off(self):
+        self.assertFalse(self.read(error=FileNotFoundError())[0])
+        self.assertFalse(self.read(error=PermissionError())[0])
+
+    def test_it_reads_the_protected_hklm_key_in_the_64_bit_view(self):
+        _result, opened = self.read((1, self.winreg.REG_DWORD))
+        hive, path, access = opened[0]
+        self.assertEqual(hive, self.winreg.HKEY_LOCAL_MACHINE)
+        self.assertEqual(path, r"SOFTWARE\Orgtree\Runtime")
+        self.assertTrue(access & self.winreg.KEY_WOW64_64KEY)
+
+    def test_the_real_registry_read_answers_a_boolean(self):
+        self.assertIsInstance(unelevated.run_as_administrator_enabled(), bool)
 
 
 class ElevatedSpawnTests(unittest.TestCase):

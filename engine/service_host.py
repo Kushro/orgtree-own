@@ -36,7 +36,7 @@ import urllib.request
 
 try:
     from .startup_progress import parse_progress
-    from .unelevated import popen_unelevated, process_is_elevated, repair_user_access
+    from .unelevated import popen_unelevated, process_is_elevated, repair_user_access, run_as_administrator_enabled
 except ImportError:  # script entrypoint
     # The packaged runtime's python313._pth never puts the script's own
     # folder on sys.path (it lists resources\ instead), so a bare
@@ -46,7 +46,7 @@ except ImportError:  # script entrypoint
     if _PACKAGE_ROOT not in sys.path:
         sys.path.insert(0, _PACKAGE_ROOT)
     from engine.startup_progress import parse_progress
-    from engine.unelevated import popen_unelevated, process_is_elevated, repair_user_access
+    from engine.unelevated import popen_unelevated, process_is_elevated, repair_user_access, run_as_administrator_enabled
 
 READY_TIMEOUT = 120.0  # boot is contended; the desktop's 60s is too tight
 #: Between two checkpoints of the first-launch conversion (phases starting
@@ -431,6 +431,23 @@ def checkpoint_window(line: str) -> float:
     return CONVERT_READY_TIMEOUT if isinstance(phase, str) and phase.startswith(CONVERT_PHASE) else READY_TIMEOUT
 
 
+def engine_spawner() -> "Callable[..., subprocess.Popen[Any]]":
+    """How launch.py is started.
+
+    The boot task's S4U logon hands an administrator account its FULL token
+    even at RunLevel Limited, so by default an elevated host starts the engine
+    as the normal user: PostgreSQL refuses admin rights, and no agent the
+    engine spawns should inherit them (engine/unelevated.py). The app setting
+    "Run Orgtree as administrator" (HKLM, admin-writable only) keeps the
+    host's own token for the engine and its agents instead.
+    """
+    if run_as_administrator_enabled():
+        print("service host: 'Run Orgtree as administrator' is on; the engine keeps this host's rights",
+              file=sys.stderr, flush=True)
+        return subprocess.Popen
+    return popen_unelevated
+
+
 def main() -> int:
     root = resolve_data_root()
     ui = resolve_ui_dir()
@@ -462,11 +479,8 @@ def main() -> int:
         print(f"service host: {exc}", file=sys.stderr, flush=True)
         return 1
     launcher = Path(__file__).resolve().parent / "launch.py"
-    # The boot task's S4U logon hands an administrator account its FULL token
-    # even at RunLevel Limited, so an elevated host starts the engine as the
-    # normal user: PostgreSQL refuses admin rights, and no agent the engine
-    # spawns should inherit them. See engine/unelevated.py.
-    if process_is_elevated():
+    spawn = engine_spawner()
+    if spawn is popen_unelevated and process_is_elevated():
         # An earlier engine ran elevated and may have left folders only an
         # administrator can open; give the user back its access while this
         # host still can.
@@ -476,9 +490,9 @@ def main() -> int:
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             print(f"service host: {exc}", file=sys.stderr, flush=True)
     try:
-        child = popen_unelevated([sys.executable, str(launcher)], cwd=str(launcher.parent),
-                                 env=env, stdout=subprocess.PIPE, stderr=sys.stderr,
-                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        child = spawn([sys.executable, str(launcher)], cwd=str(launcher.parent),
+                      env=env, stdout=subprocess.PIPE, stderr=sys.stderr,
+                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except OSError as exc:
         print(f"service host: could not start the engine: {exc}", file=sys.stderr, flush=True)
         return 1

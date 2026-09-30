@@ -434,6 +434,32 @@ def repair_user_access(root: "os.PathLike[str] | str") -> list[str]:
     repaired = json.loads(result.stdout or "[]")
     return [str(p) for p in (repaired if isinstance(repaired, list) else [repaired])]
 
+# The "Run Orgtree as administrator" app setting. It lives in HKLM, under a key
+# only SYSTEM and Administrators can write (the desktop creates it with that
+# ACL, through a UAC prompt), and NOT in the data folder: every agent runs as
+# the normal user and can write the data folder, so a setting there would let
+# any agent grant itself administrator rights at the next engine start.
+RUN_AS_ADMIN_KEY = r"SOFTWARE\Orgtree\Runtime"
+RUN_AS_ADMIN_VALUE = "RunAsAdministrator"
+
+
+def run_as_administrator_enabled() -> bool:
+    """True only when the setting is present and exactly DWORD 1.
+
+    Missing, unreadable or any other value means OFF: the safe side of this
+    setting is the normal-user engine.
+    """
+    if not IS_WINDOWS:
+        return False
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, RUN_AS_ADMIN_KEY, 0,
+                            winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+            value, kind = winreg.QueryValueEx(key, RUN_AS_ADMIN_VALUE)
+    except OSError:
+        return False
+    return kind == winreg.REG_DWORD and value == 1
+
 
 def popen_unelevated(args: Any, **kwargs: Any) -> "subprocess.Popen[Any]":
     """subprocess.Popen, but the child never holds administrator rights.
