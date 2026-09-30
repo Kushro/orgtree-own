@@ -5798,7 +5798,22 @@ async def accounts_usage(account_id: str) -> dict[str, Any]:
     `accountusage.view`, which the AGENT TURN ENVELOPE also calls — with
     `allow_fetch=False`, so the board an agent reads every turn spends no
     upstream request. One resolver, two callers, and no second interpretation
-    of the same caches for the two surfaces to disagree over."""
+    of the same caches for the two surfaces to disagree over.
+
+    ⚠ OFF THE EVENT LOOP (docket v3-the-first-agent-desk-opened-in-an-org-window).
+    `allow_fetch=True` can reach limits.fetch, codex_limits.fetch and
+    antigravity_limits.fetch, which are network reads. This route used to call
+    them from its `async def` body, so a slow upstream froze the WHOLE engine
+    for as long as the fetch took: no other request, not even the tree a newly
+    opened window's first desk waits for, could start meanwhile. (The live
+    slow-request log at 2026-09-30 09:09Z shows that shape: this route, the
+    other usage reads and the org trees in flight all ended together after
+    ~9.8 s.) Run it on a worker, as `/api/usage` does."""
+    from fastapi.concurrency import run_in_threadpool
+    return await run_in_threadpool(_accounts_usage, account_id)
+
+
+def _accounts_usage(account_id: str) -> dict[str, Any]:
     from . import accountusage
     try:
         row = registry.get_account(account_id)
