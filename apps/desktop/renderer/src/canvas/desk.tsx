@@ -1673,6 +1673,11 @@ export interface DeskChatProps {
    *  CANVAS desk passes it; absent hides the button — a switchboard panel,
    *  the mobile sheet and a pinned window itself have no pin to offer. */
   onPin?: () => void
+  /** drop the desk's own pop-out (↗) while it is docked: the host panel draws
+   *  one already. The Attention view's desk panel passes it — its panel-header
+   *  pop-out sat beside this one (user 2026-09-30). A desk that is already in
+   *  its own window keeps its "return" (↙), which nothing else offers there. */
+  hidePopout?: boolean
   /** hide an explicitly revealed retired agent again (hide-retired setting) */
   onDismiss?: () => void
 }
@@ -1826,7 +1831,7 @@ function ctxTargetElement(root: Element | null,
 function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineageProp, onConfig: configProp,
   onRecenter, onJump, maxTop, pxc, pub, bare = false, compact = false,
   compactAt, onMailLink, onWorkLink, onOpenDoc, onPin, openPresentedRequest,
-  staleIdentity = false, onDismiss }: DeskChatProps) {
+  staleIdentity = false, onDismiss, hidePopout = false }: DeskChatProps) {
   const node = useNodeMetadata(slug, baseNode)
   // A host that passes no settings/lineage handler (the Attention view's desk,
   // a restored desk) gets the shell's own openers, so the gear and the
@@ -3222,7 +3227,7 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
             ))}
           </span>
           {/* FR-3: pin this desk to screenspace as a draggable window */}
-          <PopoutButton />
+          {!(hidePopout && !surface?.detached) && <PopoutButton />}
           {onPin && !surface?.detached &&
             <button className="cc-icon cc-pin" aria-label={`pin ${node.id}'s desk as a window`}
               title="pin as a window — it stays put while the canvas moves"

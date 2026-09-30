@@ -269,7 +269,7 @@ export function AgentDeskPanel({
           ? <DeskSlot bare node={selected} map={map} op={op} slug={slug} toast={toast}
               pub={!!tree.public}
               maxTop={tree.max_top_grant ?? 1000}
-              eligible={eligible} claim={claim}
+              eligible={eligible} claim={claim} hidePopout
               {...deskExtras} />
           : <div className="dim pad attn-desk-empty">
               This organization has no agent to open a desk for yet.
