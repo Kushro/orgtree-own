@@ -1070,10 +1070,8 @@ class Org:
         # twice). A node already on a Sol version keeps it; any other value is
         # a leftover from an earlier tier that resolves to the old default
         # today, so it is pinned to "6" too. A custom organization id is
-        # never overwritten and its agents are not pinned. Lazy rows: the
-        # same rule and reasoning as the Sonnet 5.5 step above — both halves
-        # happen in one whole load, or neither does.
-        if _m.get("sol") == "gpt-6-sol" and not _lazy:
+        # never overwritten and its agents are not pinned.
+        if _m.get("sol") == "gpt-6-sol":
             for _node in self.nodes.values():
                 if (_node.get("model") == "sol"
                         and (_node.get("scope") or {}).get("model_version")

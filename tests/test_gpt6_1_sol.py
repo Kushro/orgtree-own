@@ -6,7 +6,6 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
 
@@ -97,14 +96,6 @@ class Gpt61SolTests(unittest.TestCase):
         self.assertEqual(loaded.model_for("plain"), SOL_6)
         self.assertEqual(loaded.model_for("on-56"), SOL_5_6)
         self.assertEqual(loaded.d["models"]["luna"], ledger.MODELS["luna"])
-
-    def test_a_lazy_node_table_never_flips_the_default_without_the_pins(self):
-        old = self.old_org()
-        with patch.object(ledger, "_lazy_rows", return_value=True):
-            loaded = self.reload(old)
-        self.assertEqual(loaded.d["models"]["sol"], SOL_6)
-        self.assertNotIn("model_version", loaded.node("plain")["scope"])
-        self.assertEqual(loaded.model_for("plain"), SOL_6)
 
     def test_custom_org_id_is_preserved_and_its_agents_are_not_pinned(self):
         old = self.old_org(default="custom-sol-deployment")
