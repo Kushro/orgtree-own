@@ -1149,19 +1149,22 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
 
   // ---------------------------------------------- wires: geometry + sparks
   // (the seg builders assert posOf: every caller pre-checks both endpoints)
+  // radial wire: centre to centre, trimmed to each card's edge
+  const radialSeg = (aId: string, bId: string): Seg => {
+    const a = posOf(aId)!, b = posOf(bId)!
+    const as = sizeOf(aId), bs = sizeOf(bId)
+    const ca = { x: a.x + as.w / 2, y: a.y + as.h / 2 }, cb = { x: b.x + bs.w / 2, y: b.y + bs.h / 2 }
+    const dx = cb.x - ca.x, dy = cb.y - ca.y
+    const edge = (hw: number, hh: number) =>
+      Math.min(hw / (Math.abs(dx) || 1e-9), hh / (Math.abs(dy) || 1e-9))
+    const ta = edge(as.w / 2, as.h / 2), tb = edge(bs.w / 2, bs.h / 2)
+    return { kind: 'l', pts: [
+      { x: ca.x + dx * ta, y: ca.y + dy * ta }, { x: cb.x - dx * tb, y: cb.y - dy * tb }] }
+  }
   const treeSeg = (parentId: string, childId: string): Seg => {
+    if (chartLayout === 'circular') return radialSeg(parentId, childId)
     const a = posOf(parentId)!, b = posOf(childId)!
     const ps = sizeOf(parentId)
-    if (chartLayout === 'circular') {
-      // radial wire: centre to centre, trimmed to each card's edge
-      const ca = { x: a.x + ps.w / 2, y: a.y + ps.h / 2 }, cb = { x: b.x + NODE_W / 2, y: b.y + NODE_H / 2 }
-      const dx = cb.x - ca.x, dy = cb.y - ca.y
-      const edge = (hw: number, hh: number) =>
-        Math.min(hw / (Math.abs(dx) || 1e-9), hh / (Math.abs(dy) || 1e-9))
-      const ta = edge(ps.w / 2, ps.h / 2), tb = edge(NODE_W / 2, NODE_H / 2)
-      return { kind: 'l', pts: [
-        { x: ca.x + dx * ta, y: ca.y + dy * ta }, { x: cb.x - dx * tb, y: cb.y - dy * tb }] }
-    }
     return { kind: 'c', pts: [
       { x: a.x + ps.w / 2, y: a.y + ps.h },
       { x: a.x + ps.w / 2, y: a.y + ps.h + 52 },
@@ -1169,6 +1172,8 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       { x: b.x + NODE_W / 2, y: b.y }] }
   }
   const peerSeg = (lId: string, rId: string): Seg => {
+    // ring: neighbours are joined along the ring, nearest edge to nearest edge
+    if (chartLayout === 'circular') return radialSeg(lId, rId)
     const a = posOf(lId)!, b = posOf(rId)!
     return { kind: 'l', pts: [
       { x: a.x + sizeOf(lId).w, y: a.y + sizeOf(lId).h * 0.55 },
@@ -3034,13 +3039,15 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     const links: [string, string][] = []
     for (const n of map.values()) {
       if (!n.children || n.children.length < 2 || n.isBearerOf) continue
-      const sibs = n.children.map((c) => c.id)
-        .filter((k) => map.get(k)?.state === 'live')
-        .sort((p, q) => (target.get(p)?.x ?? 0) - (target.get(q)?.x ?? 0))
+      const live = n.children.map((c) => c.id).filter((k) => map.get(k)?.state === 'live')
+      // ring: siblings already stand in angular order (that is how the wedge
+      // is dealt out); an x-sort reorders them up and down the ring's sides
+      const sibs = chartLayout === 'circular' ? live
+        : live.sort((p, q) => (target.get(p)?.x ?? 0) - (target.get(q)?.x ?? 0))
       for (let i = 0; i + 1 < sibs.length; i++) links.push([sibs[i]!, sibs[i + 1]!])
     }
     return links
-  }, [map, target])
+  }, [map, target, chartLayout])
 
   // at most ONE audience line per DRAWN pair (user bug 2026-08-24): buried
   // pile members sit at exactly their front card's position, so every holder
