@@ -728,6 +728,35 @@ def codex_cli_version_note(status: dict[str, Any] | None = None,
     return note
 
 
+#: Codex models an older CLI is not offered, by the oldest CLI measured to
+#: run them. gpt-6.1-sol (2026-09-29): Codex CLI 0.155.1 fails the turn with
+#: "gpt-6.1-sol not supported with ChatGPT account", which blames the account;
+#: 0.159.0 lists it and runs it (codexpin.PIN). Nothing in 2.1.x installs or
+#: upgrades the Codex CLI, so an older one is the normal case on a machine
+#: that has not updated it by hand.
+CODEX_MODEL_MIN_CLI: Final[dict[str, tuple[int, ...]]] = {
+    "gpt-6.1-sol": (0, 159, 0)}
+
+
+def codex_model_cli_refusal(model_id: str,
+                            status: dict[str, Any] | None = None) -> str | None:
+    """Why this machine's Codex CLI cannot run ``model_id``, or None.
+
+    Fails OPEN on a version it cannot read: that is ignorance, not evidence
+    of an old CLI, and the turn itself still reports a real refusal."""
+    need = CODEX_MODEL_MIN_CLI.get(model_id)
+    if need is None:
+        return None
+    st = status if status is not None else codex_status()
+    have = _version_tuple(str(st.get("version") or ""))
+    if have is None or have >= need:
+        return None
+    return (f"model '{model_id}' needs Codex CLI "
+            f"{'.'.join(str(p) for p in need)} or newer, and this machine runs "
+            f"{codex_cli_version_note(st) or 'an older codex CLI'} — update it "
+            f"with `{install_hint('openai')}@latest`")
+
+
 # A provider inventory is network-backed even though it rides the local CLI.
 # Keep the accounts/canvas poll cheap, but never let old evidence authorize a
 # rollout tier. The hire gate passes force=True and performs its own query.

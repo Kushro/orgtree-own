@@ -6,13 +6,14 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
 
 _root = tempfile.TemporaryDirectory(prefix="orgtree-gpt61-sol-")
 os.environ["ORGTREE_DATA"] = _root.name
 
-from orgtree import codexpin, ledger, providers, supervisor
+from orgtree import api, codexpin, ledger, providers, supervisor
 
 SOL_6_1 = "gpt-6.1-sol"
 SOL_6 = "gpt-6-sol"
@@ -132,6 +133,45 @@ class Gpt61SolTests(unittest.TestCase):
         self.assertIsNone(supervisor.tier_context("sol", {"sol": SOL_6}))
         self.assertIsNone(supervisor.tier_context("sol"))
 
+
+
+class OlderCodexCliTests(unittest.TestCase):
+    """2.1.x installs no Codex CLI of its own: a machine still on a CLI older
+    than 0.159.0 is refused at the hire/switch door with the version and the
+    update command, not by a first turn that blames the ChatGPT account."""
+
+    def status(self, version):
+        return {"installed": True, "connected": True, "path": "C:/x/codex.cmd",
+                "source": "pin", "version": version, "codex_home": "C:/nowhere"}
+
+    def test_the_refusal_names_the_floor_and_the_update(self):
+        why = providers.codex_model_cli_refusal(SOL_6_1, self.status("0.155.1"))
+        self.assertIn("0.159.0", why)
+        self.assertIn("0.155.1", why)
+        self.assertIn("@openai/codex@latest", why)
+        self.assertEqual(codexpin.PIN, "0.159.0")
+
+    def test_a_new_enough_or_unreadable_cli_and_other_models_pass(self):
+        for version in ("0.159.0", "0.160.2-win32-x64", None, "unknown"):
+            self.assertIsNone(providers.codex_model_cli_refusal(
+                SOL_6_1, self.status(version)), version)
+        self.assertIsNone(providers.codex_model_cli_refusal(
+            SOL_6, self.status("0.155.1")))
+
+    def test_the_hire_gate_refuses_sol_on_an_old_cli_only(self):
+        org = ledger.Org.create("gpt61-gate")
+        with patch.object(providers, "codex_status", return_value=self.status("0.155.1")):
+            with self.assertRaises(ledger.LedgerError) as caught:
+                api.provider_hire_gate(org, "sol")
+            self.assertIn("0.159.0", str(caught.exception))
+            # a plain rehire of an existing (pinned) agent is never stopped
+            api.provider_hire_gate(org, "sol", user_choice_only=True)
+            # a custom Sol id is the operator's own choice
+            org.d["models"]["sol"] = SOL_6
+            api.provider_hire_gate(org, "sol")
+        with patch.object(providers, "codex_status", return_value=self.status("0.159.0")):
+            org.d["models"]["sol"] = SOL_6_1
+            api.provider_hire_gate(org, "sol")
 
 if __name__ == "__main__":
     unittest.main()

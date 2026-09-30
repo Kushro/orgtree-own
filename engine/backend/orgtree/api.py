@@ -13857,6 +13857,15 @@ def provider_hire_gate(
         raise LedgerError(
             "kiosk orgs cannot hire Codex tiers yet — codex is held out of "
             "kiosks until its sandboxing is settled (user ruling 2026-08-28)")
+    # A tier whose default model needs a newer Codex CLI than this machine
+    # has (GPT-6.1 Sol needs 0.159.0): refuse at the door with the version and
+    # the update command, instead of a first turn that fails blaming the
+    # ChatGPT account. The plain-rehire door returned above, so an existing
+    # agent pinned to an older Sol version is never stopped here.
+    refusal = providers.codex_model_cli_refusal(
+        str((org.d.get("models") or {}).get(tier or "") or ""), st)
+    if refusal:
+        raise LedgerError(f"tier '{tier}' cannot run on this machine yet: {refusal}")
     # ⚠ NO USAGE-WINDOW CHECK HERE — user ruling 2026-09-02, and 65273fa had
     # one. Hiring prepares an agent; the TURN is what needs capacity, and the
     # Codex CLI already refuses that loudly. See the note above
