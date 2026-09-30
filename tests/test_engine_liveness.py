@@ -116,14 +116,14 @@ class ProbeTests(unittest.TestCase):
 class HostLoopTests(unittest.TestCase):
     def test_a_hung_engine_is_restarted_until_the_limit(self):
         with mock.patch.object(service_host, "HUNG_RESTART_LIMIT", 2), \
-                mock.patch.object(service_host, "run_engine", side_effect=[EXIT_ENGINE_HUNG] * 5) as run:
-            self.assertEqual(service_host.main(), EXIT_ENGINE_HUNG)
+                mock.patch.object(service_host, "main", side_effect=[EXIT_ENGINE_HUNG] * 5) as run:
+            self.assertEqual(service_host.run_host(), EXIT_ENGINE_HUNG)
         self.assertEqual(run.call_count, 3)
 
     def test_any_other_exit_ends_the_host(self):
         for code in (0, 1, 3, service_host.EXIT_ROOT_OWNED):
-            with mock.patch.object(service_host, "run_engine", side_effect=[EXIT_ENGINE_HUNG, code]) as run:
-                self.assertEqual(service_host.main(), code)
+            with mock.patch.object(service_host, "main", side_effect=[EXIT_ENGINE_HUNG, code]) as run:
+                self.assertEqual(service_host.run_host(), code)
             self.assertEqual(run.call_count, 2)
 
     def test_an_unproven_release_never_starts_another_engine(self):
@@ -201,7 +201,7 @@ class HungEngineTests(unittest.TestCase):
         env = {**os.environ, "ORGTREE_V2_DATA": str(root), "ORGTREE_V2_UI_DIR": str(folder / "ui")}
         script = (f"from engine import service_host as h;h.__file__={str(folder / 'service_host.py')!r};"
                   f"h.LIVENESS_INTERVAL=.1;h.LIVENESS_PROBE_TIMEOUT={timeout};h.LIVENESS_DEADLINE=1.0;"
-                  f"h.LIVENESS_MIN_FAILURES=2;h.HUNG_RESTART_LIMIT={limit};raise SystemExit(h.main())")
+                  f"h.LIVENESS_MIN_FAILURES=2;h.HUNG_RESTART_LIMIT={limit};raise SystemExit(h.run_host())")
         result = subprocess.run(child_python.argv("-c", script, checkout=REPO), cwd=REPO, env=env,
                                 capture_output=True, text=True, timeout=120)
         starts = [int(p) for p in (root / "starts.txt").read_text().split()]

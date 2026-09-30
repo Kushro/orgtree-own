@@ -558,12 +558,12 @@ def engine_spawner() -> "Callable[..., subprocess.Popen[Any]]":
     return popen_unelevated
 
 
-def main() -> int:
+def run_host() -> int:
     """Run the engine; start a fresh one in place when the last one HUNG and
     its tree was proven gone, unless it keeps hanging."""
     hangs: list[float] = []
     while True:
-        code = run_engine()
+        code = main()
         if code != EXIT_ENGINE_HUNG:
             return code
         now = time.monotonic()
@@ -575,7 +575,8 @@ def main() -> int:
         print("service host: starting a fresh engine after a hung one", file=sys.stderr, flush=True)
 
 
-def run_engine() -> int:
+def main() -> int:
+    """Run ONE engine until it exits, is stopped, or hangs (EXIT_ENGINE_HUNG)."""
     root = resolve_data_root()
     ui = resolve_ui_dir()
     root.mkdir(parents=True, exist_ok=True)
@@ -751,4 +752,4 @@ def run_engine() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_host())
