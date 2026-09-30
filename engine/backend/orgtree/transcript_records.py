@@ -998,14 +998,49 @@ def _order_epoch(conn, source) -> int:
     return int(row[0]) if row else 0
 
 
-def _assign_ranks(conn, source, rows, known, *, force=False) -> bool:
+def _consistent(rows, known) -> bool:
+    """Do the stored ranks of `rows` (given in display order) strictly
+    increase? A repeated identity is compared once."""
+    last, seen = None, set()
+    for row in rows:
+        identity = row["event_id"]
+        if identity in seen or identity not in known:
+            continue
+        seen.add(identity)
+        if last is not None and known[identity] <= last:
+            return False
+        last = known[identity]
+    return True
+
+
+def _source_extent(conn, source):
+    return conn.execute("SELECT MIN(rank), MAX(rank) FROM transcript_order WHERE source=?",
+                        (source,)).fetchone()
+
+
+def _assign_ranks(conn, source, rows, known, *, force=False, older=False) -> bool:
     """One assignment pass. New ranks are written only when every one is
     STRICTLY between its neighbours — a float midpoint that lands on a
     neighbour (precision exhausted, review F9) writes nothing and returns
     False so the caller can renumber first. `force` writes regardless: the
     can't-happen fallback after a renumber, kept so ordering degrades to the
-    old collision behaviour rather than an exception."""
+    old collision behaviour rather than an exception.
+
+    A call with NO ranked row at all is placed against the source's existing
+    ranks — before the lowest for an older page (`older`), after the highest
+    otherwise. It used to be numbered from 0, into the middle of whatever
+    the source already held, and the collision was then kept for good
+    (item v3-loading-earlier-agent-messages-fails-couldn-t, 2026-09-30)."""
     i, pending, ok = 0, [], True
+    if rows and not any(row["event_id"] in known for row in rows):
+        low, high = _source_extent(conn, source)
+        if low is not None:
+            if older:
+                known = {**known, None: low}
+                rows = [*rows, {"event_id": None}]
+            else:
+                rows = [{"event_id": None, "seq": high}, *rows]
+                i = 1
     while i < len(rows):
         identity = rows[i]["event_id"]
         if identity in known:
@@ -1050,13 +1085,31 @@ def _rebalance(conn, source) -> None:
                  "ON CONFLICT(source) DO UPDATE SET epoch=epoch+1", (source,))
 
 
-def order(source: str, rows: list[dict]) -> int:
+def _discard_ranks(conn, source) -> None:
+    """Forget every rank of `source` and bump its order epoch, so the ranks
+    are rebuilt from the rows actually read and a client holding the old
+    seq values reloads instead of comparing them."""
+    conn.execute("DELETE FROM transcript_order WHERE source=?", (source,))
+    conn.execute("INSERT INTO transcript_order_meta VALUES (?,1) "
+                 "ON CONFLICT(source) DO UPDATE SET epoch=epoch+1", (source,))
+
+
+def order(source: str, rows: list[dict], *, older: bool = False) -> int:
     """Stable numeric handles, including lazy prepends and late inserted
     mail; returns the source's ORDER EPOCH. All-known rows take no write
     lock (review F6). When repeated insertion between the same neighbours
     exhausts float precision, the source is renumbered once — same relative
     order, fresh gaps — and the epoch increments instead of two rows ever
-    sharing a rank (review F9)."""
+    sharing a rank (review F9).
+
+    `rows` are in display order, and their stored ranks must agree with it.
+    Ranks that CONTRADICT it (an older row ranked at or after a newer one)
+    are never served: the desk places rows by seq and treats an older page
+    that sorts after the visible rows as "no older messages", so one bad
+    rank wedged "load earlier messages" for good (measured on a live Codex
+    agent, 2026-09-30). The source's ranks are discarded and rebuilt, and
+    the epoch bump tells the desk to reload. `older` marks an older-page
+    read (see _assign_ranks)."""
     if not rows:
         with database() as conn:
             return _order_epoch(conn, source)
@@ -1064,15 +1117,18 @@ def order(source: str, rows: list[dict]) -> int:
         # deferred read transaction: ranks and epoch from one snapshot
         conn.execute("BEGIN")
         known = _known_ranks(conn, source, rows)
-        if len(known) == len({row["event_id"] for row in rows}):
+        if len(known) == len({row["event_id"] for row in rows}) and _consistent(rows, known):
             for row in rows:
                 row["seq"] = known[row["event_id"]]
             return _order_epoch(conn, source)
     with database() as conn:
         conn.execute("BEGIN IMMEDIATE")
         known = _known_ranks(conn, source, rows)
-        if not _assign_ranks(conn, source, rows, known):
+        if not _consistent(rows, known):
+            _discard_ranks(conn, source)
+            known = {}
+        if not _assign_ranks(conn, source, rows, known, older=older):
             _rebalance(conn, source)
             known = _known_ranks(conn, source, rows)
-            _assign_ranks(conn, source, rows, known, force=True)
+            _assign_ranks(conn, source, rows, known, force=True, older=older)
         return _order_epoch(conn, source)

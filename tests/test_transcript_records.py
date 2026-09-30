@@ -194,6 +194,41 @@ class RecordsTests(unittest.TestCase):
         self.assertEqual([row['seq'] for row in expanded], sorted(row['seq'] for row in expanded))
         self.assertEqual({row['event_id']: row['seq'] for row in expanded if row['event_id'] in before}, before)
 
+    def test_a_window_with_no_ranked_row_goes_after_the_existing_ranks(self):
+        older = [{"event_id": n} for n in "abcd"]
+        records.order(self.source, older)
+        burst = [{"event_id": n} for n in "wxyz"]
+        records.order(self.source, burst)
+        self.assertGreater(burst[0]["seq"], older[-1]["seq"])
+        self.assertEqual([r["seq"] for r in burst], sorted(r["seq"] for r in burst))
+
+    def test_an_older_page_with_no_ranked_row_goes_before_the_existing_ranks(self):
+        newer = [{"event_id": n} for n in "wxyz"]
+        records.order(self.source, newer)
+        page = [{"event_id": n} for n in "abcd"]
+        records.order(self.source, page, older=True)
+        self.assertLess(page[-1]["seq"], newer[0]["seq"])
+        self.assertEqual([r["seq"] for r in page], sorted(r["seq"] for r in page))
+
+    def test_contradicting_ranks_are_rebuilt_once_and_the_epoch_moves(self):
+        # the live state of 2026-09-30: an older row ranked after a newer one
+        with records.database() as conn:
+            conn.executemany("INSERT INTO transcript_order VALUES (?,?,?)",
+                             [(self.source, "old", 3072.0), (self.source, "new", -8192.0)])
+        before = records.order(self.source, [])
+        rows = [{"event_id": "old"}, {"event_id": "new"}]
+        epoch = records.order(self.source, rows)
+        self.assertEqual(epoch, before + 1, "the desk must learn its held seq values are stale")
+        self.assertLess(rows[0]["seq"], rows[1]["seq"])
+        again = [{"event_id": "old"}, {"event_id": "new"}]
+        self.assertEqual(records.order(self.source, again), epoch, "consistent ranks are not rebuilt again")
+        self.assertEqual([r["seq"] for r in again], [r["seq"] for r in rows])
+
+    def test_a_repeated_row_is_not_a_contradiction(self):
+        rows = [{"event_id": "a"}, {"event_id": "b"}]
+        epoch = records.order(self.source, rows)
+        self.assertEqual(records.order(self.source, [{"event_id": "a"}, {"event_id": "b"}, {"event_id": "a"}]), epoch)
+
     # ------------------------------------------ F1: durable recovery spool
     def test_sqlite_outage_spools_durably_and_a_read_replays_exactly_once(self):
         source = records.journal_source('org', self.source)

@@ -69,6 +69,37 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(len(seen_rows), 40)
         self.assertFalse(page['has_older'])
         self.assertIsNone(page['before'])
+    def test_older_pages_sort_before_the_window_after_a_burst_larger_than_it(self):
+        # item v3-loading-earlier-agent-messages-fails-couldn-t, reopened
+        # 2026-09-30: a burst of new rows larger than the window left no
+        # ranked row in the next window, which was numbered from 0 -- below
+        # the older rows already ranked. Older pages then sorted AFTER the
+        # visible rows and the desk showed "couldn't load earlier messages".
+        self.write([self.rec(i) for i in range(10)])
+        self.read(8)
+        self.write([self.rec(i) for i in range(10, 30)], mode='a')
+        page = self.read(8)
+        epoch, seen = page['order_epoch'], {r['row_id'] for r in page['messages']}
+        oldest = page['messages'][0]['seq']
+        for _ in range(12):
+            if not page['has_older']:
+                break
+            page = chat_window.read_page(self.org, 'agent', 8, page['before'])
+            if page['order_epoch'] != epoch:  # ranks were rebuilt: the desk reloads its window
+                page = self.read(8)
+                epoch, seen = page['order_epoch'], {r['row_id'] for r in page['messages']}
+                oldest = page['messages'][0]['seq']
+                continue
+            new = [r for r in page['messages'] if r['row_id'] not in seen]
+            self.assertTrue(new, 'an older page must bring rows the desk does not have')
+            self.assertTrue(all(r['seq'] < oldest for r in new),
+                            f'older rows must sort before the visible ones: {[r["seq"] for r in new]} vs {oldest}')
+            self.assertEqual([r['seq'] for r in page['messages']], sorted(r['seq'] for r in page['messages']))
+            seen.update(r['row_id'] for r in new)
+            oldest = page['messages'][0]['seq']
+        else:
+            self.fail('paging did not reach the start')
+        self.assertEqual(len(seen), 30)
     def test_db_only_history_survives_compaction_retirement_and_rehire(self):
         from orgtree import transcript_records
         self.org.node('agent')['model'] = 'luna'

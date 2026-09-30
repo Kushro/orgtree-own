@@ -333,7 +333,7 @@ def read_page(org, nid, want, before):
     rows = [{**sup._public_row(row), 'event_id': sup._stable_event_id(org, nid, row)} for row in selected]
     # The existing boundary provides a stable right-hand ordering anchor.
     anchor = {'event_id': cursor['id']}
-    order_epoch = transcript_records.order(source_key(org, nid), rows + [anchor])
+    order_epoch = transcript_records.order(source_key(org, nid), rows + [anchor], older=True)
     for row in rows:
         row['row_id'] = row['event_id']
     out = {'messages': rows, 'has_older': more, 'windowed': True, 'window_read': stats,
