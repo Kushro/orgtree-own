@@ -21,7 +21,7 @@
 // from `op`/`slug`, because contextmenu.tsx's rule is that a menu item may
 // never do something the object's visible controls cannot — each caller hands
 // over the very callback its own buttons already call. That is also what lets
-// "Open desk" mean the right thing in each place: the card re-centres the
+// "Focus" mean the right thing in each place: the card re-centres the
 // camera on itself, the list row glides to the agent (and brings it to the
 // front of its pile first). A handler a surface cannot offer is simply absent,
 // and its entry disappears — the same way the card's own menu already dropped
@@ -52,7 +52,7 @@ export type RetireKind = 'retire' | 'dissolve' | 'retire-all' | 'cheap-compact-s
 export interface AgentMenuHandlers {
   /** open this agent's desk — the card re-centres the camera on itself, the
    *  Agents List row glides to it. Absent leaves the entry disabled rather
-   *  than dropping it: "Open desk" is the first thing a reader looks for, and
+   *  than dropping it: "Focus" is the first thing a reader looks for, and
    *  a gap where it should be reads as a broken menu. */
   onOpenDesk?: () => void
   onInbox: () => void
@@ -142,13 +142,13 @@ export function agentMenuEntries(node: CanvasNode, h: AgentMenuHandlers,
   // it borrows whatever placement the desk currently has and gives it back.
   const temporary = h.onOpenTemporary
   if (temporary) entries.push({
-    label: 'Open desk temporarily',
+    label: 'Open desk',
     title: `read ${node.id}'s desk in a modal without changing the focused `
       + 'agent, pinning it, or opening a window — closing puts everything back',
     onSelect: () => temporary(),
   })
   entries.push(
-    { label: 'Open desk', onSelect: () => h.onOpenDesk?.(), disabled: !h.onOpenDesk },
+    { label: 'Focus', onSelect: () => h.onOpenDesk?.(), disabled: !h.onOpenDesk },
     { label: 'Open inbox', onSelect: () => h.onInbox() },
   )
   const docket = h.onDocket
@@ -206,8 +206,7 @@ export function agentMenuEntries(node: CanvasNode, h: AgentMenuHandlers,
   // …and the OS window beside the in-app one. "Open desk in a new window" and
   // not the bare "Open in new window" every pinnable panel uses (modalpin.tsx,
   // popout.tsx): there the object IS the surface, here the object is an agent
-  // and what pops out is its desk — and the menu already says "Open desk" for
-  // the camera.
+  // and what pops out is its desk.
   const popout = h.onPopout, showWindow = h.onShowWindow
   if (popout && !s.detached) {
     entries.push({ label: 'Open desk in a new window', onSelect: () => popout() })

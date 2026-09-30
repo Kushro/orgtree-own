@@ -3,7 +3,7 @@
     node apps/desktop/renderer/tests/appchrome-build.mjs <bundle>
     python -B apps/desktop/renderer/tests/tempdesk_height_probe.py <bundle> <outdir> [--check]
 
-Opens "Open desk temporarily" from an agent card's menu (Canvas) and from the
+Opens "Open desk" from an agent card's menu (Canvas) and from the
 agents list's menu (Attention) at a tall viewport, measures the panel against
 the window, and screenshots both plus a pinned desk for comparison. --check
 asserts: the entry is second in the menu, the panel is 85-90% of the window
@@ -70,7 +70,7 @@ try:
         page.locator('[role="menu"]').wait_for(timeout=5000)
         result['cases']['canvas-menu'] = menu_labels(page)
         page.screenshot(path=str(OUT / 'menu-canvas.png'))
-        page.locator('[role="menuitem"]', has_text='Open desk temporarily').first.click()
+        page.locator('[role="menuitem"]', has_text='Open desk').first.click()
         page.locator('.tempdesk-panel').wait_for(timeout=5000)
         page.wait_for_timeout(500)
         result['cases']['canvas'] = page.evaluate(MEASURE)
@@ -95,7 +95,7 @@ try:
         row.click(button='right')
         page.locator('[role="menu"]').wait_for(timeout=5000)
         result['cases']['attention-menu'] = menu_labels(page)
-        page.locator('[role="menuitem"]', has_text='Open desk temporarily').first.click()
+        page.locator('[role="menuitem"]', has_text='Open desk').first.click()
         page.locator('.tempdesk-panel').wait_for(timeout=5000)
         page.wait_for_timeout(500)
         result['cases']['attention'] = page.evaluate(MEASURE)
@@ -115,7 +115,7 @@ if '--check' in sys.argv:
     c = result['cases']
     for view in ('canvas', 'attention'):
         labels = c.get(view + '-menu') or []
-        if len(labels) < 2 or labels[1] != 'Open desk temporarily':
+        if len(labels) < 2 or labels[1] != 'Open desk':
             bad.append((view, 'entry is not second in the menu', labels[:3]))
         m = c.get(view)
         if not m:

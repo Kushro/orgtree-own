@@ -402,8 +402,8 @@ test('§7 picking the entry changes no focus, pins nothing and opens no window',
     })
     await flush(2)
     const entry = [...document.querySelectorAll('button, [role="menuitem"]')]
-      .find((b) => /Open desk temporarily/.test(b.textContent ?? ''))
-    assert.ok(entry, 'the agent menu does not offer "Open desk temporarily"')
+      .find((b) => /Open desk/.test(b.textContent ?? ''))
+    assert.ok(entry, 'the agent menu does not offer "Open desk"')
     await inAct(() => { (entry as HTMLElement).click() })
     await flush(2)
     assert.ok(modal(), 'picking the entry did not open the temporary desk')
@@ -442,8 +442,8 @@ test('§8 the Pin button pins the desk and closes the modal; a pinned agent gets
       })
       await flush(2)
       const entry = [...document.querySelectorAll('button, [role="menuitem"]')]
-        .find((b) => /Open desk temporarily/.test(b.textContent ?? ''))
-      assert.ok(entry, 'the agent menu does not offer "Open desk temporarily"')
+        .find((b) => /Open desk/.test(b.textContent ?? ''))
+      assert.ok(entry, 'the agent menu does not offer "Open desk"')
       await inAct(() => { (entry as HTMLElement).click() })
       await flush(2)
       assert.ok(modal(), 'picking the entry did not open the temporary desk')

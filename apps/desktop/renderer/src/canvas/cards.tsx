@@ -1308,7 +1308,7 @@ interface NodeSquareProps {
   onPin?: () => void
   /** FR-3: the placeholder's click — raise, un-strand and flash the window */
   onShowPin?: () => void
-  /** "Open desk temporarily" — the host opens the modal (tempdesk.tsx). Takes
+  /** "Open desk" (modal) — the host opens the modal (tempdesk.tsx). Takes
    *  the id because the same handler serves this card and the Agents List row,
    *  and the two menus must offer the same entries. */
   onOpenTemporary?: (id: string) => void
