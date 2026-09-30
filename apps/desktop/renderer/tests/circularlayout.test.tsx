@@ -164,7 +164,7 @@ test('a hire-coworker button puts the new agent in the gap between the anchor an
 })
 
 test('the HireSheet coworker pin is taken before the hire op, not after the tree refreshes', () => {
-  const src = readFileSync(new URL('../src/canvas/OrgCanvas.tsx', import.meta.url), 'utf8')
+  const src = readFileSync('src/canvas/OrgCanvas.tsx', 'utf8')
   const at = src.indexOf('onHire={(tier, name, grant, placement)')
   const body = src.slice(at, src.indexOf('</MaybePortal>', at))
   const pinAt = body.indexOf('ringSide(a, placement)'), opAt = body.indexOf("op({ op: 'hire'")
