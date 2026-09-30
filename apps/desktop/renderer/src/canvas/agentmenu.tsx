@@ -135,11 +135,9 @@ export function agentMenuEntries(node: CanvasNode, h: AgentMenuHandlers,
   const canHire = canRetire && !s.piled
   const liveKids = node.children.some((c) => c.state === 'live')
   const entries: MenuEntry[] = []
-  // FIRST OF THIS AGENT'S OWN ENTRIES, so second in the menu as shown, right
-  // under "Copy agent name" (user 2026-09-29: "move that option to the top,
-  // second below the top"). It is the cheapest way to look at a desk: a glance
-  // that changes nothing, closing puts everything back. It is unconditional:
-  // it borrows whatever placement the desk currently has and gives it back.
+  // User 2026-09-30: swap Focus and Open desk. The copy entry still precedes
+  // these, and every other entry keeps its existing position.
+  entries.push({ label: 'Focus', onSelect: () => h.onOpenDesk?.(), disabled: !h.onOpenDesk })
   const temporary = h.onOpenTemporary
   if (temporary) entries.push({
     label: 'Open desk',
@@ -148,7 +146,6 @@ export function agentMenuEntries(node: CanvasNode, h: AgentMenuHandlers,
     onSelect: () => temporary(),
   })
   entries.push(
-    { label: 'Focus', onSelect: () => h.onOpenDesk?.(), disabled: !h.onOpenDesk },
     { label: 'Open inbox', onSelect: () => h.onInbox() },
   )
   const docket = h.onDocket

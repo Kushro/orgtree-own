@@ -206,12 +206,8 @@ uiTest('§1 a row offers the agent\'s own menu — the same entries, in the same
     // ...and the order itself, written down once. The equality above cannot
     // catch a change made to both surfaces at once; this can.
     assert.deepEqual(have, [
-      // `Open desk` is SECOND, directly under the copy entry (user
-      // 2026-09-29: "move that option to the top, second below the top").
-      // Added 2026-09-21 with the temporary-desk modal; the parity assertion
-      // above caught its first version, which reached the row menu and not
-      // the card's.
-      'Copy agent name', 'Open desk', 'Focus', 'Open inbox', 'Open docket',
+      // User 2026-09-30: only Focus and Open desk swap; all other slots stay.
+      'Copy agent name', 'Focus', 'Open desk', 'Open inbox', 'Open docket',
       'Open team docket',
       'Pin desk as a window', 'Open desk in a new window',
       'Hire a subordinate…', 'Retire…', 'Settings',
