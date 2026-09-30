@@ -72,6 +72,18 @@ class LivenessWatchTests(unittest.TestCase):
         self.assertFalse(watch.hung())
         self.assertEqual((watch.failures, watch.last_error), (0, None))
 
+    def test_the_silence_is_counted_from_the_last_answer(self):
+        clock, watch = self.watch([None] + ["timeout"] * 3)
+        clock.now += 10_000
+        self.assertTrue(watch.check_once())
+        for _ in range(3):
+            watch.check_once()
+        clock.now += 299
+        self.assertFalse(watch.hung(), "an engine that answered 299 s ago is not hung")
+        self.assertEqual(watch.silent_for(), 299)
+        clock.now += 1
+        self.assertTrue(watch.hung())
+
 
 class ProbeTests(unittest.TestCase):
     def serve(self, body, delay=0.0):
