@@ -8,9 +8,9 @@ email, so the recheck named no account and that was reported as a change.
 
   §1 each connect probe reads its OWN log (the cause), and the latest log is
      still kept as models-probe.log
-  §2 Antigravity usage: an unnamed recheck is asked again, is never called a
-     change, caches nothing and keeps the earlier confirmed board; a real
-     change is still refused
+  §2 Antigravity usage: an unnamed first read or recheck is asked again, is
+     never called a change, caches nothing and keeps the earlier confirmed
+     board (the header glow too); a real change and a sign-out still drop it
   §3 Codex usage: the same for an unreadable auth.json namespace
   §4 an Antigravity session is not cut into a new lineage (agent restarted
      without its memory) when either side's account is unnamed
@@ -21,6 +21,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -184,6 +185,16 @@ class AntigravityUsageTests(unittest.TestCase):
         signed_out = {**NAMED, "connected": False, "email": None}
         out, _ = self.fetch([signed_out])
         self.assertIn("not signed in", out["error"])
+        self.assertFalse(antigravity_limits.peek()["available"])
+
+    def test_the_header_glow_keeps_the_board_when_another_surface_saw_an_unnamed_status(self):
+        self.fetch([NAMED, NAMED])
+        providers._antigravity_status_cache = (time.time(), dict(UNNAMED))
+        self.assertTrue(antigravity_limits.peek()["available"],
+                        "peek dropped the board on an unnamed status")
+        # control: a signed-out status seen elsewhere still drops it
+        providers._antigravity_status_cache = (
+            time.time(), {**NAMED, "connected": False, "email": None})
         self.assertFalse(antigravity_limits.peek()["available"])
 
 
