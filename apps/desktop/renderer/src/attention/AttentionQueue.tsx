@@ -39,7 +39,8 @@ import { useSubmittedAsks } from '../asksubmitted'
 import { markReadNow, readLocally, useLocalReads } from '../mailread'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useWorkItems } from '../canvas/useworkitems'
-import { dismissWorkItemAttention, fileBase, fileUrl, getInbox, markRead } from '../api'
+import { fileBase, fileUrl, getInbox, markRead } from '../api'
+import { dismissAttention } from '../attndismiss'
 import { sendLinkedReply } from '../events/reply'
 import type { MailEntry, ToastFn, TreePayload, WorkItem } from '../types'
 import { usePolledStatus } from '../canvas/shared'
@@ -227,7 +228,8 @@ export function AttentionQueue({
     if (readOnly || !item.manual_attention) return
     const key = item.slug
     setDismissing((s) => new Set([...s, key]))
-    dismissWorkItemAttention(slug, item.slug, item.manual_attention.set_rev)
+    dismissAttention(slug, { slug: item.slug, manual_attention: item.manual_attention,
+      attention_sources: item.attention_sources })
       .then(() => {
         toast([`dismissed the attention flag on “${item.title}”`])
         refetch()
