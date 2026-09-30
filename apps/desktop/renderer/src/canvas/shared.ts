@@ -1525,6 +1525,13 @@ const RING_PITCH = 190, RING_STEP = 230, RING_FIRST = 260
  *  at least one node pitch" — so nothing overlaps at any size. One pass over
  *  the tree plus one over each ring: O(n). Returns top-left positions like
  *  `layout`, with the eye anchored at its usual world x. */
+/** Sibling ids in the order their neighbour lines join them: the ring deals a
+ *  wedge out in angular order, so ring siblings keep that order; a row reads
+ *  left to right. */
+export function peerOrder(ids: string[], target: Map<string, Pt>, circular: boolean): string[] {
+  return circular ? ids : [...ids].sort((p, q) => (target.get(p)?.x ?? 0) - (target.get(q)?.x ?? 0))
+}
+
 export function layoutCircular(root: CanvasNode, hidden: Map<string, string> = new Map()): Map<string, Pt> {
   const vis = (n: CanvasNode) => !hidden.has(n.id)
   const leaves = new Map<string, number>()

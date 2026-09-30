@@ -27,7 +27,7 @@ import {
 import {
   ago, ALL_TIER_SEAT, anyTierSeat, attentionPip, codexTierOffer, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DOG_H, DOG_W, DRAFT, ease, edgeJumpPlacement, type EJForm, EXTERN, familyOffer, flatten, fmtCredits, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, hireOf, INBOX, INBOX_H, legacyMark, optInLegacyHidden, useShowLegacyModels, jumpTo, layout, NODE_H, NODE_W, noteTierModels, openrouterTierIds, orgPxc, presenceOf, segD, setOpenRouterTiers,
   providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
-  treeParents, USER_W, withDraftTree, withPendingMoves, Z_DESK, Z_MAX, Z_MINI,
+  peerOrder, treeParents, USER_W, withDraftTree, withPendingMoves, Z_DESK, Z_MAX, Z_MINI,
 } from './shared'
 import type {
   CanvasNode, DraftScope, DraftState, FamilyOffer, MailEvent, MailLinkFn,
@@ -3040,10 +3040,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     for (const n of map.values()) {
       if (!n.children || n.children.length < 2 || n.isBearerOf) continue
       const live = n.children.map((c) => c.id).filter((k) => map.get(k)?.state === 'live')
-      // ring: siblings already stand in angular order (that is how the wedge
-      // is dealt out); an x-sort reorders them up and down the ring's sides
-      const sibs = chartLayout === 'circular' ? live
-        : live.sort((p, q) => (target.get(p)?.x ?? 0) - (target.get(q)?.x ?? 0))
+      const sibs = peerOrder(live, target, chartLayout === 'circular')
       for (let i = 0; i + 1 < sibs.length; i++) links.push([sibs[i]!, sibs[i + 1]!])
     }
     return links

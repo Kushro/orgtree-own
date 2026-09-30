@@ -3,7 +3,7 @@
 import { inAct, mountView } from './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chartLayoutOf, layout, NODE_H, NODE_W, setChartLayout, USER } from '../src/canvas/shared'
+import { chartLayoutOf, layout, NODE_H, NODE_W, peerOrder, setChartLayout, USER } from '../src/canvas/shared'
 import type { CanvasNode } from '../src/canvas/shared'
 import { ChartLayoutSetting } from '../src/canvas/accounts'
 
@@ -89,4 +89,25 @@ test('the Display setting shows, saves and follows the stored layout', async (t)
   assert.equal(sel().value, 'circular')
   await inAct(() => { setChartLayout('row') })
   assert.equal(sel().value, 'row', 'another writer flips the mounted select')
+})
+
+test('ring neighbour lines join angular neighbours, not an up-and-down zig-zag', () => {
+  const kids = Array.from({ length: 12 }, (_, i) => node(`k${i}`))
+  const root = eye(kids)
+  const t = layout(root, new Map(), 'circular')
+  const ids = kids.map(k => k.id)
+  const gap = (order: string[]) => {
+    const d: number[] = []
+    for (let i = 0; i + 1 < order.length; i++) {
+      const a = centre(t.get(order[i]!)!), b = centre(t.get(order[i + 1]!)!)
+      d.push(Math.hypot(a.x - b.x, a.y - b.y))
+    }
+    return d
+  }
+  const ring = gap(peerOrder(ids, t, true))
+  assert.ok(Math.max(...ring) - Math.min(...ring) < 1, 'every ring link is one equal step along the ring')
+  const row = gap(peerOrder(ids, t, false))
+  assert.ok(Math.max(...row) > 1.5 * Math.max(...ring), 'the row order (sorted by x) would jump up and down the ring sides')
+  const sorted = peerOrder(['b', 'a'], new Map([['b', { x: 5, y: 0 }], ['a', { x: 1, y: 9 }]]), false)
+  assert.deepEqual(sorted, ['a', 'b'], 'row mode still reads left to right')
 })
