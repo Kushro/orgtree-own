@@ -33,6 +33,7 @@ export interface DesktopPreferences extends NotificationPreferences {
    *  renderer's own per-origin storage does not reliably survive a relaunch,
    *  so the native document keeps this for restore-previous-windows. */
   attentionOrgs?: string[]
+  canvasOrgs?: string[]
 }
 export interface DesktopNotification {
   id: string; title: string; body: string; org: string; agent?: string; item?: string

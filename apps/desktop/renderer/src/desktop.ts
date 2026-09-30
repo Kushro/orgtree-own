@@ -10,6 +10,7 @@ export type NativePreferences = DesktopPreferences & {
   startupMode?: OrgStartupMode
   /** organizations last left in the Attention view (restore-previous-windows) */
   attentionOrgs?: string[]
+  canvasOrgs?: string[]
 }
 
 // ------------------------------------------------------- v3 window identity
