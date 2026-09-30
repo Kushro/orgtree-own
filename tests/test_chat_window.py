@@ -100,6 +100,19 @@ class WindowTests(unittest.TestCase):
         else:
             self.fail('paging did not reach the start')
         self.assertEqual(len(seen), 30)
+    def test_an_older_page_whose_anchor_lost_its_rank_still_sorts_before_the_window(self):
+        from orgtree import transcript_records
+        self.write([self.rec(i) for i in range(30)])
+        window = self.read(8)
+        rows = window['messages']
+        with transcript_records.database() as conn:  # the anchor's identity is no longer ranked
+            conn.execute('DELETE FROM transcript_order WHERE source=? AND event=?',
+                         (chat_window.source_key(self.org, 'agent'), rows[0]['row_id']))
+        page = chat_window.read_page(self.org, 'agent', 8, window['before'])
+        self.assertEqual(page['order_epoch'], window['order_epoch'])
+        self.assertTrue(page['messages'])
+        self.assertLess(max(r['seq'] for r in page['messages']), min(r['seq'] for r in rows[1:]),
+                        'an older page belongs before every still-ranked visible row')
     def test_db_only_history_survives_compaction_retirement_and_rehire(self):
         from orgtree import transcript_records
         self.org.node('agent')['model'] = 'luna'

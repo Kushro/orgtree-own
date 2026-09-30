@@ -224,6 +224,16 @@ class RecordsTests(unittest.TestCase):
         self.assertEqual(records.order(self.source, again), epoch, "consistent ranks are not rebuilt again")
         self.assertEqual([r["seq"] for r in again], [r["seq"] for r in rows])
 
+    def test_two_rows_sharing_a_rank_are_rebuilt(self):
+        # live 2026-09-30: three unrelated rows all held rank -8192
+        with records.database() as conn:
+            conn.executemany("INSERT INTO transcript_order VALUES (?,?,?)",
+                             [(self.source, "first", -8192.0), (self.source, "second", -8192.0)])
+        before = records.order(self.source, [])
+        rows = [{"event_id": "first"}, {"event_id": "second"}]
+        self.assertEqual(records.order(self.source, rows), before + 1)
+        self.assertLess(rows[0]["seq"], rows[1]["seq"])
+
     def test_a_repeated_row_is_not_a_contradiction(self):
         rows = [{"event_id": "a"}, {"event_id": "b"}]
         epoch = records.order(self.source, rows)
