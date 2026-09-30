@@ -45,7 +45,7 @@ import { CreateOrgView, cancelCreationNatively } from './shell/createorg'
 import { OrgViewToggle } from './shell/modetoggle'
 import { onHeldEvent } from './events/heldbus'
 import { setOrgView, useOrgView } from './attention/mode'
-import { useViewRestore } from './attention/viewrestore'
+import { useModeRestore } from './attention/moderestore'
 import { useButtonColours } from './buttoncolours'
 import type { OrgView } from './attention/mode'
 import { AttentionView } from './attention/AttentionView'
@@ -737,7 +737,7 @@ export default function App() {
       .catch(() => {})
     return () => { alive = false; unsubscribe() }
   }, [])
-  useViewRestore(v3 ? slug : null, viewMode, deskPrefs)
+  useModeRestore(v3 ? slug : null, viewMode, deskPrefs, persistAttentionOrgs)
   // G1b — ONE TREE FETCH IN FLIGHT, AND NEVER A LOST ONE.
   //
   // `refreshTree` is called from two unthrottled sources: the 6 s heartbeat
