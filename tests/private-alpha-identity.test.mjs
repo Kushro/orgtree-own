@@ -126,7 +126,8 @@ test('negative control: this branch cannot be released under a stable 2.x versio
   }
   await assert.rejects(produceWindowsRelease({ version: '2.1.13' },
     { root, execFileSync: gitRootOnly, spawnSync: unexpected, fetch: unexpected,
-      runExternal: unexpected, runGit: unexpected }), /does not match package.json version 3\.0\.0-alpha\.0/)
+      runExternal: unexpected, runGit: unexpected }),
+    new RegExp(`does not match package.json version ${VERSION.replaceAll('.', '\\.')}`))
   assert.deepEqual(fs.readdirSync(root).sort(), ['package-lock.json', 'package.json'],
     'the refused release wrote nothing')
 })
