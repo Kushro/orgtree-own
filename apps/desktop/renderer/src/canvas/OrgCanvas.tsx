@@ -1195,6 +1195,10 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       { x: x2 + bulge, y: y2 }, { x: x2, y: y2 }] }
   }
 
+  // launchSpark is memoised once; the wire builders depend on the chart layout,
+  // so it reaches the latest ones through this ref
+  const wireRef = useRef({ treeSeg, peerSeg, circular: chartLayout === 'circular' })
+  wireRef.current = { treeSeg, peerSeg, circular: chartLayout === 'circular' }
   const sparksRef = useRef<{
     id: number; segs: (Seg & { rev: boolean })[]; start: number; segDur: number
   }[]>([])
@@ -1320,14 +1324,13 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       const [g, e] = aud.has(a + '→' + b) ? [a, b] : [b, a]
       segs.push({ ...audSeg(g, e), rev: g !== a })
     } else if (a !== USER && b !== USER && m.get(a)?.parent === m.get(b)?.parent) {
-      const sibs = (m.get(m.get(a)!.parent!)?.children ?? []).map((c) => c.id)
-        .filter((k) => m.has(k) && k !== DRAFT && placed(k))
-        .sort((p, q) => (targetRef.current.get(p)?.x ?? 0) - (targetRef.current.get(q)?.x ?? 0))
+      const sibs = peerOrder((m.get(m.get(a)!.parent!)?.children ?? []).map((c) => c.id)
+        .filter((k) => m.has(k) && k !== DRAFT && placed(k)), targetRef.current, wireRef.current.circular)
       const ia = sibs.indexOf(a), ib = sibs.indexOf(b)
       if (ia < 0 || ib < 0) return
       const step = ia < ib ? 1 : -1
       for (let i = ia; i !== ib; i += step) {
-        segs.push({ ...peerSeg(sibs[Math.min(i, i + step)]!, sibs[Math.max(i, i + step)]!), // nUIA: i walks ia..ib, both valid indices
+        segs.push({ ...wireRef.current.peerSeg(sibs[Math.min(i, i + step)]!, sibs[Math.max(i, i + step)]!), // nUIA: i walks ia..ib, both valid indices
           rev: step < 0 })
       }
     } else {
@@ -1341,10 +1344,10 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       if (!ca.every(placed) || !cb.every(placed)) return
       const inB = new Set(cb)
       const lca = ca.find((k) => inB.has(k))!   // both chains end at USER
-      for (let i = 0; ca[i] !== lca; i++) segs.push({ ...treeSeg(ca[i + 1]!, ca[i]!), rev: true }) // nUIA: lca ∈ ca ⇒ i+1 stays in range
+      for (let i = 0; ca[i] !== lca; i++) segs.push({ ...wireRef.current.treeSeg(ca[i + 1]!, ca[i]!), rev: true }) // nUIA: lca ∈ ca ⇒ i+1 stays in range
       let prev = lca
       for (const k of cb.slice(0, cb.indexOf(lca)).reverse()) {
-        segs.push({ ...treeSeg(prev, k), rev: false })
+        segs.push({ ...wireRef.current.treeSeg(prev, k), rev: false })
         prev = k
       }
     }

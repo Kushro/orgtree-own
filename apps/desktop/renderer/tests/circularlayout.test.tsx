@@ -1,5 +1,6 @@
 // circularlayout.test.ts — org chart circular arrangement (user 2026-09-30).
 // Run:  cd apps/desktop/renderer && node tests/run.mjs circularlayout
+declare const __SRC_DIR__: string
 import { inAct, mountView } from './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -110,4 +111,15 @@ test('ring neighbour lines join angular neighbours, not an up-and-down zig-zag',
   assert.ok(Math.max(...row) > 1.5 * Math.max(...ring), 'the row order (sorted by x) would jump up and down the ring sides')
   const sorted = peerOrder(['b', 'a'], new Map([['b', { x: 5, y: 0 }], ['a', { x: 1, y: 9 }]]), false)
   assert.deepEqual(sorted, ['a', 'b'], 'row mode still reads left to right')
+})
+
+test('the animated sibling route uses the same neighbour order as the drawn lines', async () => {
+  const { readFileSync } = await import('node:fs')
+  const path = await import('node:path')
+  const src = readFileSync(path.join(__SRC_DIR__, 'canvas', 'OrgCanvas.tsx'), 'utf8').split('\r\n').join('\n')
+  const at = src.indexOf('const launchSpark = useCallback')
+  const body = src.slice(at, src.indexOf('}, [])', at))
+  assert.match(body, /peerOrder\(/, 'the route orders siblings through peerOrder')
+  assert.doesNotMatch(body, /\.sort\(/, 'and does not x-sort them itself')
+  assert.match(body, /wireRef\.current\.peerSeg/, 'with the latest wire builders, since launchSpark is memoised once')
 })
