@@ -671,7 +671,10 @@ export function AccountsPanel({ toast, close, initialTab }: {
         </div>
         {p.status.path && <p className='dim mono acct-provider-path'>{p.status.path}</p>}
         {!p.status.installed && downloads[p.id] && <a className='acct-provider-download' href={downloads[p.id]} target='_blank' rel='noopener noreferrer'>Download {p.label}</a>}
-        {p.reason && <p className='dim acct-provider-note'>{p.reason}</p>}
+        {/* user 2026-09-30: an OFF provider's reason is always "turned off in App
+            settings → Providers" — redundant beside its own switch, so it is
+            not shown here. Surfaces outside settings keep that pointer. */}
+        {p.reason && p.user_enabled !== false && <p className='dim acct-provider-note'>{p.reason}</p>}
         {p.tiers.length ? <div className='acct-provider-tiers' aria-label={p.label + ' model tiers'}>
           <div className='acct-provider-tier-title'>Model tiers</div>
           {p.tiers.filter(t => !optInLegacyHidden(t.tier)).map(t => <div className='acct-provider-tier' key={t.tier}>

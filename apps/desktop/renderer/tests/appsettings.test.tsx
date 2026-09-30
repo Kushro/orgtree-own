@@ -245,6 +245,26 @@ test('§2 an installed provider turns off, remains visible, and sends the '
   } finally { await view.unmount(); delete g.fetch }
 })
 
+test('§2b an off provider does not repeat "turned off in App settings → '
+  + 'Providers" beside its own switch; an on provider keeps its reason line',
+  async () => {
+    localStorage.clear()
+    const NOT_SIGNED_IN = { ...provider('openai'),
+      reason: 'not signed in — run `codex login` on this machine' }
+    stubFetch([], { providers: [
+      provider('claude', false), NOT_SIGNED_IN, provider('google', false),
+    ] })
+    const view = await mountSettings()
+    try {
+      const panel = view.el.querySelector<HTMLElement>('#app-settings-panel-providers')!
+      assert.ok(panel.querySelector('input[aria-label="Claude enabled for new agents"]'),
+        'the off provider still shows its switch')
+      assert.doesNotMatch(panel.textContent ?? '', /turned off in App settings/)
+      assert.match(panel.textContent ?? '', /not signed in — run `codex login`/,
+        'a real reason on an enabled provider still shows')
+    } finally { await view.unmount(); delete g.fetch }
+  })
+
 test('§3 provider rows present status and model-tier detail', async () => {
   localStorage.clear()
   stubFetch([])
