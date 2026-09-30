@@ -20088,7 +20088,10 @@ def _antigravity_leg(slug: str, nid: str, org: Org, st: dict[str, Any],
                     cast("dict[str, Any]", o2.node(nid))[
                         "antigravity_conversation"] = cid
                     o2.node(nid).pop("session_unrun", None)
-                    o2.node(nid)["antigravity_account"] = spec["account"]
+                    # an unnamed account is never recorded as the session's
+                    # account: the next named one would read as a change
+                    if spec["account"] not in antigravity_session.UNOBSERVED_ACCOUNTS:
+                        o2.node(nid)["antigravity_account"] = spec["account"]
         if turn.persistent and wp is None:
             wp = warmpool.AntigravityWarmProc(slug, nid, turn, cid, ih, components)
             wp.claimed = True

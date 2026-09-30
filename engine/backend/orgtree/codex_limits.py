@@ -65,7 +65,9 @@ _observed: dict[str, dict[str, float]] = {}
 #: notifications REFUSED because they belonged to another account than the
 #: board (see `observe`); a counter so a test can prove the refusal happened
 #: rather than infer it from an unchanged board
-_refused: dict[str, int] = {"foreign": 0, "race": 0}
+_refused: dict[str, int] = {"foreign": 0, "race": 0, "unconfirmed": 0}
+#: namespaces that name no account: auth.json unreadable, or no id in it
+_UNOBSERVED: Final = frozenset({"unobserved", "codex-account-unobserved"})
 
 
 def account_namespace() -> str:
@@ -324,6 +326,23 @@ def fetch(force: bool = False) -> dict[str, Any]:
             raw = client.request("account/rateLimits/read", {}, FETCH_TIMEOUT)
             _now = time.time()
             acct_after = account_namespace()
+            # ⚠ UNIDENTIFIED IS NOT CHANGED (docket v3-usage-board-says-
+            # account-changed-during-the-u). A namespace read that names no
+            # account (auth.json missing, unreadable or half-written at that
+            # instant) is asked once more. If a side still names nobody, say
+            # so: the answer is served once and not cached, like a real race,
+            # but it no longer claims an account change that nobody made.
+            if acct_before in _UNOBSERVED:
+                acct_before = account_namespace()
+            if acct_after in _UNOBSERVED:
+                acct_after = account_namespace()
+            if acct_before in _UNOBSERVED or acct_after in _UNOBSERVED:
+                with _lock:
+                    _refused["unconfirmed"] += 1
+                data = _normalize(raw, None)
+                data["error"] = ("Codex could not confirm the account around "
+                                 "the usage read; not cached")
+                return _account(dict(data))
             if acct_before != acct_after or acct_before != acct:
                 with _lock:
                     _refused["race"] += 1
@@ -650,4 +669,4 @@ def invalidate() -> None:
         _cache.update(at=0.0, data=None, complete_at=0.0, account=None)
         _snapshots.clear()
         _observed.clear()
-        _refused.update(foreign=0, race=0)
+        _refused.update(foreign=0, race=0, unconfirmed=0)

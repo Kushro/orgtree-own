@@ -655,8 +655,25 @@ def fetch(force: bool = False) -> dict[str, Any]:
                 data["error"] = "Antigravity reported no usage-limit windows"
             after = providers.antigravity_status(force=True)
             after_account = _account_key(after)
+            if after_account is None:
+                # ⚠ UNIDENTIFIED IS NOT CHANGED (docket v3-usage-board-says-
+                # account-changed-during-the-u). A recheck that names no
+                # account (a slow or failed `agy models`) used to be reported
+                # as an account change, though nothing had changed. Ask once
+                # more; if the account still cannot be named, say exactly
+                # that, cache nothing, and leave the earlier confirmed cache
+                # alone: the next read retries.
+                after = providers.antigravity_status(force=True)
+                after_account = _account_key(after)
+            if after_account is None:
+                return _account({
+                    "available": False,
+                    "error": ("Antigravity could not confirm the account after "
+                              "the usage read; the result was not cached and "
+                              "the next read will retry"),
+                }, after)
             after_version = capability.version_key(after.get("version"))
-            if after_account is None or after_account != account:
+            if after_account != account:
                 with _lock:
                     _clear_unlocked()
                 return _account({

@@ -109,6 +109,12 @@ def specification(org: Any, nid: str, *, write: bool = False) -> dict[str, Any]:
             "account": str(row["id"]) if row else sup._cache_antigravity_account_namespace()}
 
 
+#: account namespaces that name NO account (supervisor.
+#: _cache_antigravity_account_namespace): the CLI is signed out, or its probe
+#: did not say who it is. Neither is evidence that the account changed.
+UNOBSERVED_ACCOUNTS = frozenset({"unobserved", "antigravity-oauth-account-unobserved"})
+
+
 #: PG-3r: what a lineage cut writes besides the seat and its bearer row
 #: (mirrors PG-3e-B's `_ASSIGN_SECTIONS` / `_ASSIGN_LOGS` in supervisor.py).
 _LINEAGE_SECTIONS = ("asks", "credit_requests", "scope_requests", "notices", "work_items")
@@ -121,6 +127,13 @@ def prepare_lineage(org: Any, nid: str, spec: dict[str, Any]) -> bool:
     n = org.node(nid)
     previous = n.get("antigravity_account") or sup._cache_antigravity_account_namespace()
     if not spec["conversation_id"] or previous == spec["account"]:
+        return False
+    # ⚠ UNIDENTIFIED IS NOT CHANGED (docket v3-usage-board-says-account-
+    # changed-during-the-u). A connect probe that named no account (a slow or
+    # overlapping `agy models`) gave "antigravity-oauth-account-unobserved",
+    # and that was enough to archive the session and start the agent over.
+    # Only two NAMED accounts that differ are a billing change.
+    if previous in UNOBSERVED_ACCOUNTS or spec["account"] in UNOBSERVED_ACCOUNTS:
         return False
     # PG-3r: the lineage cut is one row transaction over the seat, the
     # `nid@<gen>` bearer row the archive inserts, and what the cut writes

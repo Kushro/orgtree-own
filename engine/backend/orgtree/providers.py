@@ -44,6 +44,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from typing import Any, Final, TypedDict, cast
 
 from . import appsettings, openrouter
@@ -1152,13 +1153,20 @@ def _antigravity_account(exe: str) -> dict[str, Any]:
     out: dict[str, Any] = {"connected": False, "email": None, "kind": None,
                            "models": []}
     log_dir = antigravity_probe_dir()
-    log_path = os.path.join(log_dir, "models-probe.log")
+    # ⚠ ONE LOG FILE PER PROBE (docket v3-usage-board-says-account-changed-
+    # during-the-u). Every caller of `antigravity_status` can probe at once
+    # and nothing serializes them. They all used to share models-probe.log:
+    # the second probe's delete failed (the first CLI held the file) and both
+    # CLIs wrote into it, and in 2 of 10 overlapping pairs (measured
+    # 2026-09-30) the log held no email although `models` listed the
+    # registry. That read as signed-in-but-unidentified, and the usage board
+    # called it an account change. So each probe writes its own file, and the
+    # finished one is moved onto models-probe.log for the tier fallback in
+    # antigravity_limits._account and for anyone reading it by hand.
+    log_path = os.path.join(
+        log_dir, f"models-probe.{os.getpid()}.{uuid.uuid4().hex[:12]}.log")
     try:
         os.makedirs(log_dir, exist_ok=True)
-        try:
-            os.remove(log_path)
-        except OSError:
-            pass
         r = subprocess.run(
             antigravity_argv(exe) + ["--log-file", log_path, "models"],
             capture_output=True, text=True, timeout=45, cwd=log_dir,
@@ -1166,6 +1174,7 @@ def _antigravity_account(exe: str) -> dict[str, Any]:
             creationflags=(subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
                            if os.name == "nt" else 0))
     except (OSError, subprocess.TimeoutExpired):
+        _retire_probe_log(log_path, None)
         return out
     models: list[str] = []
     for line in (r.stdout or "").splitlines():
@@ -1191,7 +1200,24 @@ def _antigravity_account(exe: str) -> dict[str, Any]:
                 out["plan"] = tier
         except OSError:
             pass
+    _retire_probe_log(log_path, os.path.join(log_dir, "models-probe.log"))
     return out
+
+
+def _retire_probe_log(log_path: str, keep_as: str | None) -> None:
+    """Move a finished probe's private log onto `keep_as` (the latest probe
+    wins), or delete it. Best effort: a concurrent reader can hold the target
+    open on Windows, and then this probe's log is simply dropped."""
+    if keep_as is not None:
+        try:
+            os.replace(log_path, keep_as)
+            return
+        except OSError:
+            pass
+    try:
+        os.remove(log_path)
+    except OSError:
+        pass
 
 
 _antigravity_status_cache: tuple[float, dict[str, Any]] | None = None
