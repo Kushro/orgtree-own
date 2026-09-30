@@ -212,12 +212,13 @@ for (const how of ['click-away', 'Escape', 'pick an entry'] as const) {
 test('after Escape with the pointer still over the card, the name stays (hover recomputed, not cleared)', async (t) => {
   const view = await card('mini')
   t.after(() => view.unmount())
-  const real = Element.prototype.matches
+  const EP = W().Element.prototype
+  const real = EP.matches
   let still = false
-  Element.prototype.matches = function (this: Element, sel: string) {
+  EP.matches = function (this: Element, sel: string) {
     return sel === ':hover' && this.classList.contains('sq') ? still : real.call(this, sel)
   }
-  t.after(() => { Element.prototype.matches = real })
+  t.after(() => { EP.matches = real })
   await hover(view.el)
   await rightClick(view.el)
   still = true
