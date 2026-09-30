@@ -363,6 +363,21 @@ export class Engine extends EventEmitter {
     }
   }
 
+  /** Reattach to the boot engine after a deliberate restart of its task —
+   *  `recoverAttached()` WITHOUT its fallback of spawning an engine of our
+   *  own: the whole point of that restart is which rights the background
+   *  engine runs with, so an engine started here instead would silently
+   *  defeat it. */
+  async reattachBackground(options: EngineOptions, deadlineMs: number): Promise<boolean> {
+    if (this.managed) return false
+    this.endpoint = ''
+    this.managed = true
+    if (await this.attachWithRetry(options, deadlineMs)) return true
+    this.managed = false
+    this.state({ state: 'stopped', message: 'Background engine stopped. Reconnecting…' })
+    return false
+  }
+
   /** Can THIS process write byte 0 of the guardian's lock file? The
    *  guardian holds an exclusive byte-range lock there until the WHOLE
    *  engine tree is terminated, so a successful write (of the same byte the

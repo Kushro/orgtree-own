@@ -68,6 +68,9 @@ if (process.isMainFrame && expectedOrigin && location.origin === expectedOrigin 
     revealFile: (path: string) => ipcRenderer.invoke('desktop:reveal-file', path),
     getUpdateStatus: () => ipcRenderer.invoke('desktop:update-status'),
     getUpdateCapability: () => ipcRenderer.invoke('desktop:update-capability'),
+    getRunAsAdministrator: () => ipcRenderer.invoke('desktop:run-as-admin'),
+    setRunAsAdministrator: (enabled: boolean, restartNow: boolean) =>
+      ipcRenderer.invoke('desktop:set-run-as-admin', enabled, restartNow),
     getPopoutState: (name: string) => ipcRenderer.invoke('desktop:popout-state', name),
     minimizePopout: (name: string) => ipcRenderer.invoke('desktop:popout-minimize', name),
     toggleMaximizePopout: (name: string) => ipcRenderer.invoke('desktop:popout-toggle-maximize', name),

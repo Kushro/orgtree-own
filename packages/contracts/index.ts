@@ -76,6 +76,11 @@ export interface UpdateStatus { state: UpdateState; version?: string; percent?: 
  *  restrictive ACL is indistinguishable from here, and the consequence is the
  *  same either way. */
 export interface UpdateCapability { unattendedInstall: boolean; installDirectory: string }
+/** "Run Orgtree as administrator": whether the background engine and its
+ *  agents keep administrator rights. Stored in HKLM (admin-writable only), so
+ *  changing it asks Windows for permission. `available` is false where there
+ *  is no background engine for it to apply to. */
+export interface RunAsAdministratorState { available: boolean; enabled: boolean; reason?: string }
 /** Which provider CLIs an app-driven sign-in exists for (D-231). Native,
  *  not domain/HTTP: the actual child process MUST be spawned by this
  *  (always-interactive) main process, never by the engine, which may be a
@@ -132,6 +137,11 @@ export interface DesktopBridge {
   revealFile?(path: string): Promise<{ ok: boolean; error?: string }>
   getUpdateStatus(): Promise<UpdateStatus>
   getUpdateCapability?(): Promise<UpdateCapability>
+  getRunAsAdministrator?(): Promise<RunAsAdministratorState>
+  /** Change the setting (a UAC prompt). `restartNow` then restarts the
+   *  background engine so the change applies at once; otherwise it applies at
+   *  the engine's next start. */
+  setRunAsAdministrator?(enabled: boolean, restartNow: boolean): Promise<RunAsAdministratorState>
   /** Window commands for ONE popped-out desk or modal, named by the frame name
    *  the renderer opened it under. Separate from the window commands above,
    *  which always act on the main window: a popout's own header must never

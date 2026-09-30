@@ -29,12 +29,13 @@ import { awaitInstallerProof, bounded, checkForUpdatesViaEvents, installerLogTai
 import type { InstallableUpdater, UpdateStatus } from './updater'
 import { buildPermitsUpdateFixture, confineExecutorToLoopback, prepareUpdateFixture, privateFeedDecision, UPDATE_FEED_ENV, UPDATE_FIXTURE_ENV } from './update-fixture'
 import type { PreparedFixture } from './update-fixture'
-import type { DesktopEvent } from '../../../packages/contracts/index'
+import type { DesktopEvent, RunAsAdministratorState } from '../../../packages/contracts/index'
 import { isVisualTheme, isCustomTheme } from '../../../packages/contracts/visual-theme'
 import { asLoginProvider, cancelProviderLogin, getProviderLoginStatus, startProviderLogin, submitProviderLoginCode } from './providerlogin'
 import { popupBounds, trayListHtml, trayNavigationSlug } from './traylist'
 import type { VisualTheme, PresetVisualTheme } from '../../../packages/contracts/visual-theme'
 import { hasInstallerUpgradeRequest } from './installer-upgrade'
+import { readRunAsAdministrator, startBootTask, writeRunAsAdministrator } from './runasadmin'
 import { attachChildProcessFailureHandler, attachRendererFailureHandlers, crashReportDialog, crashReportFolder, CRASH_REPORTER_OPTIONS, RecoveryBudget } from './process-failure'
 import { attachWindowEventLifecycle } from './window-event-lifecycle'
 import { attachWindowLoadRecovery, type WindowLoadRecovery, type WindowLoadStage } from './window-load-recovery'
@@ -173,6 +174,11 @@ else {
    *  while the first is on screen. */
   let quitConfirmed = false, quitPrompting = false
   let installerUpgradeShutdown = false, installerUpgradePending = false, engineReady = false
+  /** A deliberate restart of the background engine's task is in flight
+   *  ("Run Orgtree as administrator" > restart now). The recovery poll stays
+   *  out of it: its fallback would start an engine of this window's own, with
+   *  this window's rights, which is exactly what the restart is choosing. */
+  let backgroundEngineRestart = false
   // Set once an automatic attempt is refused before anything is disturbed, so
   // the 5s poll neither retries it forever nor re-probes the filesystem.
   let updateHold: string | undefined
@@ -1761,6 +1767,40 @@ else {
       // The preload origin is fixed per window; session signing reads LIVE
       // engine values so a recovered attachment's new token keeps working.
       const initialOrigin = engine.origin
+      const runAsAdministratorState = async (): Promise<RunAsAdministratorState> => {
+        if (process.platform !== 'win32') return { available: false, enabled: false, reason: 'Only Windows has this setting.' }
+        const enabled = await readRunAsAdministrator()
+        if (engine.managed) return { available: false, enabled, reason: "Orgtree is not using its background engine, so the engine runs with Orgtree's own rights." }
+        return { available: true, enabled }
+      }
+      handleApp('desktop:run-as-admin', () => runAsAdministratorState())
+      handleApp('desktop:set-run-as-admin', async (enabled: unknown, restartNow: unknown) => {
+        if (typeof enabled !== 'boolean' || typeof restartNow !== 'boolean') throw new Error('Invalid setting')
+        const state = await runAsAdministratorState()
+        if (!state.available) throw new Error(state.reason || 'This setting is not available.')
+        if (backgroundEngineRestart || engineRestartBlocked()) throw new Error('Orgtree is busy restarting or updating; try again in a moment.')
+        // "Restart now" after a change repeats the value already stored; only
+        // a real change needs Windows' permission.
+        if (state.enabled !== enabled) await writeRunAsAdministrator(enabled)
+        if (restartNow) {
+          backgroundEngineRestart = true
+          try {
+            // Graceful and authenticated, with proof of exit - the stop an
+            // update uses - so PostgreSQL shuts down cleanly. Then the task,
+            // which the operator may start without elevation.
+            await engine.stopAttachedForUpdate()
+            await startBootTask()
+            if (!await engine.reattachBackground(engineOptions, 120000)) {
+              throw new Error('The background engine was restarted, but Orgtree has not reconnected to it yet. It keeps trying.')
+            }
+            if (engine.origin === initialOrigin) {
+              for (const record of records.values()) if (!record.window.isDestroyed()) record.window.webContents.reload()
+            }
+            else { await saveWindowLayout(); app.relaunch(); app.quit() }
+          } finally { backgroundEngineRestart = false; rebuildTray() }
+        }
+        return runAsAdministratorState()
+      })
       const register = configureEngineSession(browserSession, () => engine.origin, () => engine.token)
       const openArtifact = (url: string) => {
         const artifactSession = session.fromPartition(`artifact-${randomUUID()}`)
@@ -2089,7 +2129,7 @@ else {
         if (owner) sendTo(owner.id, { type: 'notification-poll', data: null })
         stats = await engine.stats(); rebuildTray()
         void updater.tick().catch(() => {})
-        if (stats === null && !engine.managed) {
+        if (stats === null && !engine.managed && !backgroundEngineRestart) {
           await engine.verifyAttached()
           if (!engine.managed && engine.status.state === 'stopped' && !quitting) {
             const outcome = await engine.recoverAttached(engineOptions)

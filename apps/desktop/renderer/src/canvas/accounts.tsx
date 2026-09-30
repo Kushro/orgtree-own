@@ -1,7 +1,7 @@
 import { AccountRegistrySection, AddAccountDialog, useAccountRegistry } from './accountsregistry'
 import type { AccountProvider } from './accountsregistry'
 import { ThemeSetting } from '../themes'
-import { DesktopSettings } from './desktopsettings'
+import { DesktopSettings, RunAsAdministratorSetting } from './desktopsettings'
 import { QuickStaffSetting } from './quickstaffsetting'
 import { CharterDocumentsSetting, CharterTemplateDirsSetting } from './chartersettings'
 import { MailHubSettings } from './hosthub'
@@ -696,6 +696,7 @@ export function AccountsPanel({ toast, close, initialTab }: {
     </SettingsTabPanel>
     <SettingsTabPanel id="runtime" idBase="app-settings" active={tab === 'runtime'}>
       <DesktopSettings />
+      <RunAsAdministratorSetting />
       <QuickStaffSetting />
       <CharterDocumentsSetting />
       <CharterTemplateDirsSetting />
