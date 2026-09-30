@@ -124,8 +124,13 @@ test('packaging, renderer, tray and windows reference the eye icons', () => {
   assert.match(main, /app\.isPackaged\s*\?\s*path\.join\(process\.resourcesPath, 'runtime-icons'\)/)
   assert.match(main, /path\.join\(app\.getAppPath\(\), 'apps\/desktop\/assets'\)/)
   assert.match(main, /const iconPath = path\.join\(assetsPath, 'orgtree-eye\.ico'\)/)
-  assert.match(main, /if \(process\.platform === 'win32'\) configureTaskbar\(window, process\.execPath, iconPath, identity\.appUserModelId, identity\.displayName\)/,
+  assert.match(main, /if \(process\.platform === 'win32'\) configureTaskbar\(window, process\.execPath, file, identity\.appUserModelId, identity\.displayName\)/,
     'every Windows channel must set explicit shell icon metadata')
+  assert.match(main, /app\.on\('browser-window-created', \(_event, window\) => \{[\s\S]*?applyWindowIcon\(window\)/,
+    'every window gets the themed icon when it is created')
+  assert.match(main, /for \(const window of BrowserWindow\.getAllWindows\(\)\) applyWindowIcon\(window, image\)/,
+    'a theme change re-applies the same icon the tray got to every open window')
+  assert.match(main, /const runtimeIconFile = /, 'the taskbar is handed a real .ico file for the themed eye')
   assert.match(main, /new Tray\(runtimeIcon\(\)\)/)
   assert.match(main, /engine\.status\.state === 'ready'/)
   assert.match(main, /let effectiveTheme: VisualTheme \| undefined/)
@@ -142,4 +147,17 @@ test('packaging, renderer, tray and windows reference the eye icons', () => {
   assert.deepEqual(pkg.build.extraResources.at(-1), { from: 'apps/desktop/assets', to: 'runtime-icons', filter: ['orgtree-eye*.ico'] })
   assert.match(read('apps/desktop/renderer/index.html'), /href="\/assets\/orgtree-eye\.svg"/)
   assert.match(read('tools/build.mjs'), /copyFileSync\('apps\/desktop\/assets\/orgtree-eye\.svg', 'dist\/renderer\/assets\/orgtree-eye\.svg'\)/)
+})
+
+test('a recoloured eye can be wrapped as a one-image .ico for the taskbar', async () => {
+  const { icoFromPng } = await import('./../apps/desktop/main/taskbar.ts')
+  const png = Buffer.from([1, 2, 3, 4, 5])
+  const ico = icoFromPng(png, 256, 256)
+  assert.equal(ico.readUInt16LE(2), 1, 'icon type')
+  assert.equal(ico.readUInt16LE(4), 1, 'one image')
+  assert.equal(ico[6], 0, '256 is stored as 0')
+  assert.equal(ico.readUInt32LE(14), 5)
+  assert.equal(ico.readUInt32LE(18), 22)
+  assert.deepEqual([...ico.subarray(22)], [...png])
+  assert.equal(icoFromPng(png, 32, 16)[7], 16)
 })

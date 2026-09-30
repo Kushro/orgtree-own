@@ -9,7 +9,7 @@ import { Engine, ENGINE_REFUSED, INSTALLER_UPGRADE_STOP_BUDGET_MS, QUIT_STOP_BUD
 import { postgresLaunchOptions, writeEnginePaths } from './postgres-runtime'
 import { Preferences } from './preferences'
 import { WindowPlacement } from './window-placement'
-import { configureTaskbar } from './taskbar'
+import { configureTaskbar, icoFromPng } from './taskbar'
 import { allowPrereleaseUpdates, desktopIdentity, readBuildChannel } from './build-channel'
 import { closeAction, CONVERSION_FAILED, HARNESS_LINKS, resolveDataRoot, validateDataRoot } from './policy'
 import { ConversionWindow } from './conversion-window'
@@ -292,14 +292,14 @@ else {
     // leaving it to Electron's default identity makes Windows show the generic
     // Electron/document icon. Keep release and development shell metadata on
     // the same path while retaining their distinct identities.
-    if (process.platform === 'win32') configureTaskbar(window, process.execPath, iconPath, identity.appUserModelId, identity.displayName)
+    applyWindowIcon(window)
   })
   const trayIconNames: Record<PresetVisualTheme | 'grey', string> = {
     grey: 'orgtree-eye-tray-grey.ico', orgtree: 'orgtree-eye-tray-orgtree.ico',
     claude: 'orgtree-eye-tray-claude.ico', codex: 'orgtree-eye-tray-codex.ico',
     antigravity: 'orgtree-eye-tray-antigravity.ico', openrouter: 'orgtree-eye-tray-openrouter.ico',
   }
-  const runtimeIcon = () => {
+  const runtimeIconChoice = () => {
     const current = preferences?.get() as { visualTheme?: VisualTheme; visualThemeExplicit?: boolean } | undefined
     // A neutral/unset preference follows the renderer's resolved provider.
     // Older alpha settings with a non-neutral value remain explicit.
@@ -307,16 +307,45 @@ else {
       (current.visualTheme !== 'orgtree' || current.visualThemeExplicit === true)
       ? current.visualTheme : undefined
     const theme = effectiveTheme ?? explicit ?? 'claude'
-    const name = engine.status.state === 'ready' ? trayIconNames[isCustomTheme(theme) ? 'orgtree' : theme] : trayIconNames.grey
-    const image = nativeImage.createFromPath(path.join(assetsPath, name))
-    if (engine.status.state === 'ready' && isCustomTheme(theme) && !image.isEmpty()) {
+    const ready = engine.status.state === 'ready'
+    const name = ready ? trayIconNames[isCustomTheme(theme) ? 'orgtree' : theme] : trayIconNames.grey
+    return { file: path.join(assetsPath, name), custom: ready && isCustomTheme(theme) ? theme.slice(7) : undefined }
+  }
+  const runtimeIcon = () => {
+    const { file, custom } = runtimeIconChoice()
+    const image = nativeImage.createFromPath(file)
+    if (custom && !image.isEmpty()) {
       const bitmap = image.toBitmap(), size = image.getSize()
-      const color = theme.slice(7), rgb = [1,3,5].map(i => parseInt(color.slice(i,i+2),16))
+      const rgb = [1,3,5].map(i => parseInt(custom.slice(i,i+2),16))
       // Electron bitmap bytes are BGRA. Keep the eye silhouette's alpha.
       for (let i=0;i<bitmap.length;i+=4) { bitmap[i]=rgb[2]!; bitmap[i+1]=rgb[1]!; bitmap[i+2]=rgb[0]! }
       return nativeImage.createFromBitmap(bitmap,size)
     }
     return image.isEmpty() ? nativeImage.createFromPath(iconPath) : image
+  }
+  // Explorer's taskbar button reads this file path, not the window icon, so the
+  // same themed eye the tray shows has to exist as a real .ico for it.
+  const runtimeIconFile = (image: Electron.NativeImage) => {
+    const { file, custom } = runtimeIconChoice()
+    if (!custom || image.isEmpty()) return fs.existsSync(file) ? file : iconPath
+    try {
+      const out = path.join(app.getPath('userData'), 'taskbar-icons', `eye-${custom.slice(1)}.ico`)
+      if (!fs.existsSync(out)) {
+        fs.mkdirSync(path.dirname(out), { recursive: true })
+        const { width, height } = image.getSize()
+        fs.writeFileSync(out, icoFromPng(image.toPNG(), width, height))
+      }
+      return out
+    } catch { return iconPath }
+  }
+  const appliedIcon = new WeakMap<BrowserWindow, string>()
+  const applyWindowIcon = (window: BrowserWindow, image = runtimeIcon()) => {
+    if (window.isDestroyed()) return
+    const file = runtimeIconFile(image)
+    if (appliedIcon.get(window) === file) return   // the tray refresh runs often; touch the shell only on a change
+    appliedIcon.set(window, file)
+    window.setIcon(image)
+    if (process.platform === 'win32') configureTaskbar(window, process.execPath, file, identity.appUserModelId, identity.displayName)
   }
   const notifications = new NativeNotifications(
     data => new Notification({ title: data.title, body: data.body }),
@@ -558,7 +587,7 @@ else {
   const rebuildTray = () => {
     const image = runtimeIcon()
     tray?.setImage(image)
-    for (const window of BrowserWindow.getAllWindows()) window.setIcon(image)
+    for (const window of BrowserWindow.getAllWindows()) applyWindowIcon(window, image)
     if (!tray) return
     if (trayMenuOpen) { refreshTrayUpdates(); refreshTrayEngine(); return }
     const prefs = preferences.get()
