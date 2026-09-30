@@ -83,7 +83,7 @@ export function resolveDataRoot(requested: string | undefined, userData: string,
   if (!identity.ownDataRootOnly) return requested ?? own
   if (requested === undefined) return own
   if (path.isAbsolute(requested) && canonicalRoot(resolveExisting(path.resolve(requested))) === canonicalRoot(resolveExisting(path.resolve(own)))) return own
-  throw new Error(`Orgtree 3.0.0-alpha.0 uses only its own data folder, ${own}. ORGTREE_V2_DATA is set to ${JSON.stringify(requested)}, which is a different folder. Unset ORGTREE_V2_DATA and start it again.`)
+  throw new Error(`This Orgtree 3.0 alpha uses only its own data folder, ${own}. ORGTREE_V2_DATA is set to ${JSON.stringify(requested)}, which is a different folder. Unset ORGTREE_V2_DATA and start it again.`)
 }
 
 /** A checkpoint is evidence only for this child/root and only once. Arbitrary

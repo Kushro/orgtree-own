@@ -1,5 +1,5 @@
 // Shared by the private packager and every public release entry point.
-export const PRIVATE_ALPHA_VERSION = '3.0.0-alpha.0'
+export const PRIVATE_ALPHA_VERSION = '3.0.0-alpha.6'
 export const PRIVATE_ALPHA_CHANNEL = 'private-alpha'
 // The first v3 build REPLACES 2.1.12 (user decision 2026-09-28): it installs
 // over it as the normal app. These are 2.1.12's own values (tag v2.1.12,
@@ -29,7 +29,7 @@ export function privateAlphaConfig(build) {
   const drift = [['appId', config.appId, RELEASE_IDENTITY.appId], ['productName', config.productName, RELEASE_IDENTITY.productName],
     ...Object.entries(RELEASE_IDENTITY.nsis).map(([k, v]) => [`nsis.${k}`, config.nsis?.[k], v])]
     .filter(([, got, want]) => got !== want)
-  if (drift.length) throw new Error(`The 3.0.0-alpha.0 build must install over 2.1.12 with its identity; package.json build differs: ${drift.map(([k, got, want]) => `${k}=${JSON.stringify(got)} (want ${JSON.stringify(want)})`).join(', ')}`)
+  if (drift.length) throw new Error(`The ${PRIVATE_ALPHA_VERSION} build must install over 2.1.12 with its identity; package.json build differs: ${drift.map(([k, got, want]) => `${k}=${JSON.stringify(got)} (want ${JSON.stringify(want)})`).join(', ')}`)
   config.extends = null
   config.directories = { ...config.directories, output: PRIVATE_ALPHA_OUTPUT }
   config.artifactName = PRIVATE_ALPHA_INSTALLER

@@ -210,7 +210,7 @@ async function dataRootFixture(t) {
   return { dir, resolveDataRoot, v3, release, dev, userData, own, oldAlpha }
 }
 
-const refusedByV3 = /3\.0\.0-alpha\.0 uses only its own data folder/
+const refusedByV3 = /Orgtree 3\.0 alpha uses only its own data folder/
 
 test('the 3.0.0-alpha.0 build uses 2.1.12\'s data folder, and only that, whatever ORGTREE_V2_DATA says', async t => {
   const f = await dataRootFixture(t)

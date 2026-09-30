@@ -85,7 +85,7 @@ export function assertLocalPath(root, file, { directory = false, absent = false 
 export function assertPrivateBuildInfo(info, { root, candidate }) {
   if (info?.version !== VERSION || info.channel !== CHANNEL || info.commit !== candidate
       || info.dirty !== false || info.updateFixture !== undefined || !SHA.test(candidate)) {
-    fail('Private build identity must be exactly 3.0.0-alpha.0 at the clean approved candidate, without update fixtures')
+    fail(`Private build identity must be exactly ${VERSION} at the clean approved candidate, without update fixtures`)
   }
   if (!info.sha256 || !info.sha256['dist/main/index.cjs']) fail('Private build has no main bundle hash')
   for (const [relative, digest] of Object.entries(info.sha256)) {
@@ -164,7 +164,7 @@ export function readInstallerVersion(installer) {
 }
 
 export function verifyPrivateInstaller({ root, installer, resources, info, engineHashes = {}, productVersion = readInstallerVersion }) {
-  if (productVersion(installer) !== VERSION) fail('Installer ProductVersion is not exactly 3.0.0-alpha.0')
+  if (productVersion(installer) !== VERSION) fail(`Installer ProductVersion is not exactly ${VERSION}`)
   const workDir = path.join(root, OUTPUT, 'payload-check')
   assertLocalPath(root, workDir, { directory: true, absent: true })
   if (fs.existsSync(workDir)) fail('Installer extraction directory must be fresh')
