@@ -156,6 +156,36 @@ class AntigravityUsageTests(unittest.TestCase):
         self.assertIn("changed during", out["error"])
         self.assertFalse(antigravity_limits.peek()["available"])
 
+    # review-sol (8f28c87): the FIRST read can be unnamed too
+
+    def test_an_unnamed_first_read_is_not_called_a_change_and_reads_nothing(self):
+        self.fetch([NAMED, NAMED])
+        with mock.patch.object(providers, "antigravity_status",
+                               side_effect=[UNNAMED, UNNAMED]) as st, \
+             mock.patch.object(antigravity_limits, "_run_status", return_value=None), \
+             mock.patch.object(antigravity_limits, "_run_usage", return_value=USAGE) as usage:
+            out = antigravity_limits.fetch(force=True)
+        self.assertEqual(st.call_count, 2, "the unnamed first read was not asked a second time")
+        self.assertEqual(usage.call_count, 0, "usage was read for an account nobody could name")
+        self.assertFalse(out["available"])
+        self.assertNotIn("changed", out["error"])
+        self.assertIn("could not confirm which account", out["error"])
+        self.assertTrue(antigravity_limits.peek()["available"],
+                        "an unnamed read dropped the confirmed board")
+
+    def test_an_unnamed_first_read_named_on_retry_reads_normally(self):
+        out, calls = self.fetch([UNNAMED, NAMED, NAMED])
+        self.assertEqual(calls, 3)
+        self.assertTrue(out["available"])
+        self.assertNotIn("error", out)
+
+    def test_signing_out_still_drops_the_board(self):
+        self.fetch([NAMED, NAMED])
+        signed_out = {**NAMED, "connected": False, "email": None}
+        out, _ = self.fetch([signed_out])
+        self.assertIn("not signed in", out["error"])
+        self.assertFalse(antigravity_limits.peek()["available"])
+
 
 # ── §3 Codex usage ──────────────────────────────────────────────────────────
 
@@ -185,15 +215,41 @@ class CodexUsageTests(unittest.TestCase):
         codex_limits.invalidate()
         self.addCleanup(codex_limits.invalidate)
 
-    def fetch(self, namespaces):
-        status = {"installed": True, "connected": True, "kind": "chatgpt"}
+    def fetch(self, namespaces, connected=True):
+        status = {"installed": True, "connected": connected, "kind": "chatgpt"}
         with mock.patch.object(codex_limits, "account_namespace", side_effect=namespaces) as ns, \
              mock.patch.object(providers, "codex_status", return_value=status), \
              mock.patch.object(providers, "codex_path", return_value=("codex.exe", "test")), \
              mock.patch.object(providers, "codex_argv", side_effect=lambda exe: [exe]), \
-             mock.patch.object(codexrun, "AppServerClient", FakeClient):
+             mock.patch.object(codexrun, "AppServerClient", side_effect=FakeClient) as client:
             out = codex_limits.fetch(force=True)
+        self.clients = client.call_count
         return out, ns.call_count
+
+    # review-sol (8f28c87): the FIRST read can be unnamed too
+
+    def test_an_unnamed_first_read_is_not_called_a_change_and_reads_nothing(self):
+        self.fetch([A, A, A])
+        self.assertTrue(self.cached())
+        out, calls = self.fetch(["unobserved", "unobserved"])
+        self.assertEqual(calls, 2, "the unnamed first read was not asked a second time")
+        self.assertEqual(self.clients, 0, "usage was read for an account nobody could name")
+        self.assertNotIn("changed", out["error"])
+        self.assertIn("could not confirm which account", out["error"])
+        self.assertTrue(self.cached(), "an unnamed read dropped the confirmed board")
+        self.assertEqual(codex_limits._refused["race"], 0)
+
+    def test_an_unnamed_first_read_named_on_retry_reads_normally(self):
+        out, calls = self.fetch(["unobserved", A, A, A])
+        self.assertEqual(calls, 4)
+        self.assertNotIn("error", out)
+        self.assertTrue(self.cached())
+
+    def test_signing_out_still_drops_the_board(self):
+        self.fetch([A, A, A])
+        out, _ = self.fetch(["unobserved", "unobserved"], connected=False)
+        self.assertIn("not signed in", out["error"])
+        self.assertFalse(self.cached())
 
     def cached(self):
         return codex_limits._cache.get("data") is not None

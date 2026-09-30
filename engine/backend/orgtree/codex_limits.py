@@ -254,13 +254,22 @@ def fetch(force: bool = False) -> dict[str, Any]:
     """Read Codex usage, cached for the modal's polling cadence."""
     now = time.time()
     acct = account_namespace()
+    if acct in _UNOBSERVED:
+        # ⚠ UNIDENTIFIED IS NOT CHANGED, on the first read too (review-sol,
+        # docket v3-usage-board-says-account-changed-during-the-u): ask once
+        # more. If it still names nobody, the cached board is kept and the
+        # status check below decides (signed out, or signed in unnamed).
+        acct = account_namespace()
+    unnamed = acct in _UNOBSERVED
     hit: dict[str, Any] | None = None
     with _lock:
         cached = _cache.get("data")
         # a cached board describes ONE login: if the account moved under it
         # (`codex login` as someone else), it is not this account's evidence
         # and is dropped rather than served
-        if cached is not None and _cache.get("account") not in (None, acct):
+        if unnamed:
+            cached = None
+        elif cached is not None and _cache.get("account") not in (None, acct):
             _cache.update(at=0.0, data=None, complete_at=0.0, account=None)
             _snapshots.clear()
             _observed.clear()
@@ -274,6 +283,13 @@ def fetch(force: bool = False) -> dict[str, Any]:
     if hit is not None:
         return _account(hit)
     status = providers.codex_status()
+    if unnamed and not (status.get("installed") and status.get("connected")):
+        # nobody named because nobody is signed in: the board is not this
+        # machine's evidence any more, exactly as before
+        with _lock:
+            _cache.update(at=0.0, data=None, complete_at=0.0, account=None)
+            _snapshots.clear()
+            _observed.clear()
     if not status.get("installed"):
         return _account({"available": False, "error": "Codex CLI is not installed"})
     if not status.get("connected"):
@@ -294,6 +310,14 @@ def fetch(force: bool = False) -> dict[str, Any]:
         return _account({
             "available": False,
             "error": "subscription usage is not available for an API-key login",
+        })
+    if unnamed:
+        with _lock:
+            _refused["unconfirmed"] += 1
+        return _account({
+            "available": False,
+            "error": ("Codex could not confirm which account is signed in; "
+                      "usage was not read"),
         })
 
     with _fetch_lock:

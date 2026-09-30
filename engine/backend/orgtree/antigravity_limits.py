@@ -320,10 +320,15 @@ def _reconcile_unlocked(account: str | None,
 def _reconcile_observed_status_unlocked() -> dict[str, Any] | None:
     """Reconcile with status another surface observed, without a CLI call."""
     status = providers.antigravity_cached_status()
-    if status is not None:
+    if status is not None and not (_account_key(status) is None and _unnamed(status)):
         _reconcile_unlocked(_account_key(status),
                             capability.version_key(status.get("version")))
     return status
+
+
+def _unnamed(status: dict[str, Any]) -> bool:
+    """Signed in, but the probe did not say as whom: no evidence either way."""
+    return bool(status.get("installed") and status.get("connected"))
 
 
 def _read_only(result: dict[str, Any]) -> bool:
@@ -585,9 +590,17 @@ def fetch(force: bool = False) -> dict[str, Any]:
     now = time.time()
     status = providers.antigravity_status(force=force)
     account = _account_key(status)
+    if account is None and _unnamed(status):
+        # ⚠ UNIDENTIFIED IS NOT CHANGED, on the first read too (review-sol,
+        # docket v3-usage-board-says-account-changed-during-the-u). Ask once
+        # more before anything is attributed, dropped or read.
+        status = providers.antigravity_status(force=True)
+        account = _account_key(status)
     version = capability.version_key(status.get("version"))
+    unnamed = account is None and _unnamed(status)
     with _lock:
-        cached = _reconcile_unlocked(account, version)
+        # an unnamed read is no evidence against the cached board's account
+        cached = None if unnamed else _reconcile_unlocked(account, version)
 
     if not status.get("installed"):
         with _lock:
@@ -612,6 +625,12 @@ def fetch(force: bool = False) -> dict[str, Any]:
             "error": ("Antigravity usage requires CLI 1.2.0 or newer; "
                       "update the Antigravity CLI to enable it"),
             "capability": _capability(status, supported=False),
+        }, status)
+    if unnamed:
+        return _account({
+            "available": False,
+            "error": ("Antigravity could not confirm which account is signed "
+                      "in; usage was not read and the next read will retry"),
         }, status)
     if (not force and isinstance(cached, dict)
             and now - float(_cache.get("at") or 0) <= CACHE_TTL):
