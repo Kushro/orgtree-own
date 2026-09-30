@@ -261,6 +261,27 @@ print(json.dumps(result))
 """
 
 
+# Run elevated: make this process's default owner argv[2], then create argv[1]
+# with Python's mkdir(0o700) and a file inside it, as an engine would.
+MAKE_OWNED = r"""
+import ctypes, os, sys
+from ctypes import wintypes as w
+k32, adv = ctypes.WinDLL("kernel32", use_last_error=True), ctypes.WinDLL("advapi32", use_last_error=True)
+k32.GetCurrentProcess.restype = w.HANDLE
+adv.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+adv.ConvertStringSidToSidW.argtypes = [w.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+adv.SetTokenInformation.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD]
+token, sid = w.HANDLE(), ctypes.c_void_p()
+assert adv.OpenProcessToken(k32.GetCurrentProcess(), 0x0080 | 0x0008, ctypes.byref(token))  # ADJUST_DEFAULT|QUERY
+assert adv.ConvertStringSidToSidW(sys.argv[2], ctypes.byref(sid))
+owner = ctypes.c_void_p(sid.value)
+assert adv.SetTokenInformation(token, 4, ctypes.byref(owner), ctypes.sizeof(owner)), ctypes.get_last_error()  # TokenOwner
+os.mkdir(sys.argv[1], 0o700)
+with open(os.path.join(sys.argv[1], "creds.json"), "w", encoding="utf-8") as f:
+    f.write("secret")
+"""
+
+
 class AccessRepairTests(unittest.TestCase):
     """A folder an ELEVATED engine left owned by Administrators under a
     protected SYSTEM/Administrators/OWNER RIGHTS DACL (Python's mkdir 0o700;
@@ -277,26 +298,42 @@ class AccessRepairTests(unittest.TestCase):
         base.mkdir()
         self.addCleanup(shutil.rmtree, base, True)
         self.root = base / "data"
-        self.locked = self.root / "profiles" / "claude-locked"
-        self.locked.mkdir(parents=True)
+        profiles = self.root / "profiles"
+        profiles.mkdir(parents=True)
         (self.root / "orgs").mkdir()
-        (self.locked / "creds.json").write_text("secret", encoding="utf-8")
 
-        def icacls(*args):
-            subprocess.run(["icacls", *args], check=True, capture_output=True,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-        # The shape the live folder has: owner Administrators, protected DACL
-        # of SYSTEM, Administrators and OWNER RIGHTS; the file inside inherits.
-        icacls(str(self.locked), "/inheritance:r", "/grant:r",
-               "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-3-4:(OI)(CI)F")
-        icacls(str(self.locked / "creds.json"), "/reset")
-        icacls(str(self.locked), "/setowner", "*S-1-5-32-544", "/T")
+        user = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], check=True, capture_output=True,
+                              text=True, creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip().split(",")[-1].strip('"')
+        # The live shape, made the way the product made it: Python's
+        # mkdir(0o700) under a token whose DEFAULT OWNER is Administrators
+        # gives owner BA and D:P(OW)(SY)(BA) (review-astra's shell does this).
+        # The owner cannot be changed afterwards instead: Windows drops the
+        # OWNER RIGHTS entry whenever a folder's owner changes (measured), so
+        # a helper sets its own TokenOwner first, then creates the folder.
+        self.locked = profiles / "claude-locked"      # an elevated engine's: owner Administrators
+        self.owned = profiles / "claude-owned"        # the user's own: OWNER RIGHTS lets it in
+        for folder, owner in ((self.locked, "S-1-5-32-544"), (self.owned, user)):
+            subprocess.run(child_python.argv("-c", MAKE_OWNED, str(folder), owner), check=True,
+                           capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(self.allowed(folder), {"S-1-3-4", "S-1-5-18", "S-1-5-32-544"},
+                             "the fixture must carry the live D:P(OW)(SY)(BA)")
 
-    def probe(self):
+    def allowed(self, folder):
+        """The SIDs the folder's own DACL allows (what the repair script reads)."""
+        script = ("(Get-Item -LiteralPath $env:ORGTREE_FOLDER).GetAccessControl('Access')"
+                  ".GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |"
+                  " ForEach-Object { $_.IdentityReference.Value }")
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                             check=True, capture_output=True, text=True,
+                             env={**os.environ, "ORGTREE_FOLDER": str(folder)},
+                             creationflags=subprocess.CREATE_NO_WINDOW).stdout
+        return set(out.split())
+
+    def probe(self, folder=None):
         env = {**os.environ}
         env.pop("PYTHONPATH", None)
         child = unelevated.popen_unelevated(
-            child_python.argv("-c", PROBE, str(self.locked)), env=env,
+            child_python.argv("-c", PROBE, str(folder or self.locked)), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         out, err = child.communicate(timeout=60)
@@ -313,6 +350,12 @@ class AccessRepairTests(unittest.TestCase):
     def test_the_repair_touches_nothing_else_and_is_idempotent(self):
         self.assertEqual(unelevated.repair_user_access(self.root), [str(self.locked)])
         self.assertEqual(unelevated.repair_user_access(self.root), [])
+
+    def test_a_folder_the_user_owns_under_owner_rights_is_left_alone(self):
+        self.assertEqual(self.probe(self.owned), {"read": "secret", "write": "ok"},
+                         "OWNER RIGHTS already lets the user's own folder in")
+        self.assertNotIn(str(self.owned), unelevated.repair_user_access(self.root))
+        self.assertEqual(self.allowed(self.owned), {"S-1-3-4", "S-1-5-18", "S-1-5-32-544"})
 
 
 if __name__ == "__main__":
