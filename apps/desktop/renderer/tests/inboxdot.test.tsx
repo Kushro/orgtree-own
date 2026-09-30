@@ -1,11 +1,12 @@
 // inboxdot.test.tsx — the header mail dot and the user inbox must agree
 // (docket v3-mail-icon-says-a-request-is-waiting-on-the-us, 2026-09-30).
 //
-// The case that caused the report: the dot counts requests waiting in EVERY
+// The case that caused the report: the dot counted requests waiting in EVERY
 // organization, and the one lighting it was an unread terminal failure in
-// ANOTHER organization, which the open organization's inbox never listed. So
-// the user saw a lit dot and an inbox with nothing unread. The inbox now lists
-// those rows under "waiting in other organizations".
+// ANOTHER organization (maurdekye-works), which the open organization's inbox
+// never lists. So the user saw a lit dot and an inbox with nothing unread.
+// The user's ruling (08:37Z): the dot is ORG-SCOPED — a request in another
+// organization must not light the dot in this organization's window.
 //
 // The user's addendum (08:08Z): after answering a question the icon still
 // glowed. A submitted card must leave the dot, the count and the glow on the
@@ -32,6 +33,8 @@ if (!W.HTMLElement.prototype.scrollIntoView) W.HTMLElement.prototype.scrollIntoV
 const stopped: DesktopNotice = { id: '0703f9d8', org: 'maurdekye-works', kind: 'terminal-failure',
   source_id: '47adf8b1', agent: '@system', title: 'Message from @system',
   body: 'coordinator-opus (coordinator-opus) stopped: its turn failed in a way orgtree does not retry.\nIt is idle now.' }
+// the same kind of row in the window's own organization
+const stoppedHere: DesktopNotice = { ...stopped, id: '1a2b3c4d', org: 'orgtree', source_id: '5e6f7a8b' }
 const question: DesktopNotice = { id: 'e257', org: 'orgtree', kind: 'question', source_id: 'qa',
   agent: 'coordinator-opus', title: 'Question from coordinator-opus', body: 'Which colour?' }
 
@@ -43,7 +46,7 @@ const TREE = {
 
 const reset = () => { localStorage.clear(); resetPending(); resetSubmittedAsks() }
 
-async function inbox(t: TestContext, onOpenOrg?: (org: string) => void) {
+async function inbox(t: TestContext) {
   const oldFetch = globalThis.fetch
   globalThis.fetch = (async (url: string) => {
     const path = String(url)
@@ -55,64 +58,46 @@ async function inbox(t: TestContext, onOpenOrg?: (org: string) => void) {
   }) as typeof fetch
   const view = await mountView(
     <CurrentOrg.Provider value="orgtree">
-      <InboxPanel slug="orgtree" tree={TREE} toast={() => {}} close={() => {}} jumpTo={null}
-        onOpenOrg={onOpenOrg} />
+      <InboxPanel slug="orgtree" tree={TREE} toast={() => {}} close={() => {}} jumpTo={null} />
     </CurrentOrg.Provider>, el => el)
   t.after(async () => { await view.unmount(); globalThis.fetch = oldFetch })
   await inAct(async () => { await flush(10) })
   return view
 }
 
-test('the aggregate carries each waiting row in full, docket rows excluded', () => {
+test('the aggregate keeps each waiting row with its organization, docket rows excluded', () => {
   const all = summarizePending([stopped, question,
     { id: 'w-1', org: 'unity', kind: 'work-attention', item: 't', title: 'T', body: 'b' }])
   assert.equal(all.mail, 2)
-  assert.deepEqual(all.waiting.map((w) => [w.org, w.kind, w.agent, w.source]), [
-    ['maurdekye-works', 'terminal-failure', '@system', '47adf8b1'],
-    ['orgtree', 'question', 'coordinator-opus', 'qa'],
+  assert.deepEqual(all.waiting.map((w) => [w.org, w.kind, w.source]), [
+    ['maurdekye-works', 'terminal-failure', '47adf8b1'],
+    ['orgtree', 'question', 'qa'],
   ])
 })
 
-test('the reported case: a stopped agent in another organization is listed in the inbox', async (t) => {
-  reset()
-  t.after(reset)
-  const opened: string[] = []
-  const view = await inbox(t, (org) => opened.push(org))
-  const bell = await mountView(<AskBell tree={TREE} onOpen={() => {}} />, el => el)
-  t.after(() => bell.unmount())
-  assert.equal(!!view.el.querySelector('.other-org-waiting'), false, 'nothing waiting, no section')
-  assert.equal(!!bell.el.querySelector('.attn-dot'), false)
-
-  await inAct(async () => { publishPending(summarizePending([stopped])) })
-  assert.ok(bell.el.querySelector('.attn-dot'), 'the dot is lit')
-  const section = view.el.querySelector('.other-org-waiting')
-  assert.ok(section, 'and the inbox shows what lights it')
-  const text = section!.textContent ?? ''
-  assert.match(text, /waiting in other organizations/)
-  assert.match(text, /maurdekye-works/)
-  assert.match(text, /agent stopped/)
-  assert.match(text, /coordinator-opus \(coordinator-opus\) stopped/)
-  assert.doesNotMatch(text, /It is idle now/, 'one line per row; the rest is in the tooltip')
-  const open = [...section!.querySelectorAll('button')].find((b) => /open maurdekye-works/.test(b.textContent ?? ''))
-  assert.ok(open, 'the row opens its organization')
-  await inAct(async () => { open!.click() })
-  assert.deepEqual(opened, ['maurdekye-works'])
-
-  await inAct(async () => { publishPending(summarizePending([])) })
-  assert.equal(!!view.el.querySelector('.other-org-waiting'), false, 'read or resolved, it leaves the inbox')
-  assert.equal(!!bell.el.querySelector('.attn-dot'), false, 'together with the dot')
-})
-
-test('the open organization\'s own rows are not repeated in the section', async (t) => {
+test('the reported case: a stopped agent in another organization does not light this window\'s dot', async (t) => {
   reset()
   t.after(reset)
   const view = await inbox(t)
-  await inAct(async () => { publishPending(summarizePending([question])) })
-  assert.equal(!!view.el.querySelector('.other-org-waiting'), false,
-    'its question is the inbox\'s own question row')
+  const bell = await mountView(<AskBell tree={TREE} onOpen={() => {}} />, el => el)
+  t.after(() => bell.unmount())
+  const button = () => bell.el.querySelector<HTMLElement>('button.ask-bell')!
+
+  await inAct(async () => { publishPending(summarizePending([stopped])) })
+  assert.equal(!!bell.el.querySelector('.attn-dot'), false, 'maurdekye-works does not light orgtree')
+  assert.doesNotMatch(button().title, /still waiting/, 'nor claims it in words')
+  assert.doesNotMatch(view.el.textContent ?? '', /maurdekye-works/,
+    'and the inbox lists only its own organization')
+
+  await inAct(async () => { publishPending(summarizePending([stopped, stoppedHere])) })
+  assert.ok(bell.el.querySelector('.attn-dot'), 'the same kind of row in THIS organization does')
+  assert.match(button().title, /1 request\(s\) still waiting on you/, 'counting only this organization')
+
+  await inAct(async () => { publishPending(summarizePending([stopped])) })
+  assert.equal(!!bell.el.querySelector('.attn-dot'), false, 'and clears when only the other remains')
 })
 
-test('a window that only mirrors the aggregate lists the same rows (e.g. after a restart)', async (t) => {
+test('a window that only mirrors the aggregate scopes it the same way (e.g. after a restart)', async (t) => {
   reset()
   t.after(reset)
   const stopOwner = startPendingMirror(true)
@@ -121,8 +106,14 @@ test('a window that only mirrors the aggregate lists the same rows (e.g. after a
   resetPending()
   const stopFollower = startPendingMirror(false)
   t.after(stopFollower)
-  const view = await inbox(t)
-  assert.match(view.el.querySelector('.other-org-waiting')?.textContent ?? '', /maurdekye-works/)
+  const bell = await mountView(<AskBell tree={TREE} onOpen={() => {}} />, el => el)
+  t.after(() => bell.unmount())
+  assert.equal(!!bell.el.querySelector('.attn-dot'), false, 'another organization\'s row, mirrored: no dot')
+
+  const stopOwner2 = startPendingMirror(true)
+  await inAct(async () => { publishPending(summarizePending([stoppedHere])) })
+  stopOwner2()
+  assert.ok(bell.el.querySelector('.attn-dot'), 'its own organization\'s row, mirrored: dot')
 })
 
 test('an answered question leaves the dot on the click, and a failed submit brings it back', async (t) => {

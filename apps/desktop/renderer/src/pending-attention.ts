@@ -45,15 +45,16 @@ export interface PendingAttention {
    *  may rely on. Same rows, same order, no extra fetch and no parallel
    *  state. */
   items: { org: string; id: string }[]
-  /** THE ROWS BEHIND `mail`, SAID IN FULL, so the user inbox can list them.
+  /** THE ROWS BEHIND `mail`, with what the inbox dot needs to judge them.
    *
-   *  The dot counts every organization and the inbox lists only the open one,
-   *  so an unread terminal failure in another organization lit the dot with
-   *  nothing visible behind it (docket v3-mail-icon-says-a-request-is-waiting-
-   *  on-the-us, 2026-09-30). The inbox lists the other organizations' rows out
-   *  of THIS field, so the dot and the inbox read the same pass and cannot
-   *  disagree. Sorted like `items`; `work-attention` rows are the docket's and
-   *  are not here. */
+   *  The dot is ORG-SCOPED (user 2026-09-30): a window's dot counts only its
+   *  own organization's rows, because its inbox lists only that organization
+   *  and a request elsewhere lit a dot with nothing visible behind it (docket
+   *  v3-mail-icon-says-a-request-is-waiting-on-the-us). A question the user
+   *  has just submitted stops counting on the click (`waitingNow`). The
+   *  taskbar pulse still reads `items`, which it routes per organization.
+   *  Sorted like `items`; `work-attention` rows are the docket's and are not
+   *  here. */
   waiting: WaitingRow[]
 }
 
@@ -61,9 +62,6 @@ export interface WaitingRow {
   org: string
   id: string
   kind: Exclude<PendingKind, 'work-attention'>
-  title: string
-  body: string
-  agent: string | null
   /** a question's ask id, so a card the user just submitted stops counting */
   source: string | null
 }
@@ -87,7 +85,6 @@ export function summarizePending(rows: readonly DesktopNotification[]): PendingA
     else {
       mail++
       waiting.push({ org: row.org, id: row.id, kind: row.kind as WaitingRow['kind'],
-        title: row.title, body: row.body.slice(0, 400), agent: row.agent ?? null,
         source: row.source_id ?? null })
     }
   }
@@ -173,8 +170,7 @@ const parsePending = (raw: string | null): PendingAttention | null => {
       ? waiting.filter((w): w is WaitingRow => {
         if (!w || typeof w !== 'object') return false
         const r = w as unknown as Record<string, unknown>
-        return str(r.org) && str(r.id) && str(r.kind) && str(r.title) && str(r.body)
-          && (r.agent === null || str(r.agent)) && (r.source === null || str(r.source))
+        return str(r.org) && str(r.id) && str(r.kind) && (r.source === null || str(r.source))
       })
       : []
     return { mail, docket, ids: ids as string[], items: rows, waiting: waits }

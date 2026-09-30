@@ -17,6 +17,8 @@ const urgent: DesktopNotice = { id: 'm-1', org: 'resonite', kind: 'urgent-mail',
   title: 'Message from coordinator', body: 'Now please' }
 const attention: DesktopNotice = { id: 'w-1', org: 'unity', kind: 'work-attention', item: 'a-ticket',
   title: 'A ticket', body: 'Confirm the edge case' }
+// the same urgent mail, in the bell's own organization
+const urgentHere: DesktopNotice = { ...urgent, id: 'm-2', org: 'orgtree' }
 const noise: DesktopNotice[] = [
   { id: 'd-1', org: 'orgtree', kind: 'document', source_id: 'd1', title: 'A document', body: 'Presented' },
   { id: 'r-1', org: 'orgtree', kind: 'routine', source_id: 'r1', title: 'Message', body: 'text' },
@@ -113,7 +115,8 @@ test('muting a notification category does not pretend the work stopped waiting',
 
 test('the dot appears on the toolbar icon that corresponds to the waiting request', async () => {
   resetPending()
-  const tree = { asks_open: 0, urgent_unread: 0, user_inbox_count: 0 }
+  // the bell's window is `orgtree`: its dot counts that organization only
+  const tree = { slug: 'orgtree', asks_open: 0, urgent_unread: 0, user_inbox_count: 0 }
   const bell = await mountView(<AskBell tree={tree} onOpen={() => {}} />, el => el)
   const docket = await mountView(<DocketToolbarButton summary={{ attention: 0, active: 0 }} />, el => el)
   try {
@@ -133,8 +136,12 @@ test('the dot appears on the toolbar icon that corresponds to the waiting reques
     assert.equal(docket.el.querySelector('.docket-bell .attn-dot'), null,
       'the ticket resolving clears its dot and only its dot')
 
-    await inAct(async () => { publishPending(summarizePending([urgent])) })
+    await inAct(async () => { publishPending(summarizePending([urgentHere])) })
     assert.ok(bell.el.querySelector('.ask-bell .attn-dot'), 'urgent mail keeps the inbox dot standing')
+
+    await inAct(async () => { publishPending(summarizePending([urgent])) })
+    assert.equal(!!bell.el.querySelector('.ask-bell .attn-dot'), false,
+      'urgent mail in ANOTHER organization does not light this window (user 2026-09-30)')
 
     await inAct(async () => { publishPending(summarizePending([])) })
     assert.equal(bell.el.querySelector('.ask-bell .attn-dot'), null, 'both clear when none remain')
@@ -146,7 +153,8 @@ test('the dot is not the only way to learn it is there', async () => {
   // The mark is aria-hidden, so whatever it claims has to be claimed in words
   // as well, or the indicator exists for sighted users only.
   resetPending()
-  const tree = { asks_open: 0, urgent_unread: 0, user_inbox_count: 0 }
+  // the bell's window is `orgtree`: its dot counts that organization only
+  const tree = { slug: 'orgtree', asks_open: 0, urgent_unread: 0, user_inbox_count: 0 }
   const bell = await mountView(<AskBell tree={tree} onOpen={() => {}} />, el => el)
   const docket = await mountView(<DocketToolbarButton summary={{ attention: 0, active: 0 }} />, el => el)
   const title = (v: typeof bell, sel: string) => v.el.querySelector<HTMLElement>(sel)!.title
@@ -154,8 +162,9 @@ test('the dot is not the only way to learn it is there', async () => {
     assert.equal(title(bell, 'button.ask-bell'), 'your inbox')
     assert.equal(title(docket, 'button.docket-bell'), 'work docket')
 
-    await inAct(async () => { publishPending(summarizePending([question, urgent, attention])) })
-    assert.match(title(bell, 'button.ask-bell'), /2 request\(s\) still waiting on you/)
+    await inAct(async () => { publishPending(summarizePending([question, urgentHere, urgent, attention])) })
+    assert.match(title(bell, 'button.ask-bell'), /2 request\(s\) still waiting on you/,
+      'this organization\'s two, not the other organization\'s third')
     assert.match(title(docket, 'button.docket-bell'), /1 ticket\(s\) still waiting on you/)
 
     await inAct(async () => { publishPending(summarizePending([])) })
