@@ -274,8 +274,46 @@ class StallWatchTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8", errors="replace")
         self.assertIn("did not answer its liveness route within 0.4s", text)
         self.assertIn("stuck_in_the_probe", text, "the dump names the frame that was stuck")
-        self.assertIn("most recent call first", text)
+        self.assertIn("--- thread MainThread", text, "threads are named")
+        self.assertIn("most recent call last", text)
         self.assertIn("the probe answered after", text)
+
+    def test_stall_dumps_while_other_threads_start_and_end(self):
+        # Review F1 (f295f57): faulthandler's timed dump walks other threads
+        # without the GIL and segfaulted a process like this one. The dump
+        # must survive thread churn, and every stall must leave its stacks.
+        # Run in a child so a crash is a failed exit code, not a dead runner.
+        script = (
+            "import threading, time, tempfile\n"
+            "from pathlib import Path\n"
+            "from engine import stall_watch\n"
+            "stop = threading.Event()\n"
+            "def churn():\n"
+            "    while not stop.is_set():\n"
+            "        t = threading.Thread(target=lambda: time.sleep(0.001)); t.start(); t.join()\n"
+            "workers = [threading.Thread(target=churn, name=f'churn-{i}') for i in range(6)]\n"
+            "[w.start() for w in workers]\n"
+            "def slow():\n"
+            "    time.sleep(0.03)\n"
+            "    return True\n"
+            "with tempfile.TemporaryDirectory() as temp:\n"
+            "    path = Path(temp) / stall_watch.DUMP\n"
+            "    watch = stall_watch.StallWatch(path, slow, stall_after=0.01)\n"
+            "    results = [watch.check_once() for _ in range(150)]\n"
+            "    stop.set(); [w.join() for w in workers]\n"
+            "    watch._stream.close()\n"
+            "    text = path.read_text(encoding='utf-8')\n"
+            "print('stalls', results.count(False), 'dumps', text.count('every thread'),\n"
+            "      'churn', text.count('--- thread churn-'))\n"
+        )
+        done = subprocess.run(child_python.argv("-c", script, checkout=REPO), cwd=REPO,
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+        words = done.stdout.split()
+        stalls, dumps, churn = int(words[1]), int(words[3]), int(words[5])
+        self.assertEqual(stalls, 150, "every probe outlived the stall deadline")
+        self.assertEqual(dumps, 150, "every stall wrote its dump")
+        self.assertGreaterEqual(churn, 150 * 6, "the busy threads are in every dump")
 
     def test_a_big_dump_file_rotates_at_start(self):
         with tempfile.TemporaryDirectory() as temp:
