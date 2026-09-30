@@ -46,16 +46,21 @@ USAGE = {
 
 # ── §1 the probe log ─────────────────────────────────────────────────────────
 
-# A stand-in `agy`: it opens its --log-file, writes the account line AT ONCE,
-# then keeps working a moment and prints the registry. A second probe that
-# shares the file truncates it after the first one's account line is written,
-# which is the loss measured with the real CLI.
+# A stand-in `agy`, shaped like the real one: it opens its --log-file, writes
+# start-up lines, names the account about a second later, works another second
+# and prints the registry. A second probe started 1.5 s later on the SAME file
+# truncates it after the first one's account line, and names its own account
+# only after the first has exited and read the file: the first reads no email.
+# That is the loss measured with the real CLI (2 of 10 overlapping pairs).
 FAKE_AGY = textwrap.dedent('''
     import sys, time
     args = sys.argv[1:]
     log = args[args.index("--log-file") + 1]
     who = open(sys.argv[0] + ".who", encoding="utf-8").read().strip()
     with open(log, "w", encoding="utf-8") as f:
+        f.write("I0930 server.go:1574] Starting language server process\\n")
+        f.flush()
+        time.sleep(1.0)
         f.write("I0930 server_oauth.go:197] OAuth: authenticated successfully as "
                 + who + "\\n")
         f.flush()
@@ -89,7 +94,7 @@ class ProbeLogTests(unittest.TestCase):
         a = threading.Thread(target=probe, args=("a",))
         b = threading.Thread(target=probe, args=("b",))
         a.start()
-        threading.Event().wait(0.4)
+        threading.Event().wait(1.5)
         b.start()
         a.join(30)
         b.join(30)
@@ -245,6 +250,11 @@ class LineageTests(unittest.TestCase):
     def test_an_unnamed_stored_account_does_not_cut_the_session(self):
         for before in sorted(antigravity_session.UNOBSERVED_ACCOUNTS):
             self.assertFalse(self.cut(before, self.NAMED_NS), before)
+
+    def test_a_move_to_an_api_key_row_still_cuts_it_even_from_an_unnamed_account(self):
+        for before in sorted(antigravity_session.UNOBSERVED_ACCOUNTS):
+            with self.assertRaisesRegex(AssertionError, "the session was cut"):
+                self.cut(before, "google-key-row-1")
 
     def test_two_different_named_accounts_still_cut_it(self):
         with self.assertRaisesRegex(AssertionError, "the session was cut"):

@@ -115,6 +115,12 @@ def specification(org: Any, nid: str, *, write: bool = False) -> dict[str, Any]:
 UNOBSERVED_ACCOUNTS = frozenset({"unobserved", "antigravity-oauth-account-unobserved"})
 
 
+def _subscription_route(account: str) -> bool:
+    """The Google-account (OAuth) route, named or not, as opposed to an
+    API-key row id."""
+    return account in UNOBSERVED_ACCOUNTS or account.startswith("antigravity-oauth:")
+
+
 #: PG-3r: what a lineage cut writes besides the seat and its bearer row
 #: (mirrors PG-3e-B's `_ASSIGN_SECTIONS` / `_ASSIGN_LOGS` in supervisor.py).
 _LINEAGE_SECTIONS = ("asks", "credit_requests", "scope_requests", "notices", "work_items")
@@ -132,8 +138,9 @@ def prepare_lineage(org: Any, nid: str, spec: dict[str, Any]) -> bool:
     # changed-during-the-u). A connect probe that named no account (a slow or
     # overlapping `agy models`) gave "antigravity-oauth-account-unobserved",
     # and that was enough to archive the session and start the agent over.
-    # Only two NAMED accounts that differ are a billing change.
-    if previous in UNOBSERVED_ACCOUNTS or spec["account"] in UNOBSERVED_ACCOUNTS:
+    # Only two NAMED accounts that differ are a billing change. A move between
+    # the subscription and an API-key row is a real route change either way.
+    if (previous in UNOBSERVED_ACCOUNTS or spec["account"] in UNOBSERVED_ACCOUNTS)             and _subscription_route(previous) and _subscription_route(spec["account"]):
         return False
     # PG-3r: the lineage cut is one row transaction over the seat, the
     # `nid@<gen>` bearer row the archive inserts, and what the cut writes
