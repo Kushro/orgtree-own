@@ -66,7 +66,8 @@ test('zoomed Canvas desk transfers to Attention and returns on the same mounted 
   await advance(1800)
   const canvasDesk = () => view.el.querySelector('[data-first-use-agent="alpha"].desk')
   assert.equal(!!canvasDesk()?.querySelector('.cc-composer'), true, 'positive control: Canvas really zoomed into alpha')
-  const camera = (view.el.querySelector('.space') as HTMLElement).style.transform
+  const spaceTransform = () => (view.el.querySelector('.space') as HTMLElement).style.transform
+  const camera = spaceTransform()
   await inAct(() => setOrgView(slug, 'attention'))
   await inAct(() => flush(4))
   assert.equal(view.el.querySelector('.attn-desk .cc-head-left')?.textContent?.includes('alpha'), true,
@@ -85,10 +86,10 @@ test('zoomed Canvas desk transfers to Attention and returns on the same mounted 
   await inAct(() => focus.click())
   await inAct(() => flush(4))
   assert.equal(!!view.el.querySelector('.attn-desk .cc-composer'), true)
-  assert.equal((view.el.querySelector('.space') as HTMLElement).style.transform, camera,
+  assert.equal(spaceTransform(), camera,
     'Focus leaves the hidden camera alone')
   await inAct(() => setOrgView(slug, 'canvas'))
   await inAct(() => flush(4))
   assert.equal(!!canvasDesk()?.querySelector('.cc-composer'), true, 'Canvas gets the existing desk back')
-  assert.equal((view.el.querySelector('.space') as HTMLElement).style.transform, camera, 'camera retained across both switches')
+  assert.equal(spaceTransform(), camera, 'camera retained across both switches')
 })
