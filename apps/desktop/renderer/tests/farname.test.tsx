@@ -208,3 +208,21 @@ for (const how of ['click-away', 'Escape', 'pick an entry'] as const) {
     assert.ok(await gone(view.el), 'and leaving hides it')
   })
 }
+
+test('after Escape with the pointer still over the card, the name stays (hover recomputed, not cleared)', async (t) => {
+  const view = await card('mini')
+  t.after(() => view.unmount())
+  const real = Element.prototype.matches
+  let still = false
+  Element.prototype.matches = function (this: Element, sel: string) {
+    return sel === ':hover' && this.classList.contains('sq') ? still : real.call(this, sel)
+  }
+  t.after(() => { Element.prototype.matches = real })
+  await hover(view.el)
+  await rightClick(view.el)
+  still = true
+  await inAct(async () => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+  await inAct(() => new Promise((r) => setTimeout(r, 400)))
+  assert.equal(document.querySelector('.ctxmenu'), null)
+  assert.ok(view.el.querySelector('.sq-far-ghost')?.classList.contains('on'), 'pointer still over: label kept')
+})

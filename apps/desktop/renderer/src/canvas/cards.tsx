@@ -1623,7 +1623,25 @@ export function NodeSquare({ node, pos, lod, focused: deskOpen, dragging, isDrop
   // under the pointer (or the focus), so no pointerleave / blur ever arrives: drop both on close.
   // A pointer still over the card puts it back with its next move.
   const nameMenuOpen = menu.isOpen
-  useEffect(() => { if (!nameMenuOpen) { setNameHover(false); setNameFocus(false) } }, [nameMenuOpen])
+  const nameMenuWas = useRef(false)
+  useEffect(() => {
+    const was = nameMenuWas.current
+    nameMenuWas.current = nameMenuOpen
+    if (nameMenuOpen || !was) return
+    // recompute from the DOM, not blindly off: a pointer still over the card
+    // (Escape) or focus restored onto it (keyboard) keeps its label. The
+    // browser re-evaluates :hover a beat after the menu leaves, so ask twice.
+    const settle = () => {
+      const el = cardRef.current
+      let over = false
+      try { over = !!el?.matches(':hover') } catch { /* no :hover support */ }
+      setNameHover(over)
+      setNameFocus(!!el && el.contains(el.ownerDocument.activeElement))
+    }
+    settle()
+    const t = setTimeout(settle, 120)
+    return () => clearTimeout(t)
+  }, [nameMenuOpen])
   // FAR-ZOOM NAME ABOVE EVERY CARD. At mini the hovered card is deliberately
   // painted UNDER its neighbours (styles.css `.sq.mini:hover { z-index: 0 }`, so
   // the hire token never steals a neighbour's press), and the name reveal lives
