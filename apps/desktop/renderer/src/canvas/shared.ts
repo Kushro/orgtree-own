@@ -1434,7 +1434,85 @@ export function flatten(root: CanvasNode, _seats: Record<string, number>): Map<s
   return map
 }
 
-export function layout(root: CanvasNode, hidden: Map<string, string> = new Map()): Map<string, Pt> {
+/* --------------------------- org-chart arrangement (user 2026-09-30)
+   ROW is the default and today's tree; CIRCULAR puts the eye at the centre and
+   each depth on a further outward ring. App-wide like the toggles above:
+   one localStorage value, every org and window. Unset reads as row. */
+export type ChartLayout = 'row' | 'circular'
+export const CHART_LAYOUT_KEY = 'orgtree-chart-layout'
+export const chartLayoutOf = (): ChartLayout => {
+  try { return localStorage.getItem(CHART_LAYOUT_KEY) === 'circular' ? 'circular' : 'row' } catch { return 'row' }
+}
+const chartLayoutSubs = new Set<() => void>()
+export const setChartLayout = (mode: ChartLayout): void => {
+  try { localStorage.setItem(CHART_LAYOUT_KEY, mode) } catch { /* private mode */ }
+  for (const fn of [...chartLayoutSubs]) fn()
+}
+const subscribeChartLayout = (fn: () => void): (() => void) => {
+  chartLayoutSubs.add(fn)
+  window.addEventListener('storage', fn)
+  return () => { chartLayoutSubs.delete(fn); window.removeEventListener('storage', fn) }
+}
+export const useChartLayout = (): ChartLayout =>
+  useSyncExternalStore(subscribeChartLayout, chartLayoutOf)
+
+// 186px chord clears two 124px squares even on the diagonal (124·√2 ≈ 175)
+const RING_PITCH = 190, RING_STEP = 230, RING_FIRST = 260
+
+/** Radial tree. Each node's team takes the slice of its parent's wedge sized
+ *  by leaf count; a depth is one ring whose radius is the larger of "one step
+ *  outside the ring before" and "the chord to its nearest angular neighbour is
+ *  at least one node pitch" — so nothing overlaps at any size. One pass over
+ *  the tree plus one over each ring: O(n). Returns top-left positions like
+ *  `layout`, with the eye anchored at its usual world x. */
+export function layoutCircular(root: CanvasNode, hidden: Map<string, string> = new Map()): Map<string, Pt> {
+  const vis = (n: CanvasNode) => !hidden.has(n.id)
+  const leaves = new Map<string, number>()
+  const count = (n: CanvasNode): number => {
+    let t = 0, any = false
+    for (const c of n.children) if (vis(c)) { any = true; t += count(c) }
+    if (!any) t = 1
+    leaves.set(n.id, t)
+    return t
+  }
+  count(root)
+  const START = -Math.PI / 2
+  const rings: number[][] = []
+  const placed: { id: string; angle: number; depth: number }[] = []
+  const walk = (n: CanvasNode, a0: number, a1: number, depth: number) => {
+    const angle = (a0 + a1) / 2
+    placed.push({ id: n.id, angle, depth })
+    if (depth > 0) (rings[depth] ??= []).push(angle)
+    const total = leaves.get(n.id)!
+    let a = a0
+    for (const c of n.children) {
+      if (!vis(c)) continue
+      const span = (a1 - a0) * leaves.get(c.id)! / total
+      walk(c, a, a + span, depth + 1)
+      a += span
+    }
+  }
+  walk(root, START, START + 2 * Math.PI, 0)
+  const radius: number[] = [0]
+  for (let d = 1; d < rings.length; d++) {
+    const r = rings[d] ?? []
+    let gap = Math.PI * 2
+    for (let i = 1; i < r.length; i++) gap = Math.min(gap, r[i]! - r[i - 1]!)
+    if (r.length > 1) gap = Math.min(gap, r[0]! + 2 * Math.PI - r[r.length - 1]!)
+    const need = r.length > 1 ? RING_PITCH / (2 * Math.sin(Math.min(gap, Math.PI) / 2)) : 0
+    radius[d] = Math.max(need, d === 1 ? RING_FIRST : radius[d - 1]! + RING_STEP)
+  }
+  const out = new Map<string, Pt>()
+  const cx = EYE_ANCHOR_X + NODE_W / 2
+  for (const p of placed) {
+    const r = radius[p.depth]!
+    out.set(p.id, { x: cx + r * Math.cos(p.angle) - NODE_W / 2, y: r * Math.sin(p.angle) - NODE_H / 2 })
+  }
+  return out
+}
+
+export function layout(root: CanvasNode, hidden: Map<string, string> = new Map(), mode: ChartLayout = 'row'): Map<string, Pt> {
+  if (mode === 'circular') return layoutCircular(root, hidden)
   // `hidden`: piled-away retirees (and their subtrees) — they take NO layout
   // space; their positions are assigned afterwards onto their pile's front
   const pos = new Map<string, Pt>()

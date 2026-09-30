@@ -26,7 +26,7 @@ import {
 } from '../icons'
 import {
   ago, ALL_TIER_SEAT, anyTierSeat, attentionPip, codexTierOffer, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DOG_H, DOG_W, DRAFT, ease, edgeJumpPlacement, type EJForm, EXTERN, familyOffer, flatten, fmtCredits, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, hireOf, INBOX, INBOX_H, legacyMark, useShowLegacyModels, jumpTo, layout, NODE_H, NODE_W, noteTierModels, openrouterTierIds, orgPxc, presenceOf, segD, setOpenRouterTiers,
-  providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
+  providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
   USER_W, withDraftTree, Z_DESK, Z_MAX, Z_MINI,
 } from './shared'
 import type {
@@ -863,8 +863,9 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     return out
   }, [vroot, piles])
   const hidden = hiddenMemo
+  const chartLayout = useChartLayout()
   const target = useMemo(() => {
-    const t = layout(vroot, hidden)
+    const t = layout(vroot, hidden, chartLayout)
     for (const n of map.values()) {           // live bearers float ABOVE the successor
       // (clear of its card — overlap made both unclickable)
       if (n.isBearerOf && t.has(n.isBearerOf)) {
@@ -924,11 +925,11 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       if (fp) t.set(hid, { x: fp.x, y: fp.y })
     }
     return t
-  }, [vroot, map, tree.org_inbox?.visible, hidden])
+  }, [vroot, map, tree.org_inbox?.visible, hidden, chartLayout])
   const [view, setView] = useState<View>(() => {
     // fit-on-load: center the initial tree in a typical viewport (re-fit against
     // the REAL viewport once mounted — see the mount effect below)
-    const t = layout(withDraftTree(tree, null))
+    const t = layout(withDraftTree(tree, null), new Map(), chartLayoutOf())
     let maxX = 0, maxY = 0
     for (const p of t.values()) { maxX = Math.max(maxX, p.x + 300); maxY = Math.max(maxY, p.y + 260) }
     const z = Math.min(1.3, Math.max(0.35, Math.min(1300 / maxX, 780 / maxY)))
@@ -1105,6 +1106,16 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   const treeSeg = (parentId: string, childId: string): Seg => {
     const a = posOf(parentId)!, b = posOf(childId)!
     const ps = sizeOf(parentId)
+    if (chartLayout === 'circular') {
+      // radial wire: centre to centre, trimmed to each card's edge
+      const ca = { x: a.x + ps.w / 2, y: a.y + ps.h / 2 }, cb = { x: b.x + NODE_W / 2, y: b.y + NODE_H / 2 }
+      const dx = cb.x - ca.x, dy = cb.y - ca.y
+      const edge = (hw: number, hh: number) =>
+        Math.min(hw / (Math.abs(dx) || 1e-9), hh / (Math.abs(dy) || 1e-9))
+      const ta = edge(ps.w / 2, ps.h / 2), tb = edge(NODE_W / 2, NODE_H / 2)
+      return { kind: 'l', pts: [
+        { x: ca.x + dx * ta, y: ca.y + dy * ta }, { x: cb.x - dx * tb, y: cb.y - dy * tb }] }
+    }
     return { kind: 'c', pts: [
       { x: a.x + ps.w / 2, y: a.y + ps.h },
       { x: a.x + ps.w / 2, y: a.y + ps.h + 52 },

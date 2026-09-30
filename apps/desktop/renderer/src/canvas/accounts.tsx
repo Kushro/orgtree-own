@@ -32,7 +32,7 @@ import { CanvasAnchorSettings } from './canvasanchor'
 import {
   setAgentShortcutsOn, useAgentShortcuts, setPinSnapOn, usePinSnap, setCrowdPilesOn, setDeskDpi, setHideRetiredOn, setOpenRouterTiers, setShowLegacyModelsOn, setStartView, setStartZoomOn,
   legacyMark, optInLegacyHidden, TIER_LETTER,
-  useCrowdPiles, useDeskDpi, useHideRetired, useShowLegacyModels, useStartView, useStartZoom,
+  setChartLayout, useChartLayout, useCrowdPiles, useDeskDpi, useHideRetired, useShowLegacyModels, useStartView, useStartZoom,
 } from './shared'
 import { fmtWhen } from '../timefmt'
 import type { StartView } from './shared'
@@ -305,6 +305,22 @@ function PinSnapToggle() {
     onChange={setPinSnapOn}
     hint={'dragging or resizing a pinned panel snaps it to the window edges '
       + 'and beside other pinned panels; off, it goes exactly where you put it'} />
+}
+
+function ChartLayoutSetting() {
+  const mode = useChartLayout()
+  return (
+    <SetRow label="org chart layout"
+      hint={mode === 'circular'
+        ? 'the top-level node sits at the centre; each team fans out behind its parent and each level is a further ring'
+        : 'agents sit in a row under the top-level node, one row per level'}>
+      <select aria-label="Org chart layout" value={mode}
+        onChange={e => setChartLayout(e.target.value === 'circular' ? 'circular' : 'row')}>
+        <option value="row">row (default)</option>
+        <option value="circular">circular</option>
+      </select>
+    </SetRow>
+  )
 }
 
 function HideRetiredToggle() {
@@ -746,7 +762,7 @@ export function AccountsPanel({ toast, close, initialTab }: {
     </SettingsTabPanel>
     <SettingsTabPanel id="display" idBase="app-settings" active={tab === 'display'}>
       <ThemeSetting />
-      <SetGroup title="Desk"><DeskTextSize /><CrowdStackToggle /><HideRetiredToggle /><AgentShortcutsToggle /><ModalOverlapSettings /><PinSnapToggle /><CanvasAnchorSettings /></SetGroup>
+      <SetGroup title="Desk"><ChartLayoutSetting /><DeskTextSize /><CrowdStackToggle /><HideRetiredToggle /><AgentShortcutsToggle /><ModalOverlapSettings /><PinSnapToggle /><CanvasAnchorSettings /></SetGroup>
       <SetGroup title="Startup"><StartupWindowsSetting /><StartupView /></SetGroup>
     </SettingsTabPanel>
     <SettingsTabPanel id="defaults" idBase="app-settings" active={tab === 'defaults'}>
