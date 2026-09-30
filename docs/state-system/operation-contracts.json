@@ -30653,6 +30653,27 @@
       "source_refs": []
     },
     {
+      "id": "2a74f0514d6e9ac5646a6346fa4f4112626f75a17aa8e85f7aa13942c6b10d7d",
+      "disposition": "pending",
+      "contracts": [],
+      "reason": "Stays pending (P01 launch.py item): GET /api/desktop/alive is a production route mounted by the desktop launcher (engine/launch.py); the service host's hang watch and the engine's stall watch ask it every 30 s. It returns the process id and data root and reads or writes no org state. It has no contract, and an http registration is never excluded. Owner: the runtime (P08).",
+      "source_refs": []
+    },
+    {
+      "id": "823d78ab7876749524347a7f9603ff0955e0ab06d08dde16d091fdb44946d85c",
+      "disposition": "pending",
+      "contracts": [],
+      "reason": "Stays pending (P01 launch.py item): the Windows service host's liveness thread (LivenessWatch) asks the engine's /api/desktop/alive and, after a long silence, lets the host kill the hung engine tree and start another. It reads and writes no org store; it appends to diagnostics/engine-liveness.jsonl. Owner: the runtime (P08).",
+      "source_refs": []
+    },
+    {
+      "id": "9e3b2649652ee98ea2b51f9bc40bca91fa9f89b7b9adbacefd8617e94b7d7a1e",
+      "disposition": "pending",
+      "contracts": [],
+      "reason": "Stays pending (P01 launch.py item): the engine's stall-watch thread (engine/stall_watch.py) asks its own /api/desktop/alive and, when an answer is late, writes every thread's stack to diagnostics/engine-stall-stacks.txt. It reads and writes no org store. Owner: the runtime (P08).",
+      "source_refs": []
+    },
+    {
       "id": "9cc1563b2b02292dc32bd813d309cca66f6095a75d5c0d7e1047c59586f78a96",
       "disposition": "pending",
       "contracts": [],
