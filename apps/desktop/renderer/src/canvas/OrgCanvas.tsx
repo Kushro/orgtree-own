@@ -1740,7 +1740,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     }
     if (!isFinite(minX)) return 0.24
     const fit = Math.min(vp.width / (maxX - minX + 120), vp.height / (maxY - minY + 170))
-    return Math.max(0.01, Math.min(0.24, fit * 0.7))
+    return Math.max(1e-4, Math.min(0.24, fit * 0.7))
   }
   const zoomStep = useCallback((factor: number) => {
     const vp = viewportRef.current?.getBoundingClientRect()

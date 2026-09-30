@@ -1,6 +1,6 @@
 // circularcanvas-probe.tsx — the REAL OrgCanvas (real styles, app import
 // order) on a generated org, in Circular mode, for circularcanvas_probe.py.
-// Scenes by URL hash: #small (9 agents), #large (208 agents: 8x5x4).
+// Scenes by URL hash: #small (9 agents), #large (208 agents: 8x5x4), #huge (2000 direct reports).
 import { createRoot } from 'react-dom/client'
 import '../src/App'
 import '../src/styles.css'
@@ -33,7 +33,7 @@ const count = (n: unknown[]): number =>
   n.reduce<number>((a, x) => a + 1 + count((x as { children: unknown[] }).children), 0)
 
 const scene = location.hash.replace(/^#/, '') || 'small'
-const roots = scene === 'large' ? team('t', [8, 5, 4]) : team('a', [3, 2])
+const roots = scene === 'huge' ? team('h', [2000]) : scene === 'large' ? team('t', [8, 5, 4]) : team('a', [3, 2])
 localStorage.setItem(CHART_LAYOUT_KEY, 'circular')
 const tree = {
   slug: SLUG, name: SLUG, workspace: null, dirs: [], max_top_grant: 1000,

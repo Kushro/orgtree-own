@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory() as d:
     url = (pathlib.Path(d) / "probe.html").as_uri()
     with sync_playwright() as pw:
         browser = pw.chromium.launch(channel="msedge", headless=True)
-        for scene in ("small", "large"):
+        for scene in ("small", "large", "huge"):
             page = browser.new_page(viewport={"width": 1600, "height": 1000})
             errs: list[str] = []
             page.on("pageerror", lambda e: errs.append(str(e)))
@@ -40,6 +40,12 @@ with tempfile.TemporaryDirectory() as d:
               const m = /translate\(\s*(-?[\d.]+)px\s*,\s*(-?[\d.]+)px\s*\)\s*scale\(\s*([\d.]+)\s*\)/.exec(t);
               return {x:+m[1], y:+m[2], z:+m[3], agents: window.agents,
                 cards: document.querySelectorAll('.space .sq').length}}""")
+            outside = page.evaluate("""() => {
+              const vw = innerWidth, vh = innerHeight;
+              return [...document.querySelectorAll('.space .sq')].filter(e => {
+                const r = e.getBoundingClientRect();
+                return r.left < 0 || r.top < 0 || r.right > vw || r.bottom > vh }).length}""")
+            cam["outside"] = outside
             page.screenshot(path=str(out / f"realcanvas-{scene}.png"))
             # wheel zoom-out must be able to go at least as far out as Fit All
             page.mouse.move(800, 500)
@@ -50,11 +56,13 @@ with tempfile.TemporaryDirectory() as d:
             print(scene, json.dumps(cam), "wheel floor", z_min, errs)
             if errs:
                 failures.append(f"{scene}: page errors {errs}")
-            if scene == "large":
+            if scene != "small" and outside:
+                failures.append(f"{scene}: {outside} cards outside the viewport after Fit All")
+            if scene in ("large", "huge"):
                 if cam["z"] >= 0.24:
-                    failures.append(f"large: Fit All stayed at the 0.24 floor (z={cam['z']})")
+                    failures.append(f"{scene}: Fit All stayed at the 0.24 floor (z={cam['z']})")
                 if z_min > cam["z"] + 1e-6:
-                    failures.append(f"large: wheel floor {z_min} is above the fit zoom {cam['z']}")
+                    failures.append(f"{scene}: wheel floor {z_min} is above the fit zoom {cam['z']}")
         browser.close()
 print("PROVENANCE", PROVENANCE)
 if failures:
