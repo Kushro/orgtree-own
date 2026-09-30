@@ -22,7 +22,7 @@ test('adjacent header frames leave room for the badge overhang', () => {
   assert.ok(gap > overhang, `gap ${gap}px must exceed badge overhang ${overhang}px`)
 })
 
-test('the drawer and scrim begin after the complete agents rail', () => {
+test('the desk and scrim begin after the complete agents rail', () => {
   const wrap = rule(attention, '.attn-agents-wrap')
   assert.match(wrap, /display:\s*grid;/)
   assert.match(wrap, /grid-template-columns:\s*max-content\s+minmax\(0,\s*1fr\);/)
@@ -30,7 +30,16 @@ test('the drawer and scrim begin after the complete agents rail', () => {
   for (const selector of ['.attn-agents', '.attn-agents-scrim', '.attn-desk']) {
     assert.match(rule(attention, selector), /grid-area:\s*1\s*\/\s*2;/, selector)
   }
-  for (const selector of ['.attn-agents', '.attn-agents-scrim']) {
-    assert.match(rule(attention, selector), /left:\s*0;/, selector)
-  }
+  assert.match(rule(attention, '.attn-agents-scrim'), /left:\s*0;/)
+})
+
+test('drawer rows reclaim the rail below the toggle while the filter keeps its clearance', () => {
+  // The approved name-width change extends only the drawer's row area into
+  // the empty rail. Requiring left:0 for the whole drawer wastes that width.
+  const drawer = rule(attention, '.attn-agents')
+  assert.match(drawer, /left:\s*calc\(-1\s*\*\s*var\(--attn-agent-rail,\s*0px\)\);/)
+  assert.match(drawer, /width:\s*calc\(232px\s*\+\s*var\(--attn-agent-rail,\s*0px\)\);/)
+  const filter = rule(attention, '.attn-agents .tray-filter')
+  assert.match(filter, /margin-left:\s*calc\(4px\s*\+\s*var\(--attn-agent-rail,\s*0px\)\);/)
+  assert.match(filter, /width:\s*calc\(100%\s*-\s*8px\s*-\s*var\(--attn-agent-rail,\s*0px\)\);/)
 })
