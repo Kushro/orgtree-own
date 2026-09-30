@@ -212,9 +212,9 @@ uiTest('§1 a row offers the agent\'s own menu — the same entries, in the same
       // above caught its first version, which reached the row menu and not
       // the card's.
       'Copy agent name', 'Open desk', 'Focus', 'Open inbox', 'Open docket',
-      'Open team docket', 'Settings',
+      'Open team docket',
       'Pin desk as a window', 'Open desk in a new window',
-      'Hire a subordinate…', 'Retire…',
+      'Hire a subordinate…', 'Retire…', 'Settings',
     ], 'the agent menu, in order')
   })
 

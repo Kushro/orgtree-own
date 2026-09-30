@@ -199,7 +199,6 @@ export function agentMenuEntries(node: CanvasNode, h: AgentMenuHandlers,
       })
     }
   }
-  entries.push({ label: 'Settings', onSelect: () => h.onSettings() })
   const pin = h.onPin, showPin = h.onShowPin
   if (pin && !s.pinned) entries.push({ label: 'Pin desk as a window', onSelect: () => pin() })
   if (s.pinned && showPin) entries.push({ label: 'Show pinned window', onSelect: () => showPin() })
@@ -252,6 +251,8 @@ export function agentMenuEntries(node: CanvasNode, h: AgentMenuHandlers,
       onSelect: () => dismiss(),
     })
   }
+  // LAST, below the lifecycle actions (user 2026-09-30: "put settings at the bottom")
+  entries.push('sep', { label: 'Settings', onSelect: () => h.onSettings() })
   return entries
 }
 
