@@ -33,6 +33,9 @@ export function preferencesPatch(value: unknown): Partial<DesktopPreferences> {
     } else if (key === 'startupMode') {
       if (!isStartupMode(val)) throw new Error('Invalid startup mode')
       result.startupMode = val
+    } else if (key === 'attentionOrgs') {
+      if (!Array.isArray(val) || val.length > 200 || !val.every(v => typeof v === 'string' && v.length > 0 && v.length <= 256)) throw new Error('Invalid attention organizations')
+      result.attentionOrgs = [...new Set(val as string[])]
     } else if (key === 'visualThemeExplicit') {
       if (typeof val !== 'boolean') throw new Error('Invalid preference')
       result.visualThemeExplicit = val

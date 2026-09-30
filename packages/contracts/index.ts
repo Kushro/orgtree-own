@@ -29,6 +29,10 @@ export interface DesktopPreferences extends NotificationPreferences {
   /** Whether an ordinary launch reopens the windows that were open last time,
    *  or starts at a fresh Homepage. See StartupMode. */
   startupMode: StartupMode
+  /** Organizations whose window was last left in the Attention view. The
+   *  renderer's own per-origin storage does not reliably survive a relaunch,
+   *  so the native document keeps this for restore-previous-windows. */
+  attentionOrgs?: string[]
 }
 export interface DesktopNotification {
   id: string; title: string; body: string; org: string; agent?: string; item?: string

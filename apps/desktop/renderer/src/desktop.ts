@@ -8,6 +8,8 @@ export type NativePreferences = DesktopPreferences & {
    *  start with one fresh Homepage. Optional here because an older shell does
    *  not have it; absent reads as `'restore'`, which is the default. */
   startupMode?: OrgStartupMode
+  /** organizations last left in the Attention view (restore-previous-windows) */
+  attentionOrgs?: string[]
 }
 
 // ------------------------------------------------------- v3 window identity
