@@ -574,15 +574,20 @@ def _convert_message(root: Path, reason: str, logdir: Path | None) -> str:
         pass
     orgs, kept = root / "orgs", root / "pre-postgres" / "orgs"
     download = f"Orgtree {PREVIOUS_RELEASE} can be downloaded from {PREVIOUS_RELEASE_URL}"
+    # 2.1.14 installs updates by itself when idle (automatic updates is on by
+    # default), so a user who goes back would be moved to this version again
+    # and meet the same failure, over and over
+    stay = (f"Then, in Orgtree {PREVIOUS_RELEASE}, turn off App settings > Runtime > automatic updates, "
+            f"or it will install this version again by itself.")
     if record is not None and record.get("backend") == "postgres":
         state = (f"The switch to the new database was recorded, but moving the old files aside did not "
                  f"finish. Your old data files are unchanged, in {orgs} and {kept}. Starting Orgtree again "
                  f"finishes the move. To go back to Orgtree {PREVIOUS_RELEASE} instead, move the files in "
-                 f"{kept} back into {orgs}, rename {root / CUTOVER_FILE}, and install it: {download}.")
+                 f"{kept} back into {orgs}, rename {root / CUTOVER_FILE}, and install it: {download}. {stay}")
     else:
         state = (f"Nothing was switched: your data is unchanged, still in its old format in {orgs}, and "
                  f"Orgtree {PREVIOUS_RELEASE} can open it. To keep working now, install it again: "
-                 f"{download}.")
+                 f"{download}. {stay}")
     details = (f" Details: {logdir}. If you report this to the Orgtree team, include that folder."
                if logdir is not None else "")
     return (f"Orgtree could not convert your data to its new database, so it has not started. {state} "

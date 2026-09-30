@@ -814,6 +814,9 @@ class BracketTests(unittest.TestCase):
         self.assertIn(f"Orgtree {bracket.PREVIOUS_RELEASE}", text)
         self.assertIn("https://github.com/Maurdekye/orgtree/releases/tag/v2.1.14", text)
         self.assertIn("unchanged", text)
+        # 2.1.14 updates itself when idle (on by default): going back without
+        # turning that off lands the user in this same failure again
+        self.assertIn("turn off App settings > Runtime > automatic updates", text)
         for folder in kept:
             self.assertIn(str(folder), text)
         self.assertLessEqual(len(text), 2000, "the desktop shows at most 2000 characters (parseConversionFailure)")
