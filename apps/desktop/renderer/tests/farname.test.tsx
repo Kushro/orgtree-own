@@ -167,3 +167,44 @@ test('zooming during pointer-leave retraction removes the overlay without revivi
   await inAct(() => new Promise((r) => setTimeout(r, 350)))
   assert.equal(!!view.el.querySelector('.sq-far-ghost.on'), true, 'cancelled leave timer cannot remove a new reveal')
 })
+
+// user report 2026-09-30 23:13Z: right-click a far-zoom agent, click away to close
+// the menu, and the popped-out name stays for good. The menu is portalled but is
+// a React child of the card, so moving onto it never fires the card's leave, and
+// closing it removes the element under the pointer: no pointerleave ever comes.
+const rightClick = async (el: Element) => inAct(() => {
+  const sq = el.querySelector('.sq')!
+  sq.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 20, clientY: 20, button: 2 }))
+})
+const gone = async (el: Element) => {
+  await inAct(() => new Promise((r) => setTimeout(r, 350)))
+  return el.querySelector('.sq-far-ghost') === null
+}
+
+for (const how of ['click-away', 'Escape', 'pick an entry'] as const) {
+  test(`the far-zoom name does not stick after right-click then ${how}`, async (t) => {
+    const view = await card('mini')
+    t.after(() => view.unmount())
+    await hover(view.el)
+    assert.ok(view.el.querySelector('.sq-far-ghost'), 'shown on hover')
+    await rightClick(view.el)
+    assert.ok(document.querySelector('.ctxmenu'), 'the menu opened')
+    await inAct(async () => {
+      if (how === 'click-away') {
+        document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+        document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+      } else if (how === 'Escape') {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      } else {
+        (document.querySelector('.ctxmenu button:not(:disabled)') as HTMLElement).click()
+      }
+    })
+    assert.equal(document.querySelector('.ctxmenu'), null, 'the menu closed')
+    assert.ok(await gone(view.el), 'the name was retracted and removed')
+    // hover in and out still works afterwards
+    await hover(view.el)
+    assert.ok(view.el.querySelector('.sq-far-ghost'), 'hover shows it again')
+    await inAct(() => { view.el.querySelector('.sq')!.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body })) })
+    assert.ok(await gone(view.el), 'and leaving hides it')
+  })
+}

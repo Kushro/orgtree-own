@@ -1619,6 +1619,11 @@ export function NodeSquare({ node, pos, lod, focused: deskOpen, dragging, isDrop
   const nameRef = useRef<HTMLSpanElement>(null)
   const cardRef = useRef<HTMLDivElement>(null)
   const [nameHover, setNameHover] = useState(false)
+  // The menu is a React child of the card, and closing it removes the element
+  // under the pointer (or the focus), so no pointerleave / blur ever arrives: drop both on close.
+  // A pointer still over the card puts it back with its next move.
+  const nameMenuOpen = menu.isOpen
+  useEffect(() => { if (!nameMenuOpen) { setNameHover(false); setNameFocus(false) } }, [nameMenuOpen])
   // FAR-ZOOM NAME ABOVE EVERY CARD. At mini the hovered card is deliberately
   // painted UNDER its neighbours (styles.css `.sq.mini:hover { z-index: 0 }`, so
   // the hire token never steals a neighbour's press), and the name reveal lives
@@ -1722,10 +1727,10 @@ export function NodeSquare({ node, pos, lod, focused: deskOpen, dragging, isDrop
         downAt.current = { x: e.clientX, y: e.clientY }
         if (!focused) onDragStart(e, node.id)
       }}
-      onFocus={() => setNameFocus(true)}
+      onFocus={(e) => { if (e.currentTarget.contains(e.target as Node)) setNameFocus(true) }}
       onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setNameFocus(false) }}
       onPointerEnter={() => setNameHover(true)}
-      onPointerMove={(e) => { trackEdge(e); onDragMove(e, node.id) }}
+      onPointerMove={(e) => { setNameHover(true); trackEdge(e); onDragMove(e, node.id) }}
       onPointerUp={(e) => onDragEnd(e, node.id, node, focused)}
       onPointerLeave={() => { setExpandedHireEdge(null); setHireReveal(false); setNameHover(false) }}
       /* the card's context menu — NOT at desk zoom: the open desk is its own
