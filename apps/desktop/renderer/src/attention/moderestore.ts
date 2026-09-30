@@ -5,7 +5,8 @@
 // survives that, so the view is mirrored there as `attentionOrgs` (the orgs
 // last left in Attention) and read back at startup.
 //
-// Each org has its own native record: listed in `attentionOrgs` (Attention)
+// Each org has its own native record, changed one org at a time by the main
+// process (a window never sends whole lists, so it cannot erase another's): listed in `attentionOrgs` (Attention)
 // or in `canvasOrgs` (Canvas). An org in neither has not been recorded yet.
 //
 // Precedence at an org's first preferences read, startup mode 'restore':
@@ -23,7 +24,7 @@ import type { OrgView } from './mode'
 
 export type ModeRestorePlan =
   | { kind: 'apply'; view: OrgView }
-  | { kind: 'mirror'; attentionOrgs: string[]; canvasOrgs: string[] }
+  | { kind: 'mirror'; view: OrgView }
   | { kind: 'none' }
 
 export function planModeRestore(
@@ -35,15 +36,12 @@ export function planModeRestore(
     return saved === view ? { kind: 'none' } : { kind: 'apply', view: saved }
   }
   if (saved === view) return { kind: 'none' }
-  const rest = (l: string[]) => l.filter(s => s !== slug)
-  return view === 'attention'
-    ? { kind: 'mirror', attentionOrgs: [...rest(att), slug], canvasOrgs: rest(can) }
-    : { kind: 'mirror', attentionOrgs: rest(att), canvasOrgs: [...rest(can), slug] }
+  return { kind: 'mirror', view }
 }
 
 export function useModeRestore(
   slug: string | null, view: OrgView, prefs: NativePreferences | null,
-  persist: (attentionOrgs: string[], canvasOrgs: string[]) => void,
+  persist: (slug: string, view: OrgView) => void,
 ): void {
   const first = useRef(true)
   useEffect(() => {
@@ -51,6 +49,6 @@ export function useModeRestore(
     const plan = planModeRestore(slug, view, prefs, first.current)
     first.current = false
     if (plan.kind === 'apply') setOrgView(slug, plan.view)
-    else if (plan.kind === 'mirror') persist(plan.attentionOrgs, plan.canvasOrgs)
+    else if (plan.kind === 'mirror') persist(slug, plan.view)
   }, [slug, view, prefs, persist])
 }

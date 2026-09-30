@@ -719,8 +719,8 @@ export default function App() {
   // desktop preferences, only for the first-run gate below; the onboarding
   // card manages its own live copy once shown
   const [deskPrefs, setDeskPrefs] = useState<NativePreferences | null>(null)
-  const persistAttentionOrgs = useCallback((attentionOrgs: string[], canvasOrgs: string[]) => {
-    desktop()?.setPreferences({ attentionOrgs, canvasOrgs }).catch(() => {})
+  const persistAttentionOrgs = useCallback((slug: string, view: OrgView) => {
+    desktop()?.setPreferences({ orgView: { slug, view } }).catch(() => {})
   }, [])
   useEffect(() => {
     const bridge = desktop()

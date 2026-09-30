@@ -33,6 +33,10 @@ export function preferencesPatch(value: unknown): Partial<DesktopPreferences> {
     } else if (key === 'startupMode') {
       if (!isStartupMode(val)) throw new Error('Invalid startup mode')
       result.startupMode = val
+    } else if (key === 'orgView') {
+      const v = val as { slug?: unknown; view?: unknown } | null
+      if (!v || typeof v.slug !== 'string' || !v.slug || v.slug.length > 256 || (v.view !== 'attention' && v.view !== 'canvas')) throw new Error('Invalid organization view')
+      result.orgView = { slug: v.slug, view: v.view }
     } else if (key === 'attentionOrgs' || key === 'canvasOrgs') {
       if (!Array.isArray(val) || val.length > 200 || !val.every(v => typeof v === 'string' && v.length > 0 && v.length <= 256)) throw new Error('Invalid view organizations')
       result[key] = [...new Set(val as string[])]

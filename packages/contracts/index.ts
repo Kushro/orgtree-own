@@ -34,6 +34,8 @@ export interface DesktopPreferences extends NotificationPreferences {
    *  so the native document keeps this for restore-previous-windows. */
   attentionOrgs?: string[]
   canvasOrgs?: string[]
+  /** Patch only, never stored: the main process moves one org between the two lists. */
+  orgView?: { slug: string; view: 'attention' | 'canvas' }
 }
 export interface DesktopNotification {
   id: string; title: string; body: string; org: string; agent?: string; item?: string

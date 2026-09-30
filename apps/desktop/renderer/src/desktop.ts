@@ -11,6 +11,8 @@ export type NativePreferences = DesktopPreferences & {
   /** organizations last left in the Attention view (restore-previous-windows) */
   attentionOrgs?: string[]
   canvasOrgs?: string[]
+  /** Patch only, never stored: the main process moves one org between the two lists. */
+  orgView?: { slug: string; view: 'attention' | 'canvas' }
 }
 
 // ------------------------------------------------------- v3 window identity
