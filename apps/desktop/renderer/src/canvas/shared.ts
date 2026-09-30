@@ -1532,22 +1532,28 @@ export function peerOrder(ids: string[], target: Map<string, Pt>, circular: bool
   return circular ? ids : [...ids].sort((p, q) => (target.get(p)?.x ?? 0) - (target.get(q)?.x ?? 0))
 }
 
-// Ring view: the ring deals siblings out clockwise, in wedges sized by team
-// size, so which screen side "before" or "after" lands on depends on where the
-// anchor sits AND how big its wedge and its neighbours' wedges are. Rather than
-// guess from an angle, lay the ring out with the draft on each side of the
-// anchor and keep the order whose new card lands on the side the button points
-// to (the button's own side wins a tie). `layoutWith(s)` returns the positions
-// with the draft pinned `s` of the anchor. Row layout is returned unchanged.
-export function ringInsertSide(side: 'left' | 'right', anchorId: string,
-  layoutWith: (s: 'left' | 'right') => Map<string, Pt>, circular: boolean): 'left' | 'right' {
-  if (!circular) return side
-  const toward = (s: 'left' | 'right'): number => {
-    const t = layoutWith(s), a = t.get(anchorId), d = t.get(DRAFT)
-    return !a || !d ? -Infinity : (side === 'left' ? a.x - d.x : d.x - a.x)
+// Ring view hire-coworker rule (coordinator ruling 2026-09-30): a button means
+// "put the new agent in the gap between this agent and its ring neighbour on the
+// side the arrow points to", judged on screen BEFORE the hire, the seam
+// wrapping. `sibs` are the anchor's visible siblings in ring order. Of the two
+// ring neighbours, the one whose on-screen direction from the anchor is
+// closest to the arrow wins (so at the extremes, where both sit on one side or
+// straight above and below, the nearer-pointing one is used); a tie keeps the
+// button's own order. Returns the order the hire pins (left = before = the
+// previous neighbour, right = after). Row layout returns the side unchanged.
+export function ringInsertSide(side: 'left' | 'right', anchorId: string, sibs: string[],
+  target: Map<string, Pt>, circular: boolean): 'left' | 'right' {
+  const i = sibs.indexOf(anchorId), n = sibs.length, a = target.get(anchorId)
+  if (!circular || i < 0 || n < 3 || !a) return side
+  const fit = (id: string): number => {
+    const p = target.get(id)
+    if (!p) return -Infinity
+    const dx = p.x - a.x, dy = p.y - a.y, len = Math.hypot(dx, dy)
+    return len < 1e-9 ? -Infinity : (side === 'left' ? -dx : dx) / len
   }
-  const other = side === 'left' ? 'right' : 'left'
-  return toward(other) > toward(side) ? other : side
+  const before = fit(sibs[(i + n - 1) % n]!), after = fit(sibs[(i + 1) % n]!)
+  if (before === after) return side
+  return before > after ? 'left' : 'right'
 }
 
 export function layoutCircular(root: CanvasNode, hidden: Map<string, string> = new Map()): Map<string, Pt> {

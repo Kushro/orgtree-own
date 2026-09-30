@@ -124,39 +124,40 @@ test('the animated sibling route uses the same neighbour order as the drawn line
   assert.match(body, /wireRef\.current\.peerSeg/, 'with the latest wire builders, since launchSpark is memoised once')
 })
 
-test('hire-coworker buttons insert on the side they point to, all the way round the ring', () => {
+test('a hire-coworker button puts the new agent in the gap between the anchor and its ring neighbour on the arrow side, everywhere on the ring', () => {
   const build = (weights: number[]) => ({
     roots: weights.map((w, i) => ({ id: 'k' + i, title: 'k' + i, tier: 't', state: 'live',
       children: Array.from({ length: w }, (_, j) => ({ id: `k${i}.${j}`, title: '', tier: 't', state: 'live', children: [] })) })),
   }) as unknown as Parameters<typeof withDraftTree>[0]
-  let attainable = 0, right = 0, flipped = 0, top = 0, bottom = 0
-  for (const weights of [[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0], [1, 5, 9], [2, 8, 3, 11, 1], [4, 1, 1, 7, 2, 1]]) {
+  let cases = 0, flips = 0
+  for (const weights of [Array(12).fill(0), Array(7).fill(0), Array(3).fill(0), [1, 5, 9], [2, 8, 3, 11, 1], [4, 1, 1, 7, 2, 1], [9, 1, 1, 1, 12]]) {
     const tree = build(weights)
-    const at = (anchor: string, s: 'left' | 'right') =>
-      layout(withDraftTree(tree, { parent: null, tier: 't', beside: { anchor, side: s } }), new Map(), 'circular')
-    const plain = layout(withDraftTree(tree, null), new Map(), 'circular')
-    const eyeY = centre(plain.get(USER)!).y
-    for (let i = 0; i < weights.length; i++) {
+    const t = layout(withDraftTree(tree, null), new Map(), 'circular')
+    const ids = weights.map((_, i) => 'k' + i), n = ids.length
+    for (let i = 0; i < n; i++) {
+      const a = centre(t.get(ids[i]!)!)
+      const neighbours = [ids[(i + n - 1) % n]!, ids[(i + 1) % n]!]
+      const cos = (id: string, side: 'left' | 'right') => {
+        const p = centre(t.get(id)!), dx = p.x - a.x, dy = p.y - a.y
+        return (side === 'left' ? -dx : dx) / Math.hypot(dx, dy)
+      }
       for (const side of ['left', 'right'] as const) {
-        const pin = ringInsertSide(side, 'k' + i, s => at('k' + i, s), true)
-        const t = at('k' + i, pin)
-        const dx = t.get(DRAFT)!.x - t.get('k' + i)!.x
-        const can = [side, side === 'left' ? 'right' : 'left'].some(s => {
-          const u = at('k' + i, s as 'left' | 'right'); const d = u.get(DRAFT)!.x - u.get('k' + i)!.x
-          return side === 'left' ? d < -1 : d > 1
-        })
-        if (!can) continue
-        attainable++
-        if (pin !== side) flipped++
-        if (centre(plain.get('k' + i)!).y > eyeY) bottom++; else top++
-        right += (side === 'left' ? dx < 0 : dx > 0) ? 1 : 0
-        assert.ok(side === 'left' ? dx < 0 : dx > 0, `weights ${weights}, #${i}, ${side}: the new card appears on the pressed side (dx ${dx})`)
+        const pin = ringInsertSide(side, ids[i]!, ids, t, true)
+        // the hire lands between the anchor and this ring neighbour (before = previous one)
+        const chosen = neighbours[pin === 'left' ? 0 : 1]!, other = neighbours[pin === 'left' ? 1 : 0]!
+        assert.ok(cos(chosen, side) >= cos(other, side) - 1e-9, `${weights} #${i} ${side}: the neighbour pointing closest to the arrow is chosen`)
+        cases++; if (pin !== side) flips++
+        // and the real insertion puts the draft between the anchor and that neighbour in ring order
+        const withDraft = withDraftTree(tree, { parent: null, tier: 't', beside: { anchor: ids[i]!, side: pin } })
+        const order = withDraft.children.map(c => c.id)
+        const at = order.indexOf(DRAFT), me = order.indexOf(ids[i]!)
+        assert.equal(order[(at + (pin === 'left' ? 1 : order.length - 1)) % order.length], ids[i]!, 'draft sits next to the anchor')
+        assert.equal(order[(at + (pin === 'left' ? order.length - 1 : 1)) % order.length], chosen, 'and next to the chosen neighbour')
+        assert.ok(me >= 0)
       }
     }
   }
-  assert.equal(right, attainable)
-  assert.ok(attainable > 40 && flipped > 0 && top > 0 && bottom > 0, `covered ${attainable}, flipped ${flipped}, top ${top}, bottom ${bottom}`)
-  const t = layout(withDraftTree(build([0, 0, 0]), { parent: null, tier: 't', beside: { anchor: 'k0', side: 'left' } }), new Map(), 'row')
-  assert.equal(ringInsertSide('left', 'k0', () => t, false), 'left', 'row layout is unchanged')
-  assert.equal(ringInsertSide('right', 'k0', () => t, false), 'right')
+  assert.ok(cases >= 80 && flips > 20, `covered ${cases} cases, ${flips} flipped`)
+  const t = layout(withDraftTree(build([0, 0, 0, 0]), null), new Map(), 'row')
+  assert.equal(ringInsertSide('left', 'k1', ['k0', 'k1', 'k2', 'k3'], t, false), 'left', 'row layout is unchanged')
 })
