@@ -1726,10 +1726,26 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   // bound the usable canvas, anchor on the center of the available bounded
   // rectangle (clearRegion), falling back to the whole viewport center when
   // unobstructed or blocked
+  // Zoom floor. Row keeps 0.24. A circular chart grows with the org, so its
+  // floor follows the chart's size: always far enough out to fit all of it.
+  const minZoomRef = useRef<() => number>(() => 0.24)
+  minZoomRef.current = () => {
+    if (chartLayout !== 'circular' || compactRef.current) return 0.24
+    const vp = viewportRef.current?.getBoundingClientRect()
+    if (!vp || !vp.width || !vp.height) return 0.24
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const p of targetRef.current.values()) {
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y)
+      maxX = Math.max(maxX, p.x + NODE_W + 40); maxY = Math.max(maxY, p.y + NODE_H + 40)
+    }
+    if (!isFinite(minX)) return 0.24
+    const fit = Math.min(vp.width / (maxX - minX + 120), vp.height / (maxY - minY + 170))
+    return Math.max(0.01, Math.min(0.24, fit * 0.7))
+  }
   const zoomStep = useCallback((factor: number) => {
     const vp = viewportRef.current?.getBoundingClientRect()
     const v = viewRef.current
-    const lim = compactRef.current ? { min: 0.3, max: 1.6 } : { min: 0.24, max: Z_MAX }
+    const lim = compactRef.current ? { min: 0.3, max: 1.6 } : { min: minZoomRef.current(), max: Z_MAX }
     const z = Math.min(lim.max, Math.max(lim.min, v.z * factor))
     if (!vp || z === v.z) return
     const reg = regionOf(vp)
@@ -2029,7 +2045,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     // negative (the eye is pinned at x=6000) and a clamp silently cut them
     // out of "fit all"
     minX -= 60; minY -= 130
-    const z = Math.min(1.3, Math.max(0.24,
+    const z = Math.min(1.3, Math.max(minZoomRef.current(),
       Math.min((r.w - 48) / (maxX - minX), (r.h - 48) / (maxY - minY))))
     return {
       x: r.x + (r.w - (maxX - minX) * z) / 2 - minX * z,
@@ -2058,7 +2074,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   // reaches desk zoom, so the camera-derived focusId never fires and the
   // sheet is the only desk. Desktop keeps [0.24, Z_MAX] untouched.
   const zLim = () => compactRef.current
-    ? { min: 0.3, max: 1.6 } : { min: 0.24, max: Z_MAX }
+    ? { min: 0.3, max: 1.6 } : { min: minZoomRef.current(), max: Z_MAX }
   // mobile spec §2-⑦: nothing re-ran on resize — on rotate the camera math
   // targeted the old rect forever. Mobile-only: re-render on any resize and
   // re-fit the camera once it settles (visualViewport covers the iOS soft
@@ -2283,7 +2299,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       animBusyRef.current = false
       const v = viewRef.current
       const factor = Math.exp(-e.deltaY * 0.0012)
-      const z = Math.min(Z_MAX, Math.max(0.24, v.z * factor))
+      const z = Math.min(Z_MAX, Math.max(minZoomRef.current(), v.z * factor))
       const r = el.getBoundingClientRect()
       const mx = e.clientX - r.left, my = e.clientY - r.top
       const wx = (mx - v.x) / v.z, wy = (my - v.y) / v.z

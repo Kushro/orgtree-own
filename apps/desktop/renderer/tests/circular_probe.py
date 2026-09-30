@@ -1,7 +1,10 @@
 """Screenshots of the circular layout (real layout() + real NodeSquare cards) in Edge."""
 import pathlib, subprocess, sys, tempfile
-from playwright.sync_api import sync_playwright
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parents[3] / 'tools'))
+from assert_repo_import import assert_repo_import  # noqa: E402
+assert_repo_import(HERE.parents[3])
+from playwright.sync_api import sync_playwright  # noqa: E402
 out = pathlib.Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory() as d:
     subprocess.run(['node', str(HERE / 'circular-build.mjs'), d], check=True)

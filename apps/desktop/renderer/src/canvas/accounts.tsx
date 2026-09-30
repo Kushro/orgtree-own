@@ -307,7 +307,7 @@ function PinSnapToggle() {
       + 'and beside other pinned panels; off, it goes exactly where you put it'} />
 }
 
-function ChartLayoutSetting() {
+export function ChartLayoutSetting() {
   const mode = useChartLayout()
   return (
     <SetRow label="org chart layout"

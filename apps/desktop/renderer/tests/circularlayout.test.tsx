@@ -1,10 +1,11 @@
 // circularlayout.test.ts — org chart circular arrangement (user 2026-09-30).
 // Run:  cd apps/desktop/renderer && node tests/run.mjs circularlayout
-import './harness'
+import { inAct, mountView } from './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { chartLayoutOf, layout, NODE_H, NODE_W, setChartLayout, USER } from '../src/canvas/shared'
 import type { CanvasNode } from '../src/canvas/shared'
+import { ChartLayoutSetting } from '../src/canvas/accounts'
 
 const node = (id: string, children: CanvasNode[] = []): CanvasNode =>
   ({ id, title: id, tier: 't', state: 'live', children } as unknown as CanvasNode)
@@ -71,4 +72,21 @@ test('hidden subtrees take no space', () => {
   const root = eye([node('a', [node('a0')]), node('b')])
   const t = layout(root, new Map([['a0', 'a']]), 'circular')
   assert.ok(!t.has('a0'))
+})
+
+test('the Display setting shows, saves and follows the stored layout', async (t) => {
+  localStorage.removeItem('orgtree-chart-layout')
+  t.after(() => localStorage.removeItem('orgtree-chart-layout'))
+  const view = await mountView(<ChartLayoutSetting />, el => el)
+  t.after(() => view.unmount())
+  const sel = () => view.el.querySelector('select[aria-label="Org chart layout"]') as HTMLSelectElement
+  assert.equal(sel().value, 'row', 'unset shows Row')
+  await inAct(() => {
+    sel().value = 'circular'
+    sel().dispatchEvent(new (globalThis as unknown as { window: { Event: typeof Event } }).window.Event('change', { bubbles: true }))
+  })
+  assert.equal(localStorage.getItem('orgtree-chart-layout'), 'circular')
+  assert.equal(sel().value, 'circular')
+  await inAct(() => { setChartLayout('row') })
+  assert.equal(sel().value, 'row', 'another writer flips the mounted select')
 })
