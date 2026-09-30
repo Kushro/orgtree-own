@@ -366,6 +366,7 @@ class EveryRealEngineRigIsIsolated(unittest.TestCase):
         'tests/test_state_reservation_boundary.py': 'names engine/launch.py in a comment; builds the app '
                                                     'with load_app but never enters TestClient (no startup, no hub)',
         'tests/test_startup_progress.py': 'runs service_host.main against a stub launch.py',
+        'tests/test_engine_liveness.py': 'runs service_host.main against a stub launch.py',
         'tests/hub_isolation.py': 'the helpers themselves; boots no engine',
         'tests/test_hub_isolation.py': 'this audit and the tests of the helpers; MailhubRuntime() '
                                        'only reads a config, never start()s',

@@ -283,6 +283,13 @@ def _install_desktop_routes(api_app: Any, data: Path, stop: Callable[[], None],
             "buildIdentity": resolve_build_identity(runtime_root),
         }
 
+    # Liveness: the service host's hang watch and the engine's own stall watch
+    # ask this every 30 s. A plain `def` on purpose, so an answer needs the
+    # event loop AND a free worker thread; no I/O, unlike identity's build lookup.
+    @api_app.get("/api/desktop/alive")
+    def desktop_alive() -> dict[str, Any]:
+        return {"protocol": 1, "pid": os.getpid(), "dataRootId": data_root_id(data)}
+
     @api_app.get("/api/desktop/notifications")
     def desktop_notifications(offset: int = 0) -> dict[str, Any]:
         from orgtree.desktop_notifications import notices
@@ -416,6 +423,7 @@ def main() -> None:
                           "guardianPid": guardian_pid,
                           "hubPort": hub.config["port"]},
                          separators=(",", ":")), flush=True)
+        from engine.stall_watch import start_stall_watch; start_stall_watch(data, port, _token)  # noqa: E702,PLC0415
         while not task.done():
             if stopping["value"]:
                 server.should_exit = True

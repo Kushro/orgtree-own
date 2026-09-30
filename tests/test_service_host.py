@@ -586,6 +586,20 @@ class ServiceHostIntegrationTests(unittest.TestCase):
                 self.assertEqual(status, 401)
                 status, _ = _request(base + "/api/desktop/identity", "0" * 64)
                 self.assertEqual(status, 401)
+                # The liveness route both hang watches ask: the engine as
+                # itself, token-gated like every other route.
+                status, alive = _request(base + "/api/desktop/alive", token)
+                self.assertEqual(status, 200)
+                self.assertEqual(alive["pid"], value["enginePid"])
+                self.assertEqual(Path(alive["dataRootId"]).resolve(), data.resolve())
+                self.assertIsNone(service_host.probe_engine(port, token, data, value["enginePid"], 10))
+                status, _ = _request(base + "/api/desktop/alive", None)
+                self.assertEqual(status, 401)
+                # The engine's stall watch started with the engine; an engine
+                # that answers keeps its dump file empty.
+                stall_dump = data / "diagnostics" / "engine-stall-stacks.txt"
+                self.assertTrue(stall_dump.exists(), "the stall watch did not start")
+                self.assertEqual(stall_dump.stat().st_size, 0)
                 # HUB ISOLATION proof: the engine's own hub is the rig's, by
                 # address and by the unique name its /healthz answered
                 status, hosted = _request(base + "/api/desktop/hub", token)

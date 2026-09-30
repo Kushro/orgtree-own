@@ -62,6 +62,26 @@ EXIT_ROOT_OWNED = 75
 # Under the Windows service, the handle value of an inheritable manual-reset
 # event the service sets to ask for an orderly stop. Absent under the task.
 STOP_EVENT_ENV = "ORGTREE_V2_SERVICE_STOP_EVENT"
+# LIVENESS (v3-orgtree-froze-and-crashed-around-09-40-09-50z). On 2026-09-30 the
+# engine stopped answering every request for ten minutes while its process
+# stayed alive, so it kept the root lock: the desktop could neither attach nor
+# start its own engine, and nothing restarted it. After readiness the host
+# probes the engine's liveness route from its own thread; once no probe has
+# succeeded for LIVENESS_DEADLINE the engine is HUNG: the host records it,
+# kills the engine tree, proves the root lock released and starts a fresh
+# engine in place. The Task Scheduler's restart-on-failure does not fire on an
+# exit code, so the restart is the host's own. A probe waits a full minute: the
+# same storm that preceded the hang still answered in under one.
+LIVENESS_INTERVAL = 30.0
+LIVENESS_PROBE_TIMEOUT = 60.0
+LIVENESS_DEADLINE = 300.0
+LIVENESS_MIN_FAILURES = 3
+HUNG_RELEASE_WAIT = 30.0
+# More hung engines than this inside the window and the host stops trying.
+HUNG_RESTART_LIMIT = 3
+HUNG_RESTART_WINDOW = 3600.0
+EXIT_ENGINE_HUNG = 76
+LIVENESS_LOG = Path("diagnostics") / "engine-liveness.jsonl"
 
 
 def service_stop_probe(env: dict[str, str]) -> "Callable[[], bool] | None":
@@ -401,6 +421,96 @@ def request_shutdown(port: int, token: str) -> bool:
         return False
 
 
+def probe_engine(port: int, token: str, root: Path, pid: int,
+                 timeout: float = LIVENESS_PROBE_TIMEOUT) -> str | None:
+    """None when the engine answered as ITSELF (pid and root), else why not."""
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/desktop/alive",
+                                     headers={"X-Orgtree-Desktop-Token": token})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            identity = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}"[:300]
+    if not isinstance(identity, dict) or identity.get("pid") != pid \
+            or not isinstance(identity.get("dataRootId"), str) \
+            or _canon(identity["dataRootId"]) != _canon(root):
+        return "the engine answered with another identity"
+    return None
+
+
+class LivenessWatch:
+    """Probes on its own thread, so a probe that waits out its whole timeout
+    never delays the host's stop handling. HUNG needs BOTH a long silence and
+    several failed probes: one slow answer is contention, not a hang."""
+
+    def __init__(self, probe: Callable[[], "str | None"], *, interval: float = LIVENESS_INTERVAL,
+                 deadline: float = LIVENESS_DEADLINE, min_failures: int = LIVENESS_MIN_FAILURES,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._probe, self._clock = probe, clock
+        self.interval, self.deadline, self.min_failures = interval, deadline, min_failures
+        self.last_ok = clock()
+        self.failures = 0
+        self.last_error: str | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True, name="engine-liveness").start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self.check_once()
+            self._stop.wait(self.interval)
+
+    def check_once(self) -> bool:
+        error = self._probe()
+        with self._lock:
+            if error is None:
+                self.last_ok, self.failures, self.last_error = self._clock(), 0, None
+            else:
+                self.failures += 1
+                self.last_error = error
+        return error is None
+
+    def silent_for(self) -> float:
+        with self._lock:
+            return self._clock() - self.last_ok
+
+    def hung(self) -> bool:
+        with self._lock:
+            return self.failures >= self.min_failures and self._clock() - self.last_ok >= self.deadline
+
+
+def record_liveness(root: Path, event: dict[str, Any]) -> None:
+    """The engine writes no log of its own death; this line is the record of
+    a hang the host ended. Best effort: a full disk must not stop the kill."""
+    path = root / LIVENESS_LOG
+    line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **event},
+                      separators=(",", ":"))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as stream:
+            stream.write(line + "\n")
+    except OSError:
+        pass
+    print(f"service host: {line}", file=sys.stderr, flush=True)
+
+
+def end_hung_engine(child: "subprocess.Popen[Any]", root: Path, watch: LivenessWatch) -> int:
+    """Kill a hung engine's tree and prove the root is free again. Only a
+    PROVEN release lets the host start another engine (never two engines);
+    an unproven one exits 1 and leaves the descriptor for the guardian sweep."""
+    record_liveness(root, {"event": "hung", "enginePid": child.pid,
+                           "silentSeconds": round(watch.silent_for(), 1),
+                           "failedProbes": watch.failures, "lastError": watch.last_error})
+    released = failed_start_cleanup(child, root, timeout=HUNG_RELEASE_WAIT)
+    record_liveness(root, {"event": "killed", "enginePid": child.pid, "released": released})
+    return EXIT_ENGINE_HUNG if released else 1
+
+
 def packaged_postgres_environment(engine_dir: Path) -> dict[str, str]:
     """What the packaged desktop sets for its engine (postgres-runtime.ts):
     the bundled custodian and PostgreSQL, and ``ORGTREE_PG_BOOTSTRAP=1``, so
@@ -449,6 +559,23 @@ def engine_spawner() -> "Callable[..., subprocess.Popen[Any]]":
 
 
 def main() -> int:
+    """Run the engine; start a fresh one in place when the last one HUNG and
+    its tree was proven gone, unless it keeps hanging."""
+    hangs: list[float] = []
+    while True:
+        code = run_engine()
+        if code != EXIT_ENGINE_HUNG:
+            return code
+        now = time.monotonic()
+        hangs = [at for at in hangs if now - at < HUNG_RESTART_WINDOW] + [now]
+        if len(hangs) > HUNG_RESTART_LIMIT:
+            print(f"service host: {len(hangs)} hung engines within {HUNG_RESTART_WINDOW:.0f}s; not restarting again",
+                  file=sys.stderr, flush=True)
+            return code
+        print("service host: starting a fresh engine after a hung one", file=sys.stderr, flush=True)
+
+
+def run_engine() -> int:
     root = resolve_data_root()
     ui = resolve_ui_dir()
     root.mkdir(parents=True, exist_ok=True)
@@ -588,18 +715,27 @@ def main() -> int:
             if hasattr(signal, name):
                 signal.signal(getattr(signal, name), stop)
 
-        while child.poll() is None:
-            if not stopping["value"] and stop_requested():
-                stop()
-            if stopping["value"]:
-                try:
-                    child.wait(timeout=SHUTDOWN_WAIT)
-                except subprocess.TimeoutExpired:
-                    if not confirmed_exit(child):
-                        print("service host: engine did not confirm exit after kill; leaving the descriptor for the guardian sweep",
-                              file=sys.stderr, flush=True)
-                break
-            time.sleep(0.2)
+        watch = LivenessWatch(lambda: probe_engine(port, token, root, child.pid, LIVENESS_PROBE_TIMEOUT),
+                              interval=LIVENESS_INTERVAL, deadline=LIVENESS_DEADLINE,
+                              min_failures=LIVENESS_MIN_FAILURES)
+        watch.start()
+        try:
+            while child.poll() is None:
+                if not stopping["value"] and stop_requested():
+                    stop()
+                if stopping["value"]:
+                    try:
+                        child.wait(timeout=SHUTDOWN_WAIT)
+                    except subprocess.TimeoutExpired:
+                        if not confirmed_exit(child):
+                            print("service host: engine did not confirm exit after kill; leaving the descriptor for the guardian sweep",
+                                  file=sys.stderr, flush=True)
+                    break
+                if watch.hung():
+                    return end_hung_engine(child, root, watch)
+                time.sleep(0.2)
+        finally:
+            watch.stop()
         if stopping["value"]:
             # A requested stop exits 0 so a restart-on-failure task setting
             # does not resurrect an engine that was deliberately stopped.
