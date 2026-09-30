@@ -4,6 +4,7 @@ declare const __SRC_DIR__: string
 import { inAct, mountView } from './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { chartLayoutOf, layout, NODE_H, NODE_W, peerOrder, ringInsertSide, setChartLayout, USER, DRAFT, withDraftTree } from '../src/canvas/shared'
 import type { CanvasNode } from '../src/canvas/shared'
 import { ChartLayoutSetting } from '../src/canvas/accounts'
@@ -161,3 +162,13 @@ test('a hire-coworker button puts the new agent in the gap between the anchor an
   const t = layout(withDraftTree(build([0, 0, 0, 0]), null), new Map(), 'row')
   assert.equal(ringInsertSide('left', 'k1', ['k0', 'k1', 'k2', 'k3'], t, false), 'left', 'row layout is unchanged')
 })
+
+test('the HireSheet coworker pin is taken before the hire op, not after the tree refreshes', () => {
+  const src = readFileSync(new URL('../src/canvas/OrgCanvas.tsx', import.meta.url), 'utf8')
+  const at = src.indexOf('onHire={(tier, name, grant, placement)')
+  const body = src.slice(at, src.indexOf('</MaybePortal>', at))
+  const pinAt = body.indexOf('ringSide(a, placement)'), opAt = body.indexOf("op({ op: 'hire'")
+  assert.ok(pinAt > 0 && opAt > 0 && pinAt < opAt, 'ringSide runs synchronously before the hire op')
+  assert.equal(body.split('ringSide(').length - 1, 1, 'and nowhere inside the .then')
+})
+

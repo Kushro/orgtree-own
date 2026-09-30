@@ -4144,6 +4144,8 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
               const a = map.get(sheetId)!
               const parentOf = !a.parent || a.parent === USER ? null : a.parent
               const parent = placement === 'below' ? a.id : parentOf
+              // judged on the ring as it is NOW, before the hire changes it
+              const pin = placement === 'left' || placement === 'right' ? ringSide(a, placement) : null
               op({ op: 'hire', parent, tier, grant, name })
                 .then((r) => {
                   const born = r?.node
@@ -4151,8 +4153,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
                     // same follow-ups as the desktop chips: side = pin the
                     // promised ordering (best-effort, cosmetic); above = the
                     // FR-25 splice (loud on failure — it IS the point)
-                    if (placement === 'left' || placement === 'right') {
-                      const pin = ringSide(a, placement)
+                    if (pin) {
                       void reorderNode(slug, born, pin === 'left'
                         ? { before: a.id } : { after: a.id }).catch(() => {})
                     }
