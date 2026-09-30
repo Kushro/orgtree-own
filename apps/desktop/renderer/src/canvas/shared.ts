@@ -1532,13 +1532,22 @@ export function peerOrder(ids: string[], target: Map<string, Pt>, circular: bool
   return circular ? ids : [...ids].sort((p, q) => (target.get(p)?.x ?? 0) - (target.get(q)?.x ?? 0))
 }
 
-// Ring view: sibling order runs clockwise, so below the eye "before" points to
-// the screen right. Maps the side a coworker button points to on screen to the
-// order the hire pins (left = before, right = after); row layout is unchanged.
-export function ringInsertSide(side: 'left' | 'right', anchor: Pt | undefined, eye: Pt | undefined,
-  circular: boolean): 'left' | 'right' {
-  if (!circular || !anchor || !eye || anchor.y - eye.y < 1) return side
-  return side === 'left' ? 'right' : 'left'
+// Ring view: the ring deals siblings out clockwise, in wedges sized by team
+// size, so which screen side "before" or "after" lands on depends on where the
+// anchor sits AND how big its wedge and its neighbours' wedges are. Rather than
+// guess from an angle, lay the ring out with the draft on each side of the
+// anchor and keep the order whose new card lands on the side the button points
+// to (the button's own side wins a tie). `layoutWith(s)` returns the positions
+// with the draft pinned `s` of the anchor. Row layout is returned unchanged.
+export function ringInsertSide(side: 'left' | 'right', anchorId: string,
+  layoutWith: (s: 'left' | 'right') => Map<string, Pt>, circular: boolean): 'left' | 'right' {
+  if (!circular) return side
+  const toward = (s: 'left' | 'right'): number => {
+    const t = layoutWith(s), a = t.get(anchorId), d = t.get(DRAFT)
+    return !a || !d ? -Infinity : (side === 'left' ? a.x - d.x : d.x - a.x)
+  }
+  const other = side === 'left' ? 'right' : 'left'
+  return toward(other) > toward(side) ? other : side
 }
 
 export function layoutCircular(root: CanvasNode, hidden: Map<string, string> = new Map()): Map<string, Pt> {

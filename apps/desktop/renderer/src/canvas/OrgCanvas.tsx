@@ -3083,9 +3083,12 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   }
   // F-03: hire a COWORKER — same superior, placed to the chosen side of the
   // anchor. Top-level agents side-hire more top-levels (parent is the user).
+  const ringSide = (n: CanvasNode, tier: string, side: 'left' | 'right') => ringInsertSide(
+    side, n.id, (s) => layout(canonPiles(withDraftTree(shownTree, {
+      parent: !n.parent || n.parent === USER ? null : n.parent, tier, beside: { anchor: n.id, side: s } })),
+    hidden, 'circular'), chartLayout === 'circular')
   const spawnBeside = (n: CanvasNode, tier: string, side: 'left' | 'right') => {
-    const pin = ringInsertSide(side, targetRef.current.get(n.id), targetRef.current.get(USER),
-      chartLayout === 'circular')
+    const pin = ringSide(n, tier, side)
     setDraft({ parent: !n.parent || n.parent === USER ? null : n.parent, tier,
                beside: { anchor: n.id, side: pin } })
     setTimeout(() => centerOn(
@@ -4148,8 +4151,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
                     // promised ordering (best-effort, cosmetic); above = the
                     // FR-25 splice (loud on failure — it IS the point)
                     if (placement === 'left' || placement === 'right') {
-                      const pin = ringInsertSide(placement, targetRef.current.get(a.id),
-                        targetRef.current.get(USER), chartLayout === 'circular')
+                      const pin = ringSide(a, tier, placement)
                       void reorderNode(slug, born, pin === 'left'
                         ? { before: a.id } : { after: a.id }).catch(() => {})
                     }
