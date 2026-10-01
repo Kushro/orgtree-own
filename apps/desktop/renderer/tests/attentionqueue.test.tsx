@@ -198,13 +198,17 @@ test('arrival in an empty queue selects its top row without moving composer focu
     const list = v.el.querySelector<HTMLElement>('.attn-mlist')!
     const detail = v.el.querySelector<HTMLElement>('.attn-mread')!
     list.scrollTop = 87; detail.scrollTop = 123; v.el.scrollTop = 45
+    // jsdom has no layout: give the pane a height so "scrolled to the bottom" is measurable
+    Object.defineProperty(detail, 'scrollHeight', { configurable: true, value: 700 })
     server.items = [flagged, { ...flagged, slug: 'newest', title: 'Newest', updated_at: '2026-09-30T12:00:00Z',
       manual_attention: { ...flagged.manual_attention!, at: '2026-09-30T12:00:00Z' } }]
     await repoll()
     assert.equal(selectedKey(v.el), 'ticket:newest')
     assert.equal(selectedKey(v.el), v.el.querySelector('[data-attn-row]')?.getAttribute('data-attn-row'))
     assert.equal(document.activeElement, composer)
-    assert.equal(list.scrollTop, 87); assert.equal(detail.scrollTop, 123); assert.equal(v.el.scrollTop, 45)
+    assert.equal(list.scrollTop, 87); assert.equal(v.el.scrollTop, 45)
+    // the arriving flagged ticket opens at its bottom (the attention reason), not at the old offset
+    assert.equal(detail.scrollTop, 700)
     assert.equal(scrolled, 0)
   } finally { window.HTMLElement.prototype.scrollIntoView = oldScroll; await v.unmount() }
 })
@@ -248,6 +252,55 @@ test('when a selected entry resolves the entry below it opens (above if it was l
     server.items = [flagged]
     await repoll()
     assert.equal(selectedKey(v.el), 'ticket:cutover', 'answered question releases selection too')
+  } finally { await v.unmount() }
+})
+
+const withHeight = (el: HTMLElement) => {
+  const detail = el.querySelector<HTMLElement>('.attn-mread')!
+  Object.defineProperty(detail, 'scrollHeight', { configurable: true, value: 900 })
+  return detail
+}
+
+test('a flagged ticket scrolls to the bottom once when selected, never again on updates', async () => {
+  localStorage.clear()
+  installServer({ items: [flagged, { ...flagged, slug: 'other', title: 'Other' }], pending: [urgent] })
+  const v = await mountView(panel(), titles)
+  try {
+    const detail = withHeight(v.el)
+    detail.scrollTop = 33
+    await settle()
+    assert.equal(selectedKey(v.el), 'mail:m1', 'the newest row (the mail) is auto-selected')
+    assert.equal(detail.scrollTop, 33, 'a mail entry was scrolled to the bottom')
+    await inAct(() => rowEl(v.el, 'ticket:cutover')!.click())
+    await settle()
+    assert.equal(detail.scrollTop, 900, 'the selected ticket opens at the bottom')
+    // the reader scrolls up; a live update (repoll) must not drag them back
+    detail.scrollTop = 120
+    server.items = server.items.map((i) => ({ ...i, rev: i.rev + 1 }))
+    await repoll()
+    assert.equal(detail.scrollTop, 120, 'a live update moved the reader')
+    // clicking another flagged ticket scrolls it to the bottom too
+    const keys = [...v.el.querySelectorAll('[data-attn-row]')].map((e) => e.getAttribute('data-attn-row')!)
+    const other = keys.find((k) => k.startsWith('ticket:') && k !== selectedKey(v.el))!
+    await inAct(() => rowEl(v.el, other)!.click())
+    await settle()
+    assert.equal(detail.scrollTop, 900, 'a clicked ticket opens at the bottom')
+  } finally { await v.unmount() }
+})
+
+test('the ticket that opens after a dismissal also opens at the bottom', async () => {
+  localStorage.clear()
+  installServer({ items: [flagged, { ...flagged, slug: 'next', title: 'Next' }] })
+  const v = await mountView(panel(), titles)
+  try {
+    const detail = withHeight(v.el)
+    await settle()
+    const first = selectedKey(v.el)
+    detail.scrollTop = 10
+    server.items = server.items.filter((i) => 'ticket:' + i.slug !== first)
+    await repoll()
+    assert.notEqual(selectedKey(v.el), first)
+    assert.equal(detail.scrollTop, 900, 'the next ticket did not open at the bottom')
   } finally { await v.unmount() }
 })
 

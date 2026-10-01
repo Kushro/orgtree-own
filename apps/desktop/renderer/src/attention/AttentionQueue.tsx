@@ -248,7 +248,12 @@ export function AttentionQueue({
     setToRead(null)
     void read(toRead)
   }, [toRead])
+  // A flagged ticket's attention reason is its LAST comment, so a ticket that
+  // becomes selected (click, key, auto-select, notification) opens scrolled to
+  // the bottom. `bottomFor` is the key still owed that one scroll.
+  const bottomFor = useRef<string | null>(null)
   const openRow = (row: AttentionRow) => {
+    if (row.kind === 'ticket' && row.key !== selected) bottomFor.current = row.key
     setSelected(row.key)
     if (readOnly || row.kind !== 'mail' || !row.mail) return
     // only a mail the server still calls unread is marked — re-selecting a
@@ -303,11 +308,36 @@ export function AttentionQueue({
       const cell = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-attn-row]') ?? [])]
         .find((c) => c.getAttribute('data-attn-row') === row.key)
       cell?.firstElementChild?.scrollIntoView?.({ block: 'nearest' })
-      if (detailRef.current) detailRef.current.scrollTop = 0
+      if (detailRef.current && row.kind !== 'ticket') detailRef.current.scrollTop = 0
       return true
     })
     return () => onNotificationFocus(null)
   })
+  // Scroll the pane to the bottom once the selected ticket has rendered. The
+  // pane loads the full ticket after mounting, so the content grows for a
+  // moment: follow it until the reader touches the pane or 2 s pass, then stop
+  // for good — later live updates never move the reader.
+  useLayoutEffect(() => {
+    const pane = detailRef.current
+    if (!pane || !selected || bottomFor.current !== selected) return
+    bottomFor.current = null
+    const toBottom = () => { pane.scrollTop = pane.scrollHeight }
+    toBottom()
+    const cell = pane.firstElementChild
+    if (typeof ResizeObserver === 'undefined' || !cell) return
+    const ro = new ResizeObserver(toBottom)
+    ro.observe(cell)
+    const stop = () => ro.disconnect()
+    const timer = window.setTimeout(stop, 2000)
+    const touch = ['wheel', 'touchstart', 'pointerdown', 'keydown']
+    for (const t of touch) pane.addEventListener(t, stop, { once: true })
+    return () => {
+      window.clearTimeout(timer)
+      stop()
+      for (const t of touch) pane.removeEventListener(t, stop)
+    }
+  }, [selected])
+
   const onListKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!rows.length || e.target !== e.currentTarget) return
     const i = rows.findIndex((r) => r.key === selected)
