@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 import uuid
+import weakref
 from collections.abc import (Callable, Hashable, Iterable, Iterator, Mapping,
                              MutableMapping, Sequence)
 import contextlib
@@ -9664,6 +9665,55 @@ def _user_event(text: str,
     content.extend(images or [])
     return json.dumps({"type": "user", "message": {
         "role": "user", "content": content}}) + "\n"
+
+
+#: One write lock per Claude process (item
+#: harden-live-effort-delivery-write-lock-park-race, N3). Three threads write
+#: stream-json lines to the same stdin: the turn thread (the first prompt and
+#: every boundary feed), and the request thread (`interrupt_turn`,
+#: `send_live_effort`). A text-mode `write` of a long line is not atomic, so
+#: without one lock a control_request could land in the middle of a user
+#: event and the CLI would read neither. Weak keys: the lock goes with the
+#: process object, including a warm process that changes hands.
+_STDIN_LOCKS: weakref.WeakKeyDictionary[Any, threading.Lock] = \
+    weakref.WeakKeyDictionary()
+_STDIN_LOCKS_GUARD = threading.Lock()
+#: For a process object that cannot be weakly referenced (a test double):
+#: one shared lock, which is still correct, only coarser.
+_STDIN_FALLBACK_LOCK = threading.Lock()
+#: How long a REQUEST-thread writer waits for the lock. The turn thread holds
+#: it only while its line goes into the pipe, which is normally instant; a
+#: wait this long means the CLI has stopped reading, and the HTTP request
+#: answers with that instead of hanging with it.
+STDIN_LOCK_WAIT_S: Final = 5.0
+
+
+def _stdin_lock(proc: Any) -> threading.Lock:
+    with _STDIN_LOCKS_GUARD:
+        try:
+            lock = _STDIN_LOCKS.get(proc)
+            if lock is None:
+                lock = _STDIN_LOCKS[proc] = threading.Lock()
+            return lock
+        except TypeError:
+            return _STDIN_FALLBACK_LOCK
+
+
+def _stdin_send(proc: Any, line: str, *, wait: float | None = None) -> None:
+    """Write one whole line to a Claude process's stdin and flush it, under
+    that process's write lock, so no other writer's line can interleave.
+    `wait` bounds the lock wait (request threads); on timeout it raises
+    OSError, the same failure family callers already handle for a dead
+    pipe. The turn thread passes no `wait` and blocks as it always did."""
+    lock = _stdin_lock(proc)
+    if not lock.acquire(timeout=-1 if wait is None else wait):
+        raise OSError("another write to this process's stdin did not finish "
+                      f"within {wait:g}s")
+    try:
+        proc.stdin.write(line)
+        proc.stdin.flush()
+    finally:
+        lock.release()
 
 
 def _journal_drain(org: Org, nid: str, mail: list[MailEntry] | None,
@@ -22164,8 +22214,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                                         spans=view_spans, segments=view_segments,
                                         incarnation=_transcript_incarnation(org, nid))
                     halt.check(slug, nid)
-                    proc.stdin.write(_user_event(text, turn_images))   # pyright: ignore[reportOptionalMemberAccess]
-                    proc.stdin.flush()                # pyright: ignore[reportOptionalMemberAccess]
+                    _stdin_send(proc, _user_event(text, turn_images))
                     # THE SEND, recorded here and nowhere earlier (PR20/PR21).
                     # Every line above this one can still refuse the turn —
                     # the MCP surface gate, `halt.check`, the write itself —
@@ -22217,8 +22266,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                         turn_hash or "", None, 0, warm_lbl,
                         slot_wait_s=slot_wait_s)
                     halt.check(slug, nid)
-                    proc.stdin.write(_user_event(text, turn_images))   # pyright: ignore[reportOptionalMemberAccess]
-                    proc.stdin.flush()                # pyright: ignore[reportOptionalMemberAccess]
+                    _stdin_send(proc, _user_event(text, turn_images))
                     # the one re-send this runner permits, named as such: the
                     # warm process died before it read anything, so this is a
                     # second send of the SAME turn, not a second attempt
@@ -23193,8 +23241,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                                                     str(nxt), nview,
                                                     spans=nspans, segments=nsegs,
                                                     incarnation=_transcript_incarnation(org, nid))
-                                proc.stdin.write(_user_event(nxt, nimgs))   # pyright: ignore[reportOptionalMemberAccess]
-                                proc.stdin.flush()                   # pyright: ignore[reportOptionalMemberAccess]
+                                _stdin_send(proc, _user_event(nxt, nimgs))
                                 # C1 again: confirmed by the next consuming
                                 # event, not by the pipe write (the prior
                                 # batch's toks were confirmed by THIS result
@@ -28746,11 +28793,11 @@ def interrupt_turn(slug: str, nid: str) -> dict[str, Any]:
                 st.pop("interrupted", None)
         return _result(False, "the CLI process exited; turn cleanup is pending")
     try:
-        proc.stdin.write(json.dumps({
+        _stdin_send(proc, json.dumps({
             "type": "control_request",
             "request_id": "pause-" + os.urandom(4).hex(),
-            "request": {"subtype": "interrupt"}}) + "\n")
-        proc.stdin.flush()
+            "request": {"subtype": "interrupt"}}) + "\n",
+            wait=STDIN_LOCK_WAIT_S)
         return _result(True)
     # ValueError = stdin already closed; AttributeError = the handle was
     # replaced by None between the snapshot above and the write. Windows
@@ -28833,11 +28880,11 @@ def send_live_effort(org: Org, nid: str,
         return _next("the CLI process has exited")
     rid = "effort-" + os.urandom(4).hex()
     try:
-        proc.stdin.write(json.dumps({
+        _stdin_send(proc, json.dumps({
             "type": "control_request", "request_id": rid,
             "request": {"subtype": "apply_flag_settings",
-                        "settings": {"effortLevel": level}}}) + "\n")
-        proc.stdin.flush()
+                        "settings": {"effortLevel": level}}}) + "\n",
+            wait=STDIN_LOCK_WAIT_S)
     # same failure family as interrupt_turn's write: a closed or killed pipe
     except (OSError, ValueError, AttributeError) as e:
         return _next(f"the running process could not be reached "
