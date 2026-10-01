@@ -69,7 +69,7 @@ import type {
   ActivityInfo, CanvasNode, LiveRow, MailLinkFn, OpFn, WorkLinkFn,
 } from './shared'
 import { ConfirmModal, PilePicker } from './modals'
-import { AudienceFold, InboxView, RetiredFold } from './mail'
+import { AUDIENCE_FOLD_LIMIT, AudienceFold, InboxView, RetiredFold } from './mail'
 import { AskCard } from './asks'
 import { useWorkItems } from './useworkitems'
 import { AgentDocketView, actionableAssignedCount, agentItems } from './docket'
@@ -3852,18 +3852,19 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
         const alive = reports.filter((c) => c.state === 'live')
         const retired = reports.filter((c) => c.state !== 'live')
         if (!reports.length && !deskDogs) return null
+        const dogs = deskDogs?.dogs ?? []
+        const cardIds = [...alive.map((c) => 'n:' + c.id), ...dogs.map((w) => 'd:' + w.id)]
+        const folded = cardIds.length >= AUDIENCE_FOLD_LIMIT
+        const renderCard = (k: string) => {
+          if (k.startsWith('n:')) {
+            return <NavChip key={k} n={alive.find((x) => x.id === k.slice(2))!} dir="down" onJump={jump} />
+          }
+          return <DogChip key={k} dog={dogs.find((x) => x.id === k.slice(2))!} onOpen={deskDogs!.open} />
+        }
         return (
           <div className="desk-nav">
-            <AudienceFold label="jump cards"
-              ids={[...alive.map((c) => 'n:' + c.id), ...(deskDogs?.dogs ?? []).map((w) => 'd:' + w.id)]}
-              render={(k) => {
-                if (k.startsWith('n:')) {
-                  const c = alive.find((x) => x.id === k.slice(2))!
-                  return <NavChip key={k} n={c} dir="down" onJump={jump} />
-                }
-                const w = deskDogs!.dogs.find((x) => x.id === k.slice(2))!
-                return <DogChip key={k} dog={w} onOpen={deskDogs!.open} />
-              }} />
+            {folded ? <AudienceFold label="jump cards" ids={cardIds} render={renderCard} />
+              : alive.map((c) => <NavChip key={c.id} n={c} dir="down" onJump={jump} />)}
             {hideRetired && retired.length > 0 && <>
               <button className="desk-nav-chip desk-retired-token" onClick={() => setRetiredMenuOpen(true)}>
                 {retired.length} retired
@@ -3884,6 +3885,7 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
             )}
             {!hideRetired && showRetired && retired.map((c) =>
                 <NavChip key={c.id} n={c} dir="down" onJump={jump} />)}
+            {!folded && dogs.map((w) => <DogChip key={'dog:' + w.id} dog={w} onOpen={deskDogs!.open} />)}
           </div>
         )
       })()}

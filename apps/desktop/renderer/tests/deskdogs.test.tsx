@@ -112,3 +112,17 @@ test('below the threshold the jump cards show unfolded', async (t) => {
   assert.equal(view.el.querySelector('[data-audience-fold]'), null)
   assert.equal(view.el.querySelectorAll('.desk-nav .desk-nav-chip').length, 2)
 })
+
+test('below the threshold the footer order is live reports, retired controls, then watchdogs', async (t) => {
+  useFakeClock()
+  installFetch(new FakeServer())
+  t.after(() => { resetConvos(); realClock() })
+  const gone = { ...node('old'), state: 'retired' } as CanvasNode
+  const me = node('lead', [node('kid'), gone])
+  const view = await desk(me, [dog('w1', 'lead', 'a')], [], () => {})
+  t.after(() => view.unmount())
+  await inAct(async () => { await flush(4) })
+  const labels = [...view.el.querySelectorAll('.desk-nav .desk-nav-chip')].map((c) => c.textContent ?? '')
+  const at = (re: RegExp) => labels.findIndex((l) => re.test(l))
+  assert.ok(at(/kid/) >= 0 && at(/retired/) > at(/kid/) && at(/a/) > at(/retired/), labels.join(' | '))
+})
