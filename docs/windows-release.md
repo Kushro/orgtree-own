@@ -14,6 +14,24 @@ derives the two release manifests, stages the updater names, and records the
 installation handoff. The default command is local-only. It never tags, pushes,
 publishes, installs, launches, stops, restarts, or deploys Orgtree.
 
+## Source verification baseline
+
+The default verification range begins at the last successfully built candidate
+whose full Node and renderer gates both passed. Its intact receipt is stored as
+`orgtree-last-fully-gated.json` in Git's common directory, shared by this
+repository's worktrees. Focused builds do not advance that record. A test-only
+tip therefore still covers application changes since that fully gated build.
+When no usable record exists, the default runs both full suites.
+
+`--base <sha>` is an explicit operator declaration of a previously fully gated
+build, useful when adopting this tooling after an older release. Use the SHA
+from that release's full-gate receipt, never the candidate's immediate parent.
+Once a usable record exists, an explicit base can widen the comparison range
+but cannot narrow it past the recorded fully gated SHA.
+
+For shell quoting, line endings, test provenance and P03 queue commands, see
+[machine traps](machine-traps.md).
+
 ## Prerequisites
 
 Run the command from a clean private Git worktree based on the intended `main`

@@ -43,6 +43,14 @@ function Enter-KillOnCloseJob {
 using System;
 using System.Runtime.InteropServices;
 namespace P03Run {
+  public static class Forward {
+    public static void Start(System.Diagnostics.Process process) {
+      process.OutputDataReceived += (sender, e) => { if (e.Data != null) Console.Out.WriteLine(e.Data); };
+      process.ErrorDataReceived += (sender, e) => { if (e.Data != null) Console.Error.WriteLine(e.Data); };
+      process.BeginOutputReadLine();
+      process.BeginErrorReadLine();
+    }
+  }
   public static class Job {
     [StructLayout(LayoutKind.Sequential)] struct BASIC { public long a; public long b; public uint LimitFlags; public UIntPtr c; public UIntPtr d; public uint e; public UIntPtr f; public uint g; public uint h; }
     [StructLayout(LayoutKind.Sequential)] struct IO { public ulong a,b,c,d,e,f; }
@@ -217,6 +225,10 @@ function New-RunProcess {
   $info = [System.Diagnostics.ProcessStartInfo]::new()
   $info.UseShellExecute = $false
   $info.CreateNoWindow = $true
+  $info.RedirectStandardOutput = $true
+  $info.RedirectStandardError = $true
+  $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+  $info.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
   $info.WorkingDirectory = (Get-Location).Path
   $command = $Run[0]
   $arguments = @($Run | Select-Object -Skip 1) + @($RunArgs)
@@ -316,6 +328,7 @@ try {
   Enter-KillOnCloseJob
   $child = New-RunProcess
   if (-not $child.Start()) { throw 'p03-run: child process did not start' }
+  [P03Run.Forward]::Start($child)
   # Only successful process creation spends the queue place. A nonzero child
   # exit is a real run; job setup or process creation failure leaves it intact.
   if ($admission.head) {
@@ -329,6 +342,7 @@ try {
   while (-not $child.WaitForExit(1000)) {
     if ((Get-FreeCommitGB) -lt 10) { throw 'p03-run: stopped because free commit dropped below 10 GB' }
   }
+  $child.WaitForExit() # drain asynchronous stdout/stderr before returning
   $code = $child.ExitCode
   $rec['ended'] = (Get-Date).ToUniversalTime().ToString('o')
   $rec['exit_code'] = $code

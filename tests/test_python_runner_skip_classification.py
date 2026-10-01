@@ -348,7 +348,7 @@ class EndToEndThroughTheRealRunner(unittest.TestCase):
             os._exit(5)
         ''')
         record = self._run(module)["modules"][0]
-        self.assertEqual(record["phase"], "skip")
+        self.assertEqual(record["phase"], "not_executed")
         self.assertFalse(record["structured_result"], "and it got there on the exit code alone")
 
 

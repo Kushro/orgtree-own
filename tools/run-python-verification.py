@@ -772,15 +772,16 @@ def run_modules(
             exit_code = completed.returncode
             tests_ran = _tests_ran(clean_stdout, captured_stderr)
         except subprocess.TimeoutExpired as exc:
-            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             clean_stdout = stdout
             provenance = {}
             phase = "execution_failure"
             exit_code = None
             completed = None
             structured = False
-            tests_ran = _tests_ran(clean_stdout, "")
-            stderr = f"module timed out after {timeout:g}s"
+            partial_stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            tests_ran = _tests_ran(clean_stdout, partial_stderr)
+            stderr = partial_stderr + f"\nmodule timed out after {timeout:g}s"
         except OSError as exc:
             clean_stdout = ""
             provenance = {}
