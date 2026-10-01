@@ -4717,6 +4717,15 @@ button.danger.solid:hover { background: rgba(241, 76, 76, .24); }
   flex: 0 0 10px; min-height: 10px; -webkit-app-region: drag;
 }
 .canvas-stage > .viewport { flex: 1; min-height: 0; -webkit-app-region: no-drag; }
+/* ⚠ `-webkit-app-region` IS INHERITED, and Electron counts every element that
+   carries it by its FULL box, ignoring scrolling and overflow clipping. So
+   no-drag inherited into a pinned desk's transcript put its scrolled-away
+   rows over the header above the panel, and that part of the title bar
+   stopped moving the window (user report 2026-10-01, measured in Electron
+   44). The viewport's own box already covers everything visible inside it;
+   descendants go back to `initial` (`unset`/`none` do not stop it —
+   measured) so only boxes that set a region themselves count. */
+.canvas-stage > .viewport * { -webkit-app-region: initial; }
 .orgbar {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft);
@@ -7294,9 +7303,12 @@ label.set-row { cursor: pointer; }
 .modalpin-bar.on:active { cursor: grabbing; }
 /* Pinned surfaces can overlap the frameless app header. Keep the whole
    surface out of Electron's native drag region so pointer gestures reach
-   the modal's own move/resize handlers instead of moving the BrowserWindow. */
-.overlay.overlay-pinned .modalpin-win,
-.overlay.overlay-pinned .modalpin-win * { -webkit-app-region: no-drag; }
+   the modal's own move/resize handlers instead of moving the BrowserWindow.
+   ⚠ THE PANEL'S OWN BOX ONLY, never `.modalpin-win *`: the panel scrolls, and
+   a no-drag descendant scrolled out of sight still counts at its full box —
+   over the header, when the panel is snapped to the canvas top (see
+   `.canvas-stage > .viewport *`). */
+.overlay.overlay-pinned .modalpin-win { -webkit-app-region: no-drag; }
 .modalpin-bar .spacer { flex: 1; }
 .modalpin-glyph { font-size: 14px; color: var(--agent-accent-text, var(--accent)); flex: none; }
 .modalpin-name {
