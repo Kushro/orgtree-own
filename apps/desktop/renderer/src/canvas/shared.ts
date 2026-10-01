@@ -1753,6 +1753,51 @@ export function sizeOf(id: string): { w: number; h: number } {
   return { w: NODE_W, h: NODE_H }
 }
 
+/** World px kept clear between the org inbox and any other card: room for a
+ *  card's popped-out name above it and its hover hire tokens beside it. */
+export const INBOX_CLEAR = 48
+
+/** Where the ORG INBOX panel goes, given every other laid-out position
+ *  (top-left corners; sizes from `sizeOf`). Its usual place is up and to the
+ *  right of the eye. In the circle view the rings grow AROUND the eye, so a
+ *  ring can reach that place (user report 2026-10-01). The panel then slides
+ *  out along the same line from the eye, just far enough that no card comes
+ *  within INBOX_CLEAR of it, and slides back when the cards go (user ruling:
+ *  conservative — it keeps its usual place while nothing is drawn there).
+ *  Exact, not stepped: each card is a rectangle the panel's centre must stay
+ *  out of, so each blocks one interval of the line, and the answer is the
+ *  first point at or past the usual place that no interval covers. */
+export function placeOrgInbox(t: Map<string, Pt>): Pt | null {
+  const eye = t.get(USER)
+  if (!eye) return null
+  const usual = { x: eye.x + USER_W + 260, y: eye.y - INBOX_H - 96 }
+  const iw = USER_W, ih = INBOX_H
+  const ox = eye.x + USER_W / 2, oy = eye.y + USER_H / 2
+  const dx = usual.x + iw / 2 - ox, dy = usual.y + ih / 2 - oy
+  const spans: [number, number][] = []
+  for (const [id, p] of t) {
+    if (id === INBOX) continue
+    const { w, h } = sizeOf(id)
+    // the panel's centre must stay out of this box, grown by half the panel and the margin
+    const x0 = p.x - iw / 2 - INBOX_CLEAR, x1 = p.x + w + iw / 2 + INBOX_CLEAR
+    const y0 = p.y - ih / 2 - INBOX_CLEAR, y1 = p.y + h + ih / 2 + INBOX_CLEAR
+    let lo = -Infinity, hi = Infinity
+    for (const [o, d, a, b] of [[ox, dx, x0, x1], [oy, dy, y0, y1]] as const) {
+      if (Math.abs(d) < 1e-12) { if (o <= a || o >= b) { lo = Infinity; break } continue }
+      const s0 = (a - o) / d, s1 = (b - o) / d
+      lo = Math.max(lo, Math.min(s0, s1)); hi = Math.min(hi, Math.max(s0, s1))
+    }
+    if (lo < hi && hi > 1) spans.push([lo, hi])
+  }
+  spans.sort((a, b) => a[0] - b[0])
+  let s = 1
+  for (const [lo, hi] of spans) {
+    if (lo >= s) break
+    if (hi > s) s = hi
+  }
+  return s === 1 ? usual : { x: ox + s * dx - iw / 2, y: oy + s * dy - ih / 2 }
+}
+
 // ------------------------------------------------------------- freeze kinds
 // WHICH KIND OF FREEZE IS THIS? One classification, rendered three ways — the
 // org banner's note (App.tsx), the desk badge (desk.tsx) and the compact card

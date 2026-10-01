@@ -26,7 +26,7 @@ import {
 } from '../icons'
 import {
   ago, ALL_TIER_SEAT, antigravityTierOffer, anyTierSeat, attentionPip, codexTierOffer, setOfferedConditionalTiers, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DOG_H, DOG_W, DRAFT, ease, edgeJumpPlacement, type EJForm, EXTERN, familyOffer, flatten, fmtCredits, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, hireOf, INBOX, INBOX_H, legacyMark, optInLegacyHidden, useShowLegacyModels, jumpTo, layout, NODE_H, NODE_W, noteTierModels, openrouterTierIds, orgPxc, presenceOf, segD, setOpenRouterTiers,
-  providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
+  placeOrgInbox, providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
   peerOrder, ringInsertSide, treeParents, USER_W, withDraftTree, withPendingMoves, Z_DESK, Z_MAX, Z_MINI,
 } from './shared'
 import type {
@@ -959,10 +959,12 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     // the ORG INBOX panel (user spec): up and to the RIGHT of the overseer —
     // "out of the way" of the org structure, not stacked on its axis — and it
     // only exists once the org has received outside mail or granted an inbox
-    // audience; until then the canvas is unchanged
+    // audience; until then the canvas is unchanged. Placed LAST of the cards,
+    // so it can step clear of every one of them (placeOrgInbox: the circle
+    // view's rings can grow round to its usual place)
     if (tree.org_inbox?.visible) {
-      const eye = t.get(USER)
-      if (eye) t.set(INBOX, { x: eye.x + USER_W + 260, y: eye.y - INBOX_H - 96 })
+      const at = placeOrgInbox(t)
+      if (at) t.set(INBOX, at)
     }
     let minY = Infinity
     for (const p of t.values()) minY = Math.min(minY, p.y)
