@@ -26,7 +26,7 @@ import {
 } from '../icons'
 import {
   ago, ALL_TIER_SEAT, antigravityTierOffer, anyTierSeat, attentionPip, codexTierOffer, setOfferedConditionalTiers, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DOG_H, DOG_W, DRAFT, ease, edgeJumpPlacement, type EJForm, EXTERN, familyOffer, flatten, fmtCredits, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, hireOf, INBOX, INBOX_H, legacyMark, optInLegacyHidden, useShowLegacyModels, jumpTo, layout, NODE_H, NODE_W, noteTierModels, openrouterTierIds, orgPxc, presenceOf, segD, setOpenRouterTiers,
-  cardFurniture, placeOrgInbox, providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
+  cardFurniture, draftOpeningGrant, placeOrgInbox, providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
   peerOrder, ringInsertSide, treeParents, USER_W, withDraftTree, withPendingMoves, Z_DESK, Z_MAX, Z_MINI,
 } from './shared'
 import type {
@@ -916,6 +916,17 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   const chartLayout = useChartLayout()
   // the credit bars' scale, for the org inbox's clearance (= pxPerCredit below)
   const inboxPxc = useMemo(() => orgPxc(tree), [tree])
+  const kioskRemaining = tree.kiosk?.credits != null
+    ? Math.max(0, tree.kiosk.credits - (tree.audit?.top_level_holds ?? 0))
+    : null
+  // the open hire draft's bar is drawn as tall as its tier seat + pending grant:
+  // the grant it opens with, then whatever DraftNode reports (onGrant)
+  const [draftGrant, setDraftGrant] = useState<number | null>(null)
+  useEffect(() => { if (!draft) setDraftGrant(null) }, [draft])
+  const draftCredits = draft
+    ? (seats[draft.tier] ?? 0) + (draftGrant
+      ?? draftOpeningGrant(draft, tree.default_top_grant ?? 50, kioskRemaining, seats))
+    : undefined
   const target = useMemo(() => {
     const t = layout(vroot, hidden, chartLayout)
     for (const n of map.values()) {           // live bearers float ABOVE the successor
@@ -969,7 +980,8 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       const at = placeOrgInbox(t, (id, p) => {
         const n = map.get(id)
         return cardFurniture(id, p, inboxPxc, {
-          credits: n && n.state === 'live' && !n.isBearerOf ? n.seat! + n.grant! : undefined,
+          credits: id === DRAFT ? draftCredits
+            : n && n.state === 'live' && !n.isBearerOf ? n.seat! + n.grant! : undefined,
           docs: n?.documents?.length ?? 0,
         })
       })
@@ -986,7 +998,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       if (fp) t.set(hid, { x: fp.x, y: fp.y })
     }
     return t
-  }, [vroot, map, tree.org_inbox?.visible, hidden, chartLayout, inboxPxc])
+  }, [vroot, map, tree.org_inbox?.visible, hidden, chartLayout, inboxPxc, draftCredits])
   const [view, setView] = useState<View>(() => {
     // fit-on-load: center the initial tree in a typical viewport (re-fit against
     // the REAL viewport once mounted — see the mount effect below)
@@ -3187,10 +3199,6 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   // either locked in some live node's SEAT or sitting FREE in some node's
   // grant (committed grants just contain the child's seat+free again) — so
   // circulation = Σ seats + Σ free, and those are the honest labels.
-  const kioskRemaining = tree.kiosk?.credits != null
-    ? Math.max(0, tree.kiosk.credits - (tree.audit?.top_level_holds ?? 0))
-    : null
-
   // D-125 ②: at compact the watchdog chips leave the map; owners carry the
   // count as a dot and the sheet header lists them
   const dogsByOwner = useMemo(() => {
@@ -3601,7 +3609,8 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
               maxTop={tree.max_top_grant ?? 1000} kioskRemaining={kioskRemaining}
               defaultTop={tree.default_top_grant ?? 50} tree={tree}
               zoom={view.z} pxc={pxPerCredit}
-              onConfirm={confirmDraft} onCancel={() => { firstUseCancel(slug); setDraft(null) }} />
+              onConfirm={confirmDraft} onCancel={() => { firstUseCancel(slug); setDraft(null) }}
+              onGrant={setDraftGrant} />
           }
           if (hidden.has(n.id)) return null   // piled-away: no card, no space
           const pileHere = pileByFront.get(n.id)

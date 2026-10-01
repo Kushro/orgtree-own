@@ -22,7 +22,7 @@ import {
   LockIcon, MailIcon, PinIcon, RetireIcon, SettingsIcon, StopIcon, WarnIcon, DocIcon,
 } from '../icons'
 import {
-  ago, antigravityTierOffer, anyTierSeat, codexTierOffer, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DESK_SCALE, deskDpi, DRAFT, familyOffer, fmtCredits, formatCount, freezeKind, FREEZE_LABEL_SHORT, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, NODE_H, optInLegacyHidden, NODE_W, openrouterTierIds, procHaloClass, providerOf, queuedAccountTitle, queuedSwitchTitle, stateLabel, TIER_LETTER, TIER_SEAT, tierLabel, TIERS, unicodeLength, USER, useShowLegacyModels,
+  ago, antigravityTierOffer, anyTierSeat, draftOpeningGrant, codexTierOffer, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DESK_SCALE, deskDpi, DRAFT, familyOffer, fmtCredits, formatCount, freezeKind, FREEZE_LABEL_SHORT, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, NODE_H, optInLegacyHidden, NODE_W, openrouterTierIds, procHaloClass, providerOf, queuedAccountTitle, queuedSwitchTitle, stateLabel, TIER_LETTER, TIER_SEAT, tierLabel, TIERS, unicodeLength, USER, useShowLegacyModels,
   USER_H, USER_W, useAgentShortcuts, Z_MAX,
 } from './shared'
 import type {
@@ -1027,6 +1027,9 @@ interface DraftNodeProps {
   onConfirm: (name: string, grant: number, charter: string,
     scope: DraftScope | null) => void
   onCancel: () => void
+  /** told the pending grant whenever it changes (and on mount): the canvas
+   *  keeps the org inbox clear of this card's credit bar */
+  onGrant?: (grant: number) => void
 }
 
 type CharterPreset = {
@@ -1052,7 +1055,7 @@ export function presetLabels(presets: CharterPreset[]): Map<string, string> {
 }
 
 export function DraftNode({ pos, draft, map, seats, maxTop, defaultTop, kioskRemaining,
-  tree, zoom, pxc, onConfirm, onCancel }: DraftNodeProps) {
+  tree, zoom, pxc, onConfirm, onCancel, onGrant }: DraftNodeProps) {
   const [name, setName] = useState('')
   useEffect(() => { firstUseName(tree.slug, name) }, [tree.slug, name])
   const [charter, setCharter] = useState('')
@@ -1097,11 +1100,11 @@ export function DraftNode({ pos, draft, map, seats, maxTop, defaultTop, kioskRem
   const cut = chosen.filter((c) => c.truncated)
   // top-level drafts pre-fill the org's default grant (50 unless configured),
   // clamped only by a kiosk's remaining headroom
-  const [grant, setGrant] = useState(() => {
-    const g = draft.parent == null ? (defaultTop ?? 50) : 0
-    return kioskRemaining != null
-      ? Math.max(0, Math.min(g, kioskRemaining - (seats[draft.tier] ?? 0))) : g
-  })
+  const [grant, setGrant] = useState(() =>
+    draftOpeningGrant(draft, defaultTop, kioskRemaining, seats))
+  const grantCb = useRef(onGrant)
+  grantCb.current = onGrant
+  useEffect(() => { grantCb.current?.(grant) }, [grant])
   // user ruling: drag the allocation as high as you want — the cost bubbles
   // up the chain to you (§4.6) — bounded only by the org's GLOBAL grant cap
   // (settings: top-level grant cap), a kiosk's hard credit cap, or, when the

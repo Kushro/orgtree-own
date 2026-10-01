@@ -6,12 +6,14 @@
 // nothing is drawn there, moves out only as far as it must, and comes back.
 // Run:  cd apps/desktop/renderer && node tests/run.mjs orginboxplace
 declare const __SRC_DIR__: string
+import { inAct, mountView } from './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { cardFurniture, INBOX, INBOX_CLEAR, INBOX_H, layout, NODE_H, NODE_W, orgPxc, placeOrgInbox, sizeOf, USER, USER_W, withDraftTree } from '../src/canvas/shared'
-import type { Box, CanvasNode, ChartLayout } from '../src/canvas/shared'
+import { cardFurniture, DRAFT, draftOpeningGrant, INBOX, INBOX_CLEAR, INBOX_H, layout, NODE_H, NODE_W, orgPxc, placeOrgInbox, sizeOf, USER, USER_W, withDraftTree } from '../src/canvas/shared'
+import type { Box, CanvasNode, ChartLayout, DraftState } from '../src/canvas/shared'
+import { DraftNode } from '../src/canvas/cards'
 import type { TreePayload } from '../src/types'
 
 type Pt = { x: number; y: number }
@@ -214,6 +216,73 @@ test('document chips beside a card count as part of it', () => {
   assert.ok(!same(at, u) && furnitureClearance(t, at, withDocs) >= INBOX_CLEAR - 1e-6, 'so the inbox steps past the chips')
 })
 
+// ---- the open hire draft's credit bar (review-sol 2026-10-01): DraftNode
+// always draws it, as tall as its tier seat + pending grant
+function draftScene(grant: number | null) {
+  const agent = (id: string) => ({ id, title: id, tier: 't', state: 'live', seat: 2, grant: 0, free: 0, children: [] })
+  const payload = { roots: Array.from({ length: 21 }, (_, i) => agent(`a${i}`)), tiers: { t: 2 },
+    default_top_grant: 50 } as unknown as TreePayload
+  const draft: DraftState = { parent: null, tier: 't', beside: { anchor: 'a13', side: 'left' } }
+  const root = withDraftTree(payload, draft)
+  const t = layout(root, new Map(), 'circular')
+  const pxc = orgPxc(payload), seats = { t: 2 }
+  const base = furnitureFor(root, pxc)
+  // exactly what OrgCanvas passes for the draft: seat + (reported ?? opening) grant
+  const credits = seats.t + (grant ?? draftOpeningGrant(draft, 50, null, seats))
+  const f = (id: string, p: Pt) => id === DRAFT ? cardFurniture(id, p, pxc, { credits }) : base(id, p)
+  return { t, f, pxc, credits, payload }
+}
+
+test('the open hire draft\'s credit bar is cleared too, at the grant it opens with', () => {
+  const { t, f, pxc, credits } = draftScene(null)
+  assert.equal(pxc, 77.5, 'the reviewer\'s scale')
+  assert.equal(credits, 52, 'a top-level draft opens at the org default grant (50) + its seat (2)')
+  const bar = f(DRAFT, t.get(DRAFT)!)[0]!
+  assert.ok(Math.abs(bar.h - 4030) < 1e-6, `positive control: the draft bar is ${bar.h}px tall`)
+  const noDraftBar = placeOrgInbox(t, (id, p) => id === DRAFT ? [] : f(id, p))!
+  assert.ok(furnitureClearance(t, noDraftBar, f) < 0, 'positive control: ignoring the draft bar leaves the inbox on it')
+  const at = placeOrgInbox(t, f)!
+  assert.ok(furnitureClearance(t, at, f) >= INBOX_CLEAR - 1e-6, 'with it, the inbox clears the bar')
+})
+
+test('changing the draft\'s grant re-places the inbox, and cancelling the draft puts it back', () => {
+  for (const g of [0, 5, 50, 400]) {
+    const { t, f } = draftScene(g)
+    const at = placeOrgInbox(t, f)!
+    assert.ok(furnitureClearance(t, at, f) >= INBOX_CLEAR - 1e-6, `grant ${g}: clear of the draft bar`)
+  }
+  const small = draftScene(0), big = draftScene(400)
+  assert.ok(!same(placeOrgInbox(small.t, small.f)!, placeOrgInbox(big.t, big.f)!), 'a taller bar moves it further')
+  // cancelled: the same org with no draft lays the inbox out exactly as before
+  const plain = withDraftTree(small.payload, null), t0 = layout(plain, new Map(), 'circular')
+  const f0 = furnitureFor(plain, small.pxc)
+  const back = placeOrgInbox(t0, f0)!
+  assert.ok(furnitureClearance(t0, back, f0) >= INBOX_CLEAR - 1e-6)
+  assert.ok(!t0.has(DRAFT) && same(back, placeOrgInbox(t0, f0)!), 'no draft, no draft bar')
+})
+
+test('DraftNode reports its opening grant and every change to it', async () => {
+  const got: number[] = []
+  const tree = { cascade_hire: true, slug: 'o' } as unknown as TreePayload
+  const v = await mountView(<DraftNode pos={{ x: 0, y: 0 }} draft={{ parent: null, tier: 'haiku' }} map={new Map()}
+    seats={{ haiku: 1 }} maxTop={1000} defaultTop={50} kioskRemaining={null} tree={tree} zoom={1} pxc={1}
+    onConfirm={() => {}} onCancel={() => {}} onGrant={(g) => got.push(g)} />, (el) => el)
+  try {
+    assert.deepEqual(got, [50], 'the opening grant, on mount')
+    const bar = v.el.querySelector('.sq.draft .cbar') as HTMLElement
+    assert.ok(bar, 'the draft draws its credit bar')
+    const P = (globalThis as unknown as { window: { PointerEvent: typeof PointerEvent } }).window.PointerEvent
+    const proto = HTMLElement.prototype as unknown as { setPointerCapture?: unknown }
+    const had = proto.setPointerCapture
+    proto.setPointerCapture = () => {}
+    try {
+      await inAct(() => { bar.dispatchEvent(new P('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, clientX: 0, clientY: 300, button: 0, buttons: 1 })) })
+      await inAct(() => { bar.dispatchEvent(new P('pointermove', { bubbles: true, cancelable: true, pointerId: 1, clientX: 0, clientY: 270, buttons: 1 })) })
+    } finally { proto.setPointerCapture = had }
+    assert.equal(got[got.length - 1], 80, 'dragging the bar up 30px at pxc 1 reports grant 80')
+  } finally { await v.unmount() }
+})
+
 test('the furniture numbers are the stylesheet\'s and the components\' own', () => {
   const css = readFileSync(path.join(__SRC_DIR__, 'styles.css'), 'utf8')
   const rule = (sel: string) => { const at = css.indexOf('\n' + sel + ' {'); assert.ok(at >= 0, sel); return css.slice(at, css.indexOf('}', at)) }
@@ -229,6 +298,10 @@ test('the furniture numbers are the stylesheet\'s and the components\' own', () 
   const canvas = readFileSync(path.join(__SRC_DIR__, 'canvas', 'OrgCanvas.tsx'), 'utf8')
   assert.match(canvas, /const pxPerCredit = useMemo\(\(\) => orgPxc\(tree\), \[tree\]\)/, 'bars are drawn at orgPxc(tree)')
   assert.match(canvas, /const inboxPxc = useMemo\(\(\) => orgPxc\(tree\), \[tree\]\)/, 'and the inbox is placed at the same scale')
+  assert.match(canvas, /onGrant=\{setDraftGrant\}/, 'the canvas hears the draft grant')
+  assert.match(canvas, /credits: id === DRAFT \? draftCredits/, 'and sizes the draft bar from it')
+  assert.match(cards, /draftOpeningGrant\(draft, defaultTop, kioskRemaining, seats\)/, 'DraftNode opens at the same grant')
+  assert.match(canvas, /draftOpeningGrant\(draft, tree\.default_top_grant \?\? 50, kioskRemaining, seats\)/, 'as the canvas assumes')
 })
 
 test('OrgCanvas places the inbox through placeOrgInbox, after every other card', () => {

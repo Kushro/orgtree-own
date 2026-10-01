@@ -1767,6 +1767,17 @@ export const INBOX_CLEAR = 48
  *  Exact, not stepped: each card is a rectangle the panel's centre must stay
  *  out of, so each blocks one interval of the line, and the answer is the
  *  first point at or past the usual place that no interval covers. */
+/** The grant a hire draft opens with: a top-level draft pre-fills the org's
+ *  default grant (50 unless configured), clamped only by a kiosk's remaining
+ *  headroom; a report starts at 0. DraftNode's initial value, and what the
+ *  canvas sizes the draft's credit bar from until the draft reports a change. */
+export function draftOpeningGrant(draft: DraftState, defaultTop: number | null | undefined,
+  kioskRemaining: number | null, seats: Record<string, number>): number {
+  const g = draft.parent == null ? (defaultTop ?? 50) : 0
+  return kioskRemaining != null
+    ? Math.max(0, Math.min(g, kioskRemaining - (seats[draft.tier] ?? 0))) : g
+}
+
 export interface Box { x: number; y: number; w: number; h: number }
 
 /** The ALWAYS-DRAWN furniture a card carries outside its own square, in world
