@@ -1767,7 +1767,31 @@ export const INBOX_CLEAR = 48
  *  Exact, not stepped: each card is a rectangle the panel's centre must stay
  *  out of, so each blocks one interval of the line, and the answer is the
  *  first point at or past the usual place that no interval covers. */
-export function placeOrgInbox(t: Map<string, Pt>): Pt | null {
+export interface Box { x: number; y: number; w: number; h: number }
+
+/** The ALWAYS-DRAWN furniture a card carries outside its own square, in world
+ *  px, from the same numbers that draw it (styles.css, cards.tsx, docs.tsx):
+ *   - the credit bar: `.cbar` sits at left −22px, 14px wide, standing on the
+ *     card's bottom edge and `max(6, (seat + grant) · pxc)` tall (CreditBar),
+ *     so a big holding rises far ABOVE the card (review-sol, 2026-10-01);
+ *     the eye's is `.cbar-inf-wrap`, a fixed 220px;
+ *   - the document chips: `.doc-chips` at left 100% + 3px, top 26px, a column
+ *     of at most four (`docs.slice(-4)`) 21px chips 3px apart.
+ *  `credits` is seat + grant for a card that draws a bar (live, not a bearer),
+ *  omitted otherwise; `docs` is its presented-document count. */
+export function cardFurniture(id: string, p: Pt, pxc: number,
+  kit: { credits?: number; docs?: number }): Box[] {
+  const { w, h } = sizeOf(id)
+  const out: Box[] = []
+  const bar = id === USER ? 220 : kit.credits != null ? Math.max(6, kit.credits * pxc) : 0
+  if (bar > 0) out.push({ x: p.x - 22, y: p.y + h - bar, w: 14, h: bar })
+  const n = Math.min(4, kit.docs ?? 0)
+  if (n > 0) out.push({ x: p.x + w + 3, y: p.y + 26, w: 21, h: n * 21 + (n - 1) * 3 })
+  return out
+}
+
+export function placeOrgInbox(t: Map<string, Pt>,
+  furniture: (id: string, p: Pt) => Box[] = () => []): Pt | null {
   const eye = t.get(USER)
   if (!eye) return null
   const usual = { x: eye.x + USER_W + 260, y: eye.y - INBOX_H - 96 }
@@ -1775,19 +1799,22 @@ export function placeOrgInbox(t: Map<string, Pt>): Pt | null {
   const ox = eye.x + USER_W / 2, oy = eye.y + USER_H / 2
   const dx = usual.x + iw / 2 - ox, dy = usual.y + ih / 2 - oy
   const spans: [number, number][] = []
-  for (const [id, p] of t) {
-    if (id === INBOX) continue
-    const { w, h } = sizeOf(id)
+  const block = (b: Box) => {
     // the panel's centre must stay out of this box, grown by half the panel and the margin
-    const x0 = p.x - iw / 2 - INBOX_CLEAR, x1 = p.x + w + iw / 2 + INBOX_CLEAR
-    const y0 = p.y - ih / 2 - INBOX_CLEAR, y1 = p.y + h + ih / 2 + INBOX_CLEAR
+    const x0 = b.x - iw / 2 - INBOX_CLEAR, x1 = b.x + b.w + iw / 2 + INBOX_CLEAR
+    const y0 = b.y - ih / 2 - INBOX_CLEAR, y1 = b.y + b.h + ih / 2 + INBOX_CLEAR
     let lo = -Infinity, hi = Infinity
-    for (const [o, d, a, b] of [[ox, dx, x0, x1], [oy, dy, y0, y1]] as const) {
-      if (Math.abs(d) < 1e-12) { if (o <= a || o >= b) { lo = Infinity; break } continue }
-      const s0 = (a - o) / d, s1 = (b - o) / d
+    for (const [o, d, a, c] of [[ox, dx, x0, x1], [oy, dy, y0, y1]] as const) {
+      if (Math.abs(d) < 1e-12) { if (o <= a || o >= c) { lo = Infinity; break } continue }
+      const s0 = (a - o) / d, s1 = (c - o) / d
       lo = Math.max(lo, Math.min(s0, s1)); hi = Math.min(hi, Math.max(s0, s1))
     }
     if (lo < hi && hi > 1) spans.push([lo, hi])
+  }
+  for (const [id, p] of t) {
+    if (id === INBOX) continue
+    block({ x: p.x, y: p.y, ...sizeOf(id) })
+    for (const b of furniture(id, p)) block(b)
   }
   spans.sort((a, b) => a[0] - b[0])
   let s = 1

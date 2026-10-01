@@ -10,8 +10,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { INBOX, INBOX_CLEAR, INBOX_H, layout, placeOrgInbox, sizeOf, USER, USER_W } from '../src/canvas/shared'
-import type { CanvasNode, ChartLayout } from '../src/canvas/shared'
+import { cardFurniture, INBOX, INBOX_CLEAR, INBOX_H, layout, NODE_H, NODE_W, orgPxc, placeOrgInbox, sizeOf, USER, USER_W, withDraftTree } from '../src/canvas/shared'
+import type { Box, CanvasNode, ChartLayout } from '../src/canvas/shared'
+import type { TreePayload } from '../src/types'
 
 type Pt = { x: number; y: number }
 const node = (id: string, children: CanvasNode[] = []): CanvasNode =>
@@ -139,11 +140,102 @@ test('a satellite card (watchdog) laid out at the usual place also pushes the in
   assert.ok(!same(at, u) && clearance(t, at) >= INBOX_CLEAR - 1e-6)
 })
 
+// ---- always-drawn furniture outside the card square (review-sol 2026-10-01):
+// a credit bar is as tall as its holding and can rise far above its card
+const boxGap = (b: Box, at: Pt) => Math.max(
+  Math.max(b.x - (at.x + USER_W), at.x - (b.x + b.w)),
+  Math.max(b.y - (at.y + INBOX_H), at.y - (b.y + b.h)))
+const furnitureClearance = (t: Map<string, Pt>, at: Pt, f: (id: string, p: Pt) => Box[]) => {
+  let min = clearance(t, at)
+  for (const [id, p] of t) if (id !== INBOX) for (const b of f(id, p)) min = Math.min(min, boxGap(b, at))
+  return min
+}
+// the reviewer's valid weighted ring: every grant covers its children, and
+// r8 holds 1000 credits, so its bar is (2 + 1000)·pxc ≈ 198px on a 124px card
+function weighted(): { payload: TreePayload; root: CanvasNode } {
+  const kids = [16, 5, 16, 13, 0, 15, 10, 21, 6, 21, 4]
+  const grants = [32, 10, 32, 26, 0, 30, 20, 42, 1000, 42, 8]
+  const agent = (id: string, grant: number, children: unknown[] = []) => ({
+    id, title: id, tier: 't', state: 'live', seat: 2, grant, free: 0, children })
+  const payload = { roots: kids.map((k, i) => agent(`r${i}`, grants[i]!,
+    Array.from({ length: k }, (_, j) => agent(`r${i}.${j}`, 0)))) } as unknown as TreePayload
+  return { payload, root: withDraftTree(payload, null) }
+}
+const furnitureFor = (root: CanvasNode, pxc: number) => {
+  const map = new Map<string, CanvasNode>()
+  const walk = (n: CanvasNode) => { map.set(n.id, n); n.children.forEach(walk) }
+  walk(root)
+  // exactly what OrgCanvas passes
+  return (id: string, p: Pt) => {
+    const n = map.get(id)
+    return cardFurniture(id, p, pxc, {
+      credits: n && n.state === 'live' && !n.isBearerOf ? n.seat! + n.grant! : undefined,
+      docs: n?.documents?.length ?? 0,
+    })
+  }
+}
+
+test('a credit bar rising above its card pushes the inbox out too (weighted ring)', () => {
+  const { payload, root } = weighted()
+  const t = layout(root, new Map(), 'circular')
+  const pxc = orgPxc(payload), f = furnitureFor(root, pxc)
+  const bar = f('r8', t.get('r8')!)[0]!
+  assert.ok(bar.h > NODE_H + 60, `positive control: r8's bar is ${bar.h.toFixed(1)}px, well above its card`)
+  const cardsOnly = placeOrgInbox(t)!
+  assert.ok(furnitureClearance(t, cardsOnly, f) < 0,
+    'positive control: clearing the card squares alone leaves the inbox on r8\'s bar')
+  const at = placeOrgInbox(t, f)!
+  const c = furnitureClearance(t, at, f)
+  assert.ok(c >= INBOX_CLEAR - 1e-6, `inbox is ${c.toFixed(1)}px from the nearest card or bar (needs ${INBOX_CLEAR})`)
+})
+
+test('every arrangement clears the credit bars and the eye\'s own bar as well', () => {
+  for (const [name, root] of arrangements) {
+    const t = layout(root, new Map(), 'circular')
+    // flat test trees carry no credits: give every agent a holding that reaches 1.6 cards
+    const f = (id: string, p: Pt) => cardFurniture(id, p, 1, { credits: id === USER ? undefined : NODE_H * 1.6, docs: 4 })
+    const at = placeOrgInbox(t, f)!
+    assert.ok(furnitureClearance(t, at, f) >= INBOX_CLEAR - 1e-6, `${name}`)
+  }
+  // and with nothing tall drawn near it, the furniture leaves the usual place alone
+  const t = layout(eye(flat(3)), new Map(), 'circular')
+  assert.ok(same(placeOrgInbox(t, (id, p) => cardFurniture(id, p, 1, { credits: 10, docs: 4 }))!, usual(t)))
+})
+
+test('document chips beside a card count as part of it', () => {
+  const t = layout(eye(flat(2)), new Map(), 'circular')
+  const u = usual(t)
+  // a card 60px left of the inbox (clear by its square) whose chip column reaches within 36px
+  t.set('near', { x: u.x - 60 - NODE_W, y: u.y - 30 })
+  const withDocs = (id: string, p: Pt) => cardFurniture(id, p, 1, { docs: id === 'near' ? 4 : 0 })
+  assert.ok(clearance(t, u) >= INBOX_CLEAR && same(placeOrgInbox(t)!, u), 'positive control: the card square alone is clear')
+  assert.ok(furnitureClearance(t, u, withDocs) < INBOX_CLEAR, 'positive control: its chips are not')
+  const at = placeOrgInbox(t, withDocs)!
+  assert.ok(!same(at, u) && furnitureClearance(t, at, withDocs) >= INBOX_CLEAR - 1e-6, 'so the inbox steps past the chips')
+})
+
+test('the furniture numbers are the stylesheet\'s and the components\' own', () => {
+  const css = readFileSync(path.join(__SRC_DIR__, 'styles.css'), 'utf8')
+  const rule = (sel: string) => { const at = css.indexOf('\n' + sel + ' {'); assert.ok(at >= 0, sel); return css.slice(at, css.indexOf('}', at)) }
+  assert.match(rule('.cbar'), /left: -22px; bottom: 0; width: 14px;/, '.cbar: 22px out, 14 wide, on the bottom edge')
+  assert.match(rule('.cbar-inf-wrap'), /left: -22px; bottom: 0; width: 14px; height: 220px;/, 'the eye\'s bar is 220px')
+  assert.match(rule('.doc-chips'), /left: calc\(100% \+ 3px\); top: 26px;[\s\S]*gap: 3px;/, '.doc-chips column')
+  assert.match(rule('.doc-chip'), /width: 21px; height: 21px;/, '21px chips')
+  const docs = readFileSync(path.join(__SRC_DIR__, 'canvas', 'docs.tsx'), 'utf8')
+  assert.match(docs, /docs\.slice\(-4\)\.map/, 'at most four chips')
+  const cards = readFileSync(path.join(__SRC_DIR__, 'canvas', 'cards.tsx'), 'utf8')
+  assert.match(cards, /const len = Math\.max\(6, \(seat \+ cur\) \* pxc\)/, 'bar length = max(6, (seat + grant)·pxc)')
+  assert.match(cards, /live && !node\.isBearerOf && lod !== 'mini' && \(\s*<CreditBar seat=\{seat\} grant=\{grant\}/, 'live non-bearer cards draw it')
+  const canvas = readFileSync(path.join(__SRC_DIR__, 'canvas', 'OrgCanvas.tsx'), 'utf8')
+  assert.match(canvas, /const pxPerCredit = useMemo\(\(\) => orgPxc\(tree\), \[tree\]\)/, 'bars are drawn at orgPxc(tree)')
+  assert.match(canvas, /const inboxPxc = useMemo\(\(\) => orgPxc\(tree\), \[tree\]\)/, 'and the inbox is placed at the same scale')
+})
+
 test('OrgCanvas places the inbox through placeOrgInbox, after every other card', () => {
   const src = readFileSync(path.join(__SRC_DIR__, 'canvas', 'OrgCanvas.tsx'), 'utf8').split('\r\n').join('\n')
   const at = src.indexOf('const target = useMemo(')
   const body = src.slice(at, src.indexOf('return t\n', at))
-  const inbox = body.indexOf('placeOrgInbox(t)')
+  const inbox = body.indexOf('placeOrgInbox(t, ')
   assert.ok(inbox > 0, 'the target layout uses placeOrgInbox')
   for (const before of ["t.set('dog:'", 'n.isBearerOf && t.has'])
     assert.ok(body.indexOf(before) > 0 && body.indexOf(before) < inbox, `${before} is laid out before the inbox`)

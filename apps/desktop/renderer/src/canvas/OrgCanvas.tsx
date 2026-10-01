@@ -26,7 +26,7 @@ import {
 } from '../icons'
 import {
   ago, ALL_TIER_SEAT, antigravityTierOffer, anyTierSeat, attentionPip, codexTierOffer, setOfferedConditionalTiers, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DOG_H, DOG_W, DRAFT, ease, edgeJumpPlacement, type EJForm, EXTERN, familyOffer, flatten, fmtCredits, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, hireOf, INBOX, INBOX_H, legacyMark, optInLegacyHidden, useShowLegacyModels, jumpTo, layout, NODE_H, NODE_W, noteTierModels, openrouterTierIds, orgPxc, presenceOf, segD, setOpenRouterTiers,
-  placeOrgInbox, providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
+  cardFurniture, placeOrgInbox, providerOf, queuedSwitchTitle, savedView, saveView, segPoint, sizeOf, smooth, SPRING_C, SPRING_K, startView, startZoomOn, TIER_LETTER, TIER_SEAT, tierCapabilityNotes, tierLabel, TIERS, chartLayoutOf, useChartLayout, useCrowdPiles, useHideRetired, usePolled, USER, USER_H,
   peerOrder, ringInsertSide, treeParents, USER_W, withDraftTree, withPendingMoves, Z_DESK, Z_MAX, Z_MINI,
 } from './shared'
 import type {
@@ -914,6 +914,8 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
   }, [vroot, piles])
   const hidden = hiddenMemo
   const chartLayout = useChartLayout()
+  // the credit bars' scale, for the org inbox's clearance (= pxPerCredit below)
+  const inboxPxc = useMemo(() => orgPxc(tree), [tree])
   const target = useMemo(() => {
     const t = layout(vroot, hidden, chartLayout)
     for (const n of map.values()) {           // live bearers float ABOVE the successor
@@ -961,9 +963,16 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
     // only exists once the org has received outside mail or granted an inbox
     // audience; until then the canvas is unchanged. Placed LAST of the cards,
     // so it can step clear of every one of them (placeOrgInbox: the circle
-    // view's rings can grow round to its usual place)
+    // view's rings can grow round to its usual place) and of what they always
+    // draw beside them: credit bars (as tall as the holding) and document chips
     if (tree.org_inbox?.visible) {
-      const at = placeOrgInbox(t)
+      const at = placeOrgInbox(t, (id, p) => {
+        const n = map.get(id)
+        return cardFurniture(id, p, inboxPxc, {
+          credits: n && n.state === 'live' && !n.isBearerOf ? n.seat! + n.grant! : undefined,
+          docs: n?.documents?.length ?? 0,
+        })
+      })
       if (at) t.set(INBOX, at)
     }
     let minY = Infinity
@@ -977,7 +986,7 @@ export function OrgCanvas({ tree, op, slug, toast, mailEvt, onInbox, onOrgSettin
       if (fp) t.set(hid, { x: fp.x, y: fp.y })
     }
     return t
-  }, [vroot, map, tree.org_inbox?.visible, hidden, chartLayout])
+  }, [vroot, map, tree.org_inbox?.visible, hidden, chartLayout, inboxPxc])
   const [view, setView] = useState<View>(() => {
     // fit-on-load: center the initial tree in a typical viewport (re-fit against
     // the REAL viewport once mounted — see the mount effect below)
