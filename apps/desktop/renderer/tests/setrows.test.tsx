@@ -165,8 +165,8 @@ test('§7 a toggle names itself to a screen reader without reading out its own '
     const rows = [...panel.querySelectorAll<HTMLElement>('.set-row')].filter(row => row.querySelector('input[role="switch"]'))
     // Quick Staffing account selection, warm processes, working checkups,
     // MCP readiness wait, idle docket reminders, blocked-docket reminders,
-    // and show legacy models (Terra).
-    assert.equal(rows.length, 7)
+    // show legacy models (Terra), and prefer Luna reserve capacity first.
+    assert.equal(rows.length, 8)
     assert.ok(panel.querySelector(
       'input[role="switch"][aria-label="Include account selection when requesting staffing"]'))
     for (const row of rows) {
