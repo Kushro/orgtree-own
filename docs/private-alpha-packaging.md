@@ -1,5 +1,11 @@
 # 3.0.0-alpha.0 Windows packaging
 
+> **History.** This private packaging path built the 3.0.0 alpha installers
+> before 3.0.0 was released publicly. Since 3.0.0, `package.json` holds the
+> public version and releases use [`release:windows`](windows-release.md). The
+> private packager still works and stamps `PRIVATE_ALPHA_VERSION` into what it
+> builds, but it is no longer the release route.
+
 `3.0.0-alpha.0` is reserved for direct private delivery. It must never be a
 public tag, GitHub release, or updater-feed entry. The ordinary
 `release:windows` and release preflight refuse this version; other stable and

@@ -1,9 +1,12 @@
 # Windows release workflow
 
-Version `3.0.0-alpha.0` is private-only and refused by this public release
-path, including candidate-only mode. Use the separately gated
-[3.0.0-alpha.0 packaging command](private-alpha-packaging.md). Do not create a
-tag, GitHub release, or updater manifest for that version.
+Orgtree 3.0.0 and later are released through this command, like 2.x was. The
+private alpha version named by `PRIVATE_ALPHA_VERSION` in
+`tools/private-alpha-policy.mjs` is still refused by this public release path,
+including candidate-only mode, and is built only with the separately gated
+[private alpha packaging command](private-alpha-packaging.md). Do not create a
+tag, GitHub release, or updater manifest for an alpha version. Releases are
+cut from `main`; 2.x maintenance lives on `release/2.x`.
 
 Windows releases used to depend on scratch scripts and remembered filenames.
 The repository-owned `release:windows` command now builds one exact candidate,

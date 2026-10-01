@@ -1,13 +1,13 @@
-// private-alpha-identity.test.mjs — THE PRIVATE v3 BRANCH IS 3.0.0-alpha.0.
+// private-alpha-identity.test.mjs — v3 IS THE PUBLIC 3.0.0; ITS ALPHA STAYS PRIVATE.
 //
 // private-alpha.test.mjs proves the private packaging POLICY with synthetic
-// versions. This file pins what the private v3 branch itself declares: its
-// package and lockfile say exactly 3.0.0-alpha.0, and every guard is driven
-// with THAT real repository version rather than a literal typed here. So an
-// ordinary build of this branch carries the private version into
-// build-info.json, and every public path refuses it:
-// release:windows, package:win/package:dir preflight, publication, and even
-// package:dev, which accepts only a plain x.y.z base version.
+// versions. This file pins what the v3 branch itself declares. Since the
+// 3.0.0 release its package and lockfile say the public 3.0.0, which every
+// public path accepts, while the private packager still stamps its own alpha
+// version (PRIVATE_ALPHA_VERSION) into what it builds. Every public path
+// refuses THAT alpha version: release:windows, package:win/package:dir
+// preflight, publication, and even package:dev, which accepts only a plain
+// x.y.z base version.
 //
 // Nothing here builds, packages, installs, runs git or reaches the network.
 import test from 'node:test'
@@ -39,17 +39,22 @@ const unexpected = () => { throw new Error('EXTERNAL SIDE EFFECT') }
 // uninstall registry key and the per-installation registry key derive from it.
 const NSIS_NAMESPACE = UUID.parse('50e065bc-3134-11e6-9bab-38c9862bdaf3')
 
-test('the private v3 package and lockfile identify exactly 3.0.0-alpha.0', () => {
-  assert.equal(pkg.version, VERSION)
-  assert.doesNotThrow(() => assertLockfileVersion(VERSION, lock))
-  // The private packager stamps the same version into the packed package.json
-  // and names the one deliverable after it.
+test('the v3 package and lockfile identify the public 3.0.0; the private packager keeps its alpha version', () => {
+  assert.equal(pkg.version, '3.0.0')
+  assert.notEqual(pkg.version, VERSION)
+  assert.doesNotThrow(() => assertLockfileVersion(pkg.version, lock))
+  // The public release path accepts the package version.
+  assert.doesNotThrow(() => assertPublicReleaseAllowed(pkg.version))
+  assert.equal(parseReleaseArgs([pkg.version, '--publish']).version, pkg.version)
+  assert.equal(releasePlan(pkg.version, { publish: true }).publication.tag.at(-1), `v${pkg.version}`)
+  // The private packager stamps ITS version, not package.json's, into the
+  // packed package.json and names the one deliverable after it.
   const config = privateAlphaConfig(pkg.build)
-  assert.equal(config.extraMetadata.version, pkg.version)
-  assert.equal(config.artifactName, `Orgtree-Setup-${pkg.version}.exe`)
+  assert.equal(config.extraMetadata.version, VERSION)
+  assert.equal(config.artifactName, `Orgtree-Setup-${VERSION}.exe`)
   assert.equal(config.nsis.artifactName, PRIVATE_ALPHA_INSTALLER)
   const plan = privateAlphaPlan(pkg.build)
-  assert.equal(plan.version, pkg.version)
+  assert.equal(plan.version, VERSION)
   assert.equal(plan.publication, false)
   assert.deepEqual(plan.package.slice(-2), ['--publish', 'never'])
 })
@@ -93,22 +98,22 @@ test("negative control: a build config that drifted from 2.1.12's identity is re
   ]) assert.throws(() => privateAlphaConfig(build), /install over 2\.1\.12/, what)
 })
 
-test('negative control: every public release path refuses this branch\'s real version', async () => {
-  assert.throws(() => assertPublicReleaseAllowed(pkg.version), /private-only/)
-  assert.throws(() => parseReleaseArgs([pkg.version]), /private-only/)
-  assert.throws(() => parseReleaseArgs([pkg.version, '--publish']), /private-only/)
-  assert.throws(() => releasePlan(pkg.version, { publish: true }), /private-only/)
-  await assert.rejects(produceWindowsRelease({ version: pkg.version },
+test('negative control: every public release path refuses the private alpha version', async () => {
+  assert.throws(() => assertPublicReleaseAllowed(VERSION), /private-only/)
+  assert.throws(() => parseReleaseArgs([VERSION]), /private-only/)
+  assert.throws(() => parseReleaseArgs([VERSION, '--publish']), /private-only/)
+  assert.throws(() => releasePlan(VERSION, { publish: true }), /private-only/)
+  await assert.rejects(produceWindowsRelease({ version: VERSION },
     { execFileSync: unexpected, spawnSync: unexpected, fetch: unexpected,
       runExternal: unexpected, runGit: unexpected }), /private-only/)
-  await assert.rejects(publishRelease({ manifest: { version: pkg.version, tag: `v${pkg.version}` },
+  await assert.rejects(publishRelease({ manifest: { version: VERSION, tag: `v${VERSION}` },
     runGit: unexpected, runExternal: unexpected, fetchImpl: unexpected }), /private-only/)
 })
 
 test('negative control: this branch cannot be released under a stable 2.x version either', async t => {
   // The other half of the boundary: v3 source must not ship as a stable 2.x
   // update. release:windows requires the target to equal package.json's
-  // version, and that is now the private version.
+  // version, and that is 3.0.0.
   for (const stable of ['2.1.10', '2.1.12', '2.1.13', '2.2.0-beta.0']) {
     assert.throws(() => assertVersionMatchesPackage(stable, pkg.version), /does not match package.json/)
     assert.throws(() => assertLockfileVersion(stable, lock), /does not match/)
@@ -127,29 +132,31 @@ test('negative control: this branch cannot be released under a stable 2.x versio
   await assert.rejects(produceWindowsRelease({ version: '2.1.13' },
     { root, execFileSync: gitRootOnly, spawnSync: unexpected, fetch: unexpected,
       runExternal: unexpected, runGit: unexpected }),
-    new RegExp(`does not match package.json version ${VERSION.replaceAll('.', '\\.')}`))
+    new RegExp(`does not match package.json version ${pkg.version.replaceAll('.', '\\.')}`))
   assert.deepEqual(fs.readdirSync(root).sort(), ['package-lock.json', 'package.json'],
     'the refused release wrote nothing')
 })
 
-test('negative control: an ordinary (non-private) build of this branch cannot be packaged publicly', () => {
+test('negative control: an ordinary (non-private) build carrying the alpha version cannot be packaged publicly', () => {
   // tools/build.mjs without --private-alpha records package.json's version on
   // the release channel. package:win / package:dir run this preflight.
-  const ordinary = { version: pkg.version, channel: 'release', commit: candidate, dirty: false, sha256: {} }
+  const ordinary = { version: VERSION, channel: 'release', commit: candidate, dirty: false, sha256: {} }
   assert.throws(() => assertNoUpdateFixture(ordinary, 'bundle', { readFileSync: () => '' }), /private-only/)
   assert.throws(() => assertReleaseProvenance(ordinary, candidate, ''), /private-only/)
+  // The same ordinary build at this branch's real version passes the guard.
+  assert.doesNotThrow(() => assertPublicReleaseAllowed(pkg.version, { ...ordinary, version: pkg.version }))
 })
 
 test('negative control: package:dev fails closed on the private version', () => {
   // devVersion accepts only a plain x.y.z base, so the dev channel cannot mint
-  // a second identity for this branch; the private packager is the only path.
-  assert.throws(() => devBuildInfo({ version: pkg.version, commit: candidate, dirty: false }),
+  // a second identity for the alpha; the private packager is the only path.
+  assert.throws(() => devBuildInfo({ version: VERSION, commit: candidate, dirty: false }),
     /plain x\.y\.z base version/)
   // The dev channel's own guard is unchanged for a stable base.
   assert.doesNotThrow(() => devPackagingConfig(pkg.build, '2.1.12-dev.gabcdef1234'))
 })
 
-test('a stable 2.x installation is never offered this prerelease, and the 3.0.0-alpha.0 build has no updater', async t => {
+test('a stable installation is never offered the alpha, 3.0.0 is stable, and the alpha build has no updater', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'orgtree-alpha-channel-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
   const compiled = {}
@@ -163,8 +170,10 @@ test('a stable 2.x installation is never offered this prerelease, and the 3.0.0-
   const stable = compiled[false]
   // Stable installations accept stable releases only, so even a (forbidden)
   // published alpha would not be offered to them.
-  for (const installed of ['2.1.10', '2.1.12']) assert.equal(stable.allowPrereleaseUpdates(installed), false)
-  assert.equal(stable.updateChannelOf(pkg.version), 'alpha')
+  for (const installed of ['2.1.10', '2.1.12', '2.1.14', pkg.version]) assert.equal(stable.allowPrereleaseUpdates(installed), false)
+  assert.equal(stable.updateChannelOf(VERSION), 'alpha')
+  // The public 3.0.0 is on the stable channel that 2.x installations read.
+  assert.equal(stable.updateChannelOf(pkg.version), null)
   // The 3.0.0-alpha.0 build's identity is the installed release's (same
   // appId, AUMID, userData `Orgtree v2`, display name), with no updater at
   // all, even with the update fixture requested, and its data root locked.
