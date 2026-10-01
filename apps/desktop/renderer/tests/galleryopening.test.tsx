@@ -1,7 +1,8 @@
 import { advance, flush, inAct, mountView, realClock, useFakeClock } from './harness'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { DocGalleryModal } from '../src/canvas/gallery'
+import { AgentGalleryView, DocGalleryModal } from '../src/canvas/gallery'
+import type { CanvasNode } from '../src/canvas/shared'
 
 const noop = () => {}
 const docs = [
@@ -52,4 +53,28 @@ test('explicit gallery jump selects its document and survives clearing the handl
   await view.render(<DocGalleryModal slug="jump-org" toast={noop} close={noop} />)
   await flush()
   assert.match(view.el.querySelector('.mailer-read')?.textContent ?? '', /body of old/)
+})
+
+test('agent gallery opens its newest presentation, keeps an explicit document, and keeps a manual choice', async t => {
+  useFakeClock()
+  const original = globalThis.fetch
+  const mine = docs.filter(d => d.node === 'alice')
+  globalThis.fetch = (async url => {
+    const path = String(url), doc = docs.find(d => path.endsWith(`/documents/${d.id}`))
+    return {ok:true,status:200,headers:new Headers(),json:async()=> doc ? {...doc,body:`body of ${doc.id}`} : {documents:docs}} as Response
+  }) as typeof fetch
+  const node = { id: 'alice', state: 'live', tier: 'haiku', children: [], documents: [] } as unknown as CanvasNode
+  const view = await mountView(<AgentGalleryView slug="agent-open-org" nid="alice" node={node} toast={noop} />, el => el)
+  t.after(async()=>{await view.unmount();globalThis.fetch=original;realClock()})
+  await flush()
+  assert.match(view.el.querySelector('.mailrow.on')?.textContent ?? '', /Newest visible/)
+  assert.match(view.el.querySelector('.mailer-read')?.textContent ?? '', /body of new/)
+  const older = [...view.el.querySelectorAll('.mailrow')].find(r => /Older document/.test(r.textContent ?? ''))!
+  await inAct(()=> (older as HTMLElement).click())
+  await flush(); await advance(5001); await flush()
+  assert.match(view.el.querySelector('.mailer-read')?.textContent ?? '', /body of old/, 'a manual choice survives the poll')
+  await view.render(<AgentGalleryView slug="agent-open-org" nid="alice" node={node} toast={noop} initialDocument="old" />)
+  await flush()
+  assert.match(view.el.querySelector('.mailer-read')?.textContent ?? '', /body of old/, 'an explicit document is kept')
+  assert.equal(mine.length, 2)
 })

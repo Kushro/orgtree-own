@@ -740,6 +740,19 @@ export function AgentGalleryView({ slug, nid, node, toast, onFocusAgent, onReply
 
   const [selId, setSelId] = useState<string | null>(initialDocument ?? null)
   useEffect(() => {setSelId(initialDocument ?? null); setDismissed([])}, [slug, nid, initialDocument])
+  // Opening the list selects the newest presentation once, like the org
+  // gallery does. A document the surface was opened to keeps selection, and a
+  // later deselect or dismissal is never undone.
+  const opening = useRef({ key: '', pending: true })
+  useEffect(() => {
+    const key = JSON.stringify([slug, nid, initialDocument ?? null])
+    if (opening.current.key !== key) opening.current = { key, pending: !initialDocument }
+    if (!opening.current.pending || !rows.length) return
+    opening.current.pending = false
+    let newest = rows[0]!
+    for (const r of rows) if (Date.parse(r.at) > Date.parse(newest.at)) newest = r
+    setSelId(newest.id)
+  }, [slug, nid, initialDocument, rows])
   // Tell an owning window WHAT IS ON SCREEN, every time it changes — a row
   // picked from the list, a document opened by reference from the pane, a
   // dismissal that clears the selection. Whoever holds the window publishes
