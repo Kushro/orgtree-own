@@ -304,6 +304,40 @@ test('the ticket that opens after a dismissal also opens at the bottom', async (
   } finally { await v.unmount() }
 })
 
+test('a slow full-ticket load: the scroll waits for the full pane, then is spent', async () => {
+  localStorage.clear()
+  installServer({ items: [{ ...flagged, view: 'list' } as WorkItem] })
+  const base = (globalThis as unknown as { fetch: typeof fetch }).fetch
+  let release: (() => void) | null = null
+  const gate = new Promise<void>((r) => { release = r })
+  ;(globalThis as unknown as { fetch: unknown }).fetch = ((url: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(url), 'http://localhost').pathname
+    if (/\/work-items\/cutover$/.test(path) && !init?.method) {
+      return gate.then(() => ({ ok: true, status: 200, headers: new Headers(),
+        json: () => Promise.resolve({ item: flagged }) }))
+    }
+    return base(url, init)
+  }) as typeof fetch
+  const v = await mountView(panel(), titles)
+  try {
+    const detail = withHeight(v.el)
+    await settle()
+    assert.equal(!!detail.querySelector('.docket-pane-head'), false, 'control: still on the placeholder')
+    // the content grows when the full ticket arrives, long after any fixed delay
+    await new Promise((r) => setTimeout(r, 2300))
+    Object.defineProperty(detail, 'scrollHeight', { configurable: true, value: 900 })
+    await inAct(async () => { release!(); await flush(8) })
+    await settle()
+    assert.equal(!!detail.querySelector('.docket-pane-head'), true, 'the full ticket rendered')
+    assert.equal(detail.scrollTop, 900, 'the scroll did not wait for the full ticket')
+    // spent: the reader scrolls up and a later render of the pane leaves them be
+    detail.scrollTop = 40
+    server.items = server.items.map((i) => ({ ...i, rev: i.rev + 1 }))
+    await repoll()
+    assert.equal(detail.scrollTop, 40, 'a later update moved the reader')
+  } finally { await v.unmount() }
+})
+
 test('removing an unselected entry leaves the selection where it is', async () => {
   localStorage.clear()
   installServer({ items: [flagged, { ...flagged, slug: 'middle', title: 'Middle' },

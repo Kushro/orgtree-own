@@ -314,25 +314,28 @@ export function AttentionQueue({
     return () => onNotificationFocus(null)
   })
   // Scroll the pane to the bottom once the selected ticket has rendered. The
-  // pane loads the full ticket after mounting, so the content grows for a
-  // moment: follow it until the reader touches the pane or 2 s pass, then stop
-  // for good — later live updates never move the reader.
+  // pane loads the full ticket after mounting (a placeholder first), so the
+  // scroll is owed until the full pane — the one carrying the attention
+  // reason — is in the DOM, however long the request takes; then it is spent.
+  // Until then it also yields to the reader: any touch of the pane cancels it.
   useLayoutEffect(() => {
     const pane = detailRef.current
     if (!pane || !selected || bottomFor.current !== selected) return
     bottomFor.current = null
     const toBottom = () => { pane.scrollTop = pane.scrollHeight }
-    toBottom()
     const cell = pane.firstElementChild
-    if (typeof ResizeObserver === 'undefined' || !cell) return
-    const ro = new ResizeObserver(toBottom)
-    ro.observe(cell)
-    const stop = () => ro.disconnect()
-    const timer = window.setTimeout(stop, 2000)
+    const full = () => !!cell?.querySelector('.docket-pane-head')
+    toBottom()
+    if (!cell || full()) return
+    const watch = new window.MutationObserver(() => {
+      toBottom()
+      if (full()) watch.disconnect()
+    })
+    watch.observe(cell, { childList: true, subtree: true })
+    const stop = () => watch.disconnect()
     const touch = ['wheel', 'touchstart', 'pointerdown', 'keydown']
     for (const t of touch) pane.addEventListener(t, stop, { once: true })
     return () => {
-      window.clearTimeout(timer)
       stop()
       for (const t of touch) pane.removeEventListener(t, stop)
     }
