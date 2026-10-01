@@ -30,8 +30,15 @@ const CLAUDE: UsageAllPayload = { accounts: [{
 test('creditsText formats what the provider reported and nothing else', () => {
   assert.equal(creditsText({ balance: 62036.6481075, unit: 'credits', unlimited: false }),
     'credits: 62,036')
+  assert.equal(creditsText({ balance: 1.999, unit: 'credits', unlimited: false }),
+    'credits: 1', 'whole credits truncate, never round up')
+  // review-sol F1: a positive balance below one is still a balance — never "0"
   assert.equal(creditsText({ balance: 0.4, unit: 'credits', unlimited: false }),
-    'credits: 0', 'a fraction rounds down, never up')
+    'credits: 0.4')
+  assert.equal(creditsText({ balance: 0.999, unit: 'credits', unlimited: false }),
+    'credits: 0.99', 'below one truncates too, never up to 1')
+  assert.equal(creditsText({ balance: 0.0042, unit: 'credits', unlimited: false }),
+    'credits: 0.0042')
   assert.equal(creditsText({ balance: 12.5, unit: 'USD', unlimited: false }),
     'credits: $12.50')
   assert.equal(creditsText({ balance: 7, unit: 'EUR', unlimited: false }),

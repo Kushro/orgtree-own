@@ -220,8 +220,12 @@ def _credits(snapshots: list[dict[str, Any]]) -> dict[str, Any] | None:
             continue
         if credits.get("unlimited") is True:
             return {"balance": None, "unit": "credits", "unlimited": True}
+        raw_balance = credits.get("balance")
+        # ⚠ float(True) is 1.0: a boolean is not a balance (review-sol F2)
+        if isinstance(raw_balance, bool):
+            continue
         try:
-            balance = float(credits.get("balance"))
+            balance = float(raw_balance)
         except (TypeError, ValueError):
             continue
         if not math.isfinite(balance) or balance <= 0:

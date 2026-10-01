@@ -137,16 +137,24 @@ export function SpendTotal({ u }: { u: AccountUsage }) {
   </div>
 }
 
-/** "credits: 62,036" / "credits: $12.50" / "credits: unlimited", or null
- *  when there is nothing to show. Codex credits round DOWN, so the line never
- *  claims more than the provider reported. */
+/** "credits: 62,036" / "credits: 0.4" / "credits: $12.50" / "credits:
+ *  unlimited", or null when there is nothing to show. Codex credits are
+ *  TRUNCATED, never rounded up, so the line never claims more than the
+ *  provider reported: whole credits from 1 up, and two significant digits
+ *  below 1 — a reported 0.4 is a balance, and must not read as "0" (review
+ *  review-sol F1). */
 export function creditsText(c: UsageCredits | null | undefined): string | null {
   if (!c) return null
   if (c.unlimited) return 'credits: unlimited'
   const n = c.balance
   if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return null
   if (c.unit === 'credits') {
-    return 'credits: ' + Math.floor(n).toLocaleString('en-US')
+    return 'credits: ' + (n >= 1
+      ? Math.floor(n).toLocaleString('en-US')
+      // `roundingMode` (ES2023) is supported by Electron's Chromium and Node,
+      // but this repo's TypeScript lib does not declare it yet
+      : n.toLocaleString('en-US', { maximumSignificantDigits: 2,
+        roundingMode: 'trunc' } as Intl.NumberFormatOptions))
   }
   try {
     return 'credits: ' + new Intl.NumberFormat('en-US',

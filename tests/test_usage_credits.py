@@ -140,6 +140,9 @@ class CodexCreditsTests(unittest.TestCase):
                 {"hasCredits": True, "unlimited": False, "balance": "lots"},
                 {"hasCredits": True, "unlimited": False, "balance": "nan"},
                 {"hasCredits": True, "unlimited": False, "balance": "inf"},
+                # review-sol F2: float(True) == 1.0, never one credit
+                {"hasCredits": True, "unlimited": False, "balance": True},
+                {"hasCredits": True, "unlimited": False, "balance": False},
                 {"hasCredits": "yes", "unlimited": False, "balance": "500"},
                 "62036"):
             with self.subTest(credits=credits):
