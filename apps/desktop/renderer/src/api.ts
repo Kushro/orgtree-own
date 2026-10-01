@@ -527,8 +527,6 @@ export const continueOnAccount = (slug: string, nid: string, account: string):
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ account }),
     })
-export const removeReplyEvents = (slug: string, nid: string): Promise<{ removed: number }> =>
-  req(`/api/orgs/${encodeURIComponent(slug)}/nodes/${encodeURIComponent(nid)}/reply-events`, { method: 'DELETE' })
 export const creditDecide = (
   slug: string, id: string, action: string,
   // F-05: `granted` = the counter-offer amount; `dry` = validate + stranding

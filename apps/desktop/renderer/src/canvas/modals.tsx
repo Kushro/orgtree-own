@@ -17,7 +17,7 @@ import type {
   ChatInit, DirGrant, ProviderInfo, ToastFn, ToolGrant, TreePayload, Watchdog,
 } from '../types'
 import {
-  assignAccount, dissolveAll, getChat, getCompleteTree, getMcpServers, removeReplyEvents,
+  assignAccount, dissolveAll, getChat, getCompleteTree, getMcpServers,
   req, saveScope, watchdogAction,
 } from '../api'
 import { pickFolder } from '../picker'
@@ -964,17 +964,7 @@ export function NodeConfig({ node, map, tree, slug, op, toast, codexProvider,
   // Escape belongs to PinFrame now: a CENTRED surface still closes on it, a
   // PINNED window ignores it the way an agent window does.
   const [asking, setAsking] =
-    useState<'delete' | 'dissolve' | 'retire' | 'rescind' | 'crossprovider' | 'reply-quotes' | null>(null)
-  const [removingQuotes, setRemovingQuotes] = useState(false)
-  const [retainedQuotes, setRetainedQuotes] = useState(0)
-  useEffect(() => {
-    let current = true
-    setRetainedQuotes(0)
-    req<{ count: number }>(`/api/orgs/${slug}/nodes/${node.id}/reply-events`)
-      .then(r => { if (current) setRetainedQuotes(r.count || 0) })
-      .catch(() => {})
-    return () => { current = false }
-  }, [slug, node.id])
+    useState<'delete' | 'dissolve' | 'retire' | 'rescind' | 'crossprovider' | null>(null)
   // every card that opens a config panel carries a scope (real nodes and
   // bearer stubs both) — only the eye root and drafts lack one
   const scope = node.scope!
@@ -1308,11 +1298,6 @@ export function NodeConfig({ node, map, tree, slug, op, toast, codexProvider,
             onClick={() => setAsking('delete')}><DeleteIcon fontSize="inherit" /> delete permanently</button>
         </div>
 
-        <div className="row">
-          <>{retainedQuotes > 0 && <button className="danger" disabled={removingQuotes}
-            onClick={() => setAsking('reply-quotes')}>Remove retained reply quotes</button>}</>
-        </div>
-
         {/* Cache disclosure (user request 2026-09-04). ONE note for the
             common case plus a per-field line only where the blast radius
             DIFFERS — a wider scope, a different mechanism, or no cost at
@@ -1613,19 +1598,6 @@ export function NodeConfig({ node, map, tree, slug, op, toast, codexProvider,
           a pinned panel they would be trapped in its stacking context — see
           ModalOverPins */}
       {asking && <ModalOverPins>
-      {asking === 'reply-quotes' && (
-        <ConfirmModal title={`Remove retained reply quotes for ${node.id}?`}
-          body="Removes this agent's retained reply-source snapshots. Existing references to those snapshots will no longer resolve. Transcripts and sent mail are kept. This cannot be undone."
-          confirmLabel="Remove retained reply quotes"
-          close={() => setAsking(null)}
-          onConfirm={() => {
-            setRemovingQuotes(true)
-            removeReplyEvents(slug, node.id)
-              .then(r => { setRetainedQuotes(0); toast([`Removed ${r.removed} retained reply quote${r.removed === 1 ? '' : 's'} for ${node.id}.`]) })
-              .catch((e: Error) => toast([`error: ${e.message}`]))
-              .finally(() => setRemovingQuotes(false))
-          }} />
-      )}
       {asking === 'crossprovider' && (
         <ConfirmModal
           title={midTurn
