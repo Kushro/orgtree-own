@@ -521,6 +521,30 @@ test('publication never deletes a pre-existing or ambiguous GitHub release', asy
   }
 })
 
+test('publication verification gives 404 propagation bounded backoff without republishing', async () => {
+  for (const terminalStatus of [404, 403]) {
+    const fixture = publicationFixture()
+    let lookups = 0
+    const waits = []
+    const mutations = []
+    try {
+      await assert.rejects(() => publishRelease({
+        ...fixture,
+        runGit: args => mutations.push(args),
+        runExternal: (_command, args) => mutations.push(args),
+        spawnSyncImpl: (_command, args) => ({ status: args[0] === 'show-ref' ? 1 : 2 }),
+        fetchImpl: async () => responseJson({}, lookups++ === 0 ? 404 : terminalStatus),
+        verificationSleep: async ms => { waits.push(ms) },
+      }), error => error.message.includes(`GitHub request failed (${terminalStatus})`))
+      assert.equal(lookups, terminalStatus === 404 ? 10 : 2, 'one collision check plus bounded verification attempts')
+      assert.deepEqual(waits, terminalStatus === 404 ? [3000, 6000, 9000, 12000, 15000, 18000, 21000, 24000] : [])
+      assert.equal(waits.reduce((total, ms) => total + ms, 0), terminalStatus === 404 ? 108000 : 0)
+      assert.equal(mutations.filter(args => args[0] === 'release' && args[1] === 'create').length, 1)
+      assert.equal(mutations.filter(args => args[0] === 'release' && args[1] === 'edit').length, 1)
+    } finally { removeFixture(fixture.root) }
+  }
+})
+
 test('build provenance refuses a build stamped for a different HEAD', () => {
   const root = fixtureRoot()
   try {

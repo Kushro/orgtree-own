@@ -822,7 +822,8 @@ function retryableStatus(status) {
   return status === 404 || status === 408 || status === 425 || status === 429 || status >= 500
 }
 
-async function fetchWithRetry(fetchImpl, url, { accept, retries = 4, delayMs = 250 } = {}) {
+async function fetchWithRetry(fetchImpl, url, { accept, retries = 4, delayMs = 250,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   let lastError = null
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
@@ -833,7 +834,7 @@ async function fetchWithRetry(fetchImpl, url, { accept, retries = 4, delayMs = 2
       lastError = error
       if (attempt === retries) throw error
     }
-    if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs * (attempt + 1)))
+    if (delayMs > 0) await sleep(delayMs * (attempt + 1))
   }
   throw lastError || new Error('request failed')
 }
@@ -1059,7 +1060,7 @@ function makeHandoff({ root, releaseDir, manifest, publishedUrl = null }) {
   }
 }
 
-export async function publishRelease({ root, manifest, notes, repository, uploadDir, runExternal, runGit, fetchImpl, spawnSyncImpl }) {
+export async function publishRelease({ root, manifest, notes, repository, uploadDir, runExternal, runGit, fetchImpl, spawnSyncImpl, verificationSleep }) {
   assertPublicReleaseAllowed(manifest.version, manifest)
   assertPublicReleaseAllowed(String(manifest.tag).replace(/^v/, ''))
   const { owner, repo } = repository
@@ -1102,7 +1103,10 @@ export async function publishRelease({ root, manifest, notes, repository, upload
     }
     throw new ReleaseError(`Publication failed; no GitHub release was auto-deleted because a failed CLI call may have created an ambiguous draft. Inspect the tag/release before retrying; no existing release was replaced: ${error.message}`)
   }
-  const verification = await verifyPublicRelease({ manifest, owner, repo, tag: manifest.tag, fetchImpl })
+  // Draft-to-public propagation has taken over a minute. Eight bounded waits
+  // (3+6+...+24 seconds = 108 seconds) cover that without repeating publication.
+  const verification = await verifyPublicRelease({ manifest, owner, repo, tag: manifest.tag, fetchImpl,
+    retry: { retries: 8, delayMs: 3000, ...(verificationSleep ? { sleep: verificationSleep } : {}) } })
   return { verification, url: verification.release.html_url || `https://github.com/${owner}/${repo}/releases/tag/${manifest.tag}` }
 }
 
