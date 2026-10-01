@@ -487,7 +487,8 @@ TOOLS: list[dict[str, Any]] = [
                                                                "agent above you both, `review_grant` is "
                                                                "their answer, and each seat covers ONE "
                                                                "entry into review (a recheck after "
-                                                               "`changes` needs a fresh grant). Also "
+                                                               "`changes` keeps the same reviewer's "
+                                                               "seat on the same item). Also "
                                                                "names the reviewer for "
                                                                "review_request/review_grant/review_revoke")},
                 "decision": {"type": "string", "enum": ["approve", "approve_stage", "changes"],
@@ -694,7 +695,8 @@ TOOLS: list[dict[str, Any]] = [
                                                                 "the candidate judged · review with "
                                                                 "approve_stage: REQUIRED")},
                 "base": {"type": "string", "description": ("receipt: the candidate's base commit "
-                                                           "(default: its git parent)")},
+                                                           "(default: its git parent); update: "
+                                                           "base SHA in the atomic review packet")},
                 "checkout": {"type": "string", "description": ("receipt/rangediff: REQUIRED — the "
                                                                "worktree the check ran in (a directory "
                                                                "you hold); its commit, dirtiness and "

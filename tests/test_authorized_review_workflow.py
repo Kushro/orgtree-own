@@ -35,6 +35,7 @@ def fixture():
         objective="Problem: candidate and completion reviews were conflated. "
                   "Solution: keep a nonterminal exact-candidate verdict.",
         participants=["peer-b"],
+        kind="non-code",
     )
     return org, org.d["work_items"][-1]["slug"]
 
@@ -56,6 +57,44 @@ def review(org, slug, reviewer="peer-b"):
 
 
 class AuthorizedReviewTests(unittest.TestCase):
+    def test_review_mail_uses_packet_candidate_and_base_over_old_claim(self):
+        org, slug = fixture()
+        it = item(org, slug)
+        it["kind"] = "code"
+        it["delivery"] = {"committed": {"ref": "b" * 40}}
+        org.work_update("owner-a", slug, ["ready"], [], status="review",
+                        reviewer="peer-b", review_candidate="a" * 40,
+                        review_base="c" * 40)
+        mail = org.d["mail"]["peer-b"][-1]
+        self.assertEqual(mail["ev"]["candidate"], it["review_packet"]["candidate"])
+        self.assertEqual(mail["ev"]["base"], it["review_packet"]["base"])
+        self.assertIn("a" * 40, mail["body"])
+        self.assertIn("c" * 40, mail["body"])
+        self.assertNotIn("b" * 40, mail["body"])
+
+    def test_code_review_without_packet_candidate_is_atomic_refusal(self):
+        org, slug = fixture()
+        it = item(org, slug)
+        it["kind"] = "code"
+        it["delivery"] = {"committed": {"ref": "b" * 40}}
+        before = copy.deepcopy(org.d)
+        with self.assertRaisesRegex(LedgerError, "code review request needs"):
+            review(org, slug)
+        self.assertEqual(org.d, before)
+        with self.assertRaisesRegex(LedgerError, "code review request needs"):
+            org.work_update("owner-a", slug, ["ready"], [], status="review",
+                            reviewer="peer-b", review_note="evidence only")
+        self.assertEqual(org.d, before)
+
+    def test_invalid_review_base_is_atomic_refusal(self):
+        org, slug = fixture()
+        before = copy.deepcopy(org.d)
+        with self.assertRaises(LedgerError):
+            org.work_update("owner-a", slug, ["ready"], [], status="review",
+                            reviewer="peer-b", review_candidate="a" * 40,
+                            review_base="bad-base")
+        self.assertEqual(org.d, before)
+
     def test_participant_and_same_reviewer_round_trip_without_peer_escalation(self):
         org, slug = fixture()
         # An existing participant is explicitly authorized to receive review.
@@ -106,6 +145,7 @@ class AuthorizedReviewTests(unittest.TestCase):
         org, first = fixture()
         second = org.work_create(
             "owner-a", "Second candidate fixture",
+            kind="non-code",
             objective="Problem: grouped review needs atomicity. "
                       "Solution: validate the full group first.",
             participants=["peer-b"],

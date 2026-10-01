@@ -231,6 +231,7 @@ LEAVES: Final[dict[str, dict[str, Any]]] = {
         owner=F("str", B, True), objective=F("str", B, True),
         done_so_far=F("[str]", B, True), acceptance=F("[str]", B, True),
         revision=F("int", B, True), candidate=F("str?", B, True),
+        base=F("str?", B, False),
         # W09 — see docket.assigned. A reviewer reads the description to judge
         # the work against it, so they need this as much as the owner does.
         objective_notice=F("str?", B, True),
@@ -255,7 +256,8 @@ LEAVES: Final[dict[str, dict[str, Any]]] = {
         decision=F("L[granted|revoked|declined]", B, True),
         # True only when the grant also handed the seat over on the spot,
         # which it does exactly when the item was already at status review.
-        seated=F("bool", B, True), note=F("str?", B, True)),
+        seated=F("bool", B, True), note=F("str?", B, True),
+        revision=F("int", B, False)),
     "docket.review_changes": leaf(
         "review", "WorkItemRef", reviewer=F("str", B, True), owner=F("str", B, True, _YOU),
         note=F("str?", B, True), relayed=F("bool", B, True)),

@@ -170,7 +170,7 @@ def _r_review_requested(ev: _R) -> str:
               "back to the owner as in_progress, and your note is what they act "
               "on). Until you decide, the next action on this item is yours."
             + f"\nRequested by {_user_or(str(ev['requested_by']))}."
-            + f"\nIssued at item revision {int(ev.get('revision') or 0)}; candidate {ev.get('candidate') or '(none claimed)'}."
+            + f"\nIssued at item revision {int(ev.get('revision') or 0)}; candidate {ev.get('candidate') or '(none supplied)'}; base {ev.get('base') or '(none supplied)'}."
             + f"\nDescription: {_desc(ev)}"
              + "\nAcceptance conditions: "
              + ("; ".join(ev["acceptance"]) or "(none recorded)")
@@ -219,10 +219,9 @@ def _r_review_seat_decided(ev: _R) -> str:
                    "\nYou can now put the item into review naming "
                    f"{rid} — orgtree_work action='update' slug={slug} "
                    f"status=review reviewer={rid}.")
-                + f"\nTHE GRANT COVERS ONE REVIEW ROUND (user ruling "
-                  f"2026-09-16). Naming {rid} spends it. If {rid} comes back "
-                  "with `changes` and you want it to look again, ask "
-                  f"{who} for a fresh seat.")
+                + f"\nNaming {rid} spends the grant. A `changes` verdict "
+                  "keeps permission for the same reviewer's next entry into "
+                  "review on this item.")
     elif ev["decision"] == "revoked":
         body = (f"{who} REVOKED {rid}'s review seat on this item. Naming "
                 f"{rid} as reviewer is refused again until somebody above you "
@@ -233,6 +232,8 @@ def _r_review_seat_decided(ev: _R) -> str:
                 "this item. Nothing changed; name a reviewer you may already "
                 "name, or ask for a different one.")
     return (_docket_head("REVIEW SEAT", ev) + body
+            + (f"\nIssued at item revision {ev['revision']}."
+               if ev.get("revision") is not None else "")
             + (f"\nTheir note: {_note(ev, 'decision')}" if note else ""))
 
 

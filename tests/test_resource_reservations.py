@@ -1,5 +1,6 @@
 """Focused W09 tests; no live org or filesystem data is read."""
 
+import copy
 import unittest
 
 import import_provenance  # noqa: F401  asserts orgtree resolves inside this checkout
@@ -117,6 +118,27 @@ class ResourceReservationTests(unittest.TestCase):
             item_reader=self.visible, now_ts=self.ts + 2)
         self.assertTrue(land["landed"])
         self.assertTrue(replay["replayed"])
+
+    def test_release_after_land_is_noop_and_does_not_wake_successor(self):
+        got = self.acquire()
+        rid = got["reservation"]["id"]
+        reservations.execute(self.doc, "owner", {
+            "action": "land", "reservation": rid},
+            item_reader=self.visible, now_ts=self.ts + 1)
+        before = copy.deepcopy(self.doc)
+        for _ in range(2):
+            result = reservations.execute(self.doc, "owner", {
+                "action": "release", "reservation": rid, "successor": "successor"},
+                item_reader=self.visible, now_ts=self.ts + 2)
+            self.assertEqual(result["status"], "land already freed the slot")
+            self.assertTrue(result["replayed"])
+            self.assertIsNone(result["notified"])
+            self.assertEqual(self.doc, before)
+        with self.assertRaises(reservations.ReservationError):
+            reservations.execute(self.doc, "other", {
+                "action": "release", "reservation": rid},
+                item_reader=self.visible, now_ts=self.ts + 2)
+        self.assertEqual(self.doc, before)
 
     # ---- the 512 cap counts HELD reservations only (user ruling D1) and
     # list/landing answers stop at 512 rows (user ruling D2)

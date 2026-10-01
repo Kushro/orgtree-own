@@ -21,6 +21,7 @@ import copy
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 _data = tempfile.TemporaryDirectory(prefix="v2-review-seat-")
@@ -61,6 +62,7 @@ def fixture(participants=None):
         objective="Problem: the docket will not let an owner name a peer as "
                   "reviewer. Solution: the shared superior grants the seat.",
         participants=list(participants or []),
+        kind="non-code",
     )["created"]
     return org, slug
 
@@ -79,6 +81,65 @@ def seats(org, slug):
 
 
 class ReviewSeatEndToEndTests(unittest.TestCase):
+    def test_grant_wakes_blocked_owner_through_workdoor_after_commit(self):
+        from orgtree import workdoor
+        org, slug = fixture()
+        org.work_update("owner-a", slug, ["ready"], [], status="blocked",
+                        blocked_reason="Needs coordinator seat grant; mail resumes work")
+        tx = SimpleNamespace(org=org, node="coordinator", args={},
+                             call=SimpleNamespace(org="fixture"),
+                             after=SimpleNamespace(drive=[], then=[]))
+        notifications = []
+        run = workdoor.body(lambda *a: None,
+                            lambda *a: org.work_review_grant("coordinator", "peer-b", [slug]),
+                            lambda *a: notifications.append(a))
+        out = run(tx)
+        self.assertEqual(tx.after.drive, ["owner-a"])
+        self.assertEqual(notifications, [])
+        for callback in tx.after.then:
+            callback(out)
+        self.assertEqual(notifications, [("fixture", "coordinator", "owner-a")])
+
+    def test_grant_names_blocked_owner_to_wake_with_new_revision(self):
+        org, slug = fixture()
+        org.work_update("owner-a", slug, ["ready"], [], status="blocked",
+                        blocked_reason="Needs coordinator seat grant; mail will resume work")
+        out = org.work_review_grant("coordinator", "peer-b", [slug])
+        self.assertEqual(out["notified_nodes"], ["owner-a"])
+        mail = org.d["mail"]["owner-a"][-1]
+        self.assertEqual(mail["kind"], "request")
+        self.assertEqual(mail["ev"]["revision"], item(org, slug)["rev"])
+        self.assertIn(f"revision {item(org, slug)['rev']}", mail["body"])
+
+    def test_recheck_cannot_authorize_different_reviewer_or_revoked_seat(self):
+        org, slug = fixture()
+        org.work_review_grant("coordinator", "peer-b", [slug])
+        org.work_update("owner-a", slug, ["ready"], [], status="review",
+                        reviewer="peer-b")
+        org.work_review_decide("peer-b", slug, "changes", "finding")
+        before = copy.deepcopy(item(org, slug))
+        with self.assertRaises(LedgerError):
+            org.work_update("owner-a", slug, ["fixed"], [], status="review",
+                            reviewer="peer-d")
+        self.assertEqual(item(org, slug), before)
+        org.work_review_revoke("coordinator", slug, "peer-b")
+        with self.assertRaises(LedgerError):
+            org.work_update("owner-a", slug, ["fixed"], [], status="review",
+                            reviewer="peer-b")
+
+    def test_recheck_is_spent_when_review_moves_to_another_reviewer(self):
+        org, slug = fixture(participants=["peer-d"])
+        org.work_review_grant("coordinator", "peer-b", [slug])
+        org.work_update("owner-a", slug, ["ready"], [], status="review",
+                        reviewer="peer-b")
+        org.work_review_decide("peer-b", slug, "changes", "finding")
+        org.work_update("owner-a", slug, ["fixed"], [], status="review",
+                        reviewer="peer-d")
+        org.work_review_decide("peer-d", slug, "changes", "another finding")
+        with self.assertRaises(LedgerError):
+            org.work_update("owner-a", slug, ["fixed"], [], status="review",
+                            reviewer="peer-b")
+
     def test_owner_requests_superior_grants_peer_reviews_end_to_end(self):
         """The whole loop the ticket asks to see, in order, with the record
         naming the agent that actually reviewed at every step."""
@@ -130,8 +191,8 @@ class ReviewSeatEndToEndTests(unittest.TestCase):
         self.assertEqual(org.d["mail"]["peer-b"][-1]["ev"]["variant"],
                          "docket.review_requested")
 
-        # 5. THE NAMING SPENT THE SEAT (user ruling 2026-09-16: one round per
-        #    grant). A changes verdict, and the recheck needs a FRESH grant.
+        # 5. Naming spends the seat; changes restores the same reviewer for
+        # the next entry on this item, without asking for another grant.
         self.assertEqual(seats(org, slug), [])
         self.assertEqual(
             [(s["reviewer"], s["state"], s["spent_via"])
@@ -139,21 +200,12 @@ class ReviewSeatEndToEndTests(unittest.TestCase):
             [("peer-b", "spent", "named")])
         org.work_review_decide("peer-b", slug, "changes", "one finding")
         self.assertEqual(item(org, slug)["status"], "in_progress")
-        with self.assertRaises(LedgerError) as caught:
-            org.work_update("owner-a", slug, ["finding fixed"], [],
-                            status="review", reviewer="peer-b")
-        self.assertIn("spent by the round it authorized", str(caught.exception))
-        self.assertEqual(item(org, slug)["status"], "in_progress")
-
-        # The owner asks again and the superior grants again — every round is
-        # seen, which is exactly what the ruling bought.
-        org.work_review_request("owner-a", slug, "peer-b", note="round two")
-        org.work_review_grant("coordinator", "peer-b", [slug])
+        self.assertEqual(seats(org, slug), ["peer-b"])
         org.work_update("owner-a", slug, ["finding fixed"], [],
                         status="review", reviewer="peer-b")
         self.assertEqual(item(org, slug)["reviewer"]["node"], "peer-b")
         self.assertEqual([s["state"] for s in item(org, slug)["review_seats"]],
-                         ["spent", "spent"])
+                         ["spent"])
 
         # 6. The approval lands, and the completion names the peer.
         org.work_review_decide("peer-b", slug, "approve", "looks right")
@@ -254,18 +306,19 @@ class ReviewSeatEndToEndTests(unittest.TestCase):
         self.assertIn("still pending", str(e.exception))
         self.assertEqual(len(item(org, slug)["review_seat_requests"]), 1)
 
-    def test_a_seat_spent_by_naming_has_nothing_left_to_revoke(self):
-        """The one-round rule and revoke reach the same end state by different
-        routes, and the row says which route it was."""
+    def test_revoking_in_flight_prevents_a_changes_recheck(self):
+        """The in-flight verdict remains owed, but cannot restore a revoked seat."""
         org, slug = fixture()
         org.work_review_request("owner-a", slug, "peer-b")
         org.work_review_grant("coordinator", "peer-b", [slug])
         org.work_update("owner-a", slug, ["ready"], [], status="review",
                         reviewer="peer-b")
-        with self.assertRaises(LedgerError) as e:
-            org.work_review_revoke("coordinator", slug, "peer-b")
-        self.assertIn("nothing to revoke", str(e.exception))
-        self.assertEqual(item(org, slug)["review_seats"][0]["state"], "spent")
+        org.work_review_revoke("coordinator", slug, "peer-b")
+        self.assertEqual(item(org, slug)["review_seats"][0]["state"], "revoked")
+        org.work_review_decide("peer-b", slug, "changes", "finding")
+        with self.assertRaises(LedgerError):
+            org.work_update("owner-a", slug, ["fixed"], [], status="review",
+                            reviewer="peer-b")
 
     def test_revoke_takes_an_unspent_seat_back_and_declines_a_pending_ask(self):
         org, slug = fixture()
@@ -334,7 +387,7 @@ class ReviewSeatEndToEndTests(unittest.TestCase):
         org.work_review_request("owner-a", slug, "peer-b", note="round two")
         out = org.work_review_revoke("coordinator", slug, "peer-b",
                                      note="not a second round")
-        self.assertFalse(out["seat_revoked"])
+        self.assertTrue(out["seat_revoked"])
         self.assertIn("in flight", out["status"])
         self.assertEqual(item(org, slug)["reviewer"]["node"], "peer-b")
         self.assertEqual(item(org, slug)["status"], "review")

@@ -8757,7 +8757,7 @@ _WORK_UPDATE_ARGS: frozenset[str] = frozenset({
     "attention", "attention_reason", "attention_amend",
     "title", "objective", "objective_append", "acceptance",
     "reopen", "expected_rev", "owner", "reviewer",
-    "review_note", "review_evidence", "review_candidate", "candidate",
+    "review_note", "review_evidence", "review_candidate", "candidate", "base",
 })
 
 #: EVERY OTHER ACTION'S READ SET, on exactly the same terms. `update` was
@@ -9455,7 +9455,8 @@ def _work_mutate_action(org: Org, nid: str, a: dict[str, Any],
             review_note=_s("review_note"),
             review_evidence=a.get("review_evidence"),
             review_candidate=(a.get("review_candidate")
-                              or a.get("candidate")))
+                              or a.get("candidate")),
+            review_base=a.get("base"))
     if act == "addendum":
         # ---- THE POST-COMPLETION CORRECTION (W-post-done). Deliberately a
         # DIFFERENT action rather than a flag on `update`: everything `update`

@@ -546,6 +546,9 @@ def execute(d: dict[str, Any], actor: str, args: Mapping[str, Any],
                 "recovered": True}
 
     if action == "release":
+        if row.get("state") == LANDED:
+            return {"reservation": _safe(row), "replayed": True,
+                    "notified": None, "status": "land already freed the slot"}
         if row.get("state") not in (HELD,):
             if row.get("state") == RELEASED:
                 return {"reservation": _safe(row), "replayed": True, "notified": None}
