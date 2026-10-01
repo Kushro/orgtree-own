@@ -7077,15 +7077,19 @@ label.set-row { cursor: pointer; }
   flex: 1; min-height: 0; display: flex; flex-direction: column; height: 100%;
 }
 /* resize handles: 8 invisible strips/corners on the edges */
+/* The TOP handles sit inside the panel, never above it: a panel pinned flush with
+   the canvas top would otherwise put them over the app header, where every
+   handle is a no-drag hole in the window's drag area (measured in Electron: a
+   24px dead patch at each top corner). */
 .pinwin-rs { position: absolute; z-index: 7; touch-action: none; pointer-events: auto; }
 .pinwin-rs.n, .pinwin-rs.s { left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
 .pinwin-rs.e, .pinwin-rs.w { top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
-.pinwin-rs.n { top: -2px; }  .pinwin-rs.s { bottom: -2px; }
+.pinwin-rs.n { top: 0; }  .pinwin-rs.s { bottom: -2px; }
 .pinwin-rs.e { right: -2px; } .pinwin-rs.w { left: -2px; }
 .pinwin-rs.ne, .pinwin-rs.nw, .pinwin-rs.se, .pinwin-rs.sw { width: 24px; height: 24px; }
-.pinwin-rs.ne { top: -16px; right: -16px; cursor: nesw-resize; }
+.pinwin-rs.ne { top: 0; right: -16px; cursor: nesw-resize; }
 .pinwin-rs.sw { bottom: -16px; left: -16px; cursor: nesw-resize; }
-.pinwin-rs.nw { top: -16px; left: -16px; cursor: nwse-resize; }
+.pinwin-rs.nw { top: 0; left: -16px; cursor: nwse-resize; }
 .pinwin-rs.se { bottom: -16px; right: -16px; cursor: nwse-resize; }
 /* the unpin MINIMISE ghost: chrome only, flies from the window to the card
    (viewport px both ends) and is clipped by .viewport's overflow when the
@@ -7315,12 +7319,12 @@ label.set-row { cursor: pointer; }
 .modalpin-rs { position: absolute; z-index: 7; touch-action: none; pointer-events: auto; }
 .modalpin-rs.n, .modalpin-rs.s { left: 8px; right: 8px; height: 6px; cursor: ns-resize; }
 .modalpin-rs.e, .modalpin-rs.w { top: 8px; bottom: 8px; width: 6px; cursor: ew-resize; }
-.modalpin-rs.n { top: -2px; }  .modalpin-rs.s { bottom: -2px; }
+.modalpin-rs.n { top: 0; }  .modalpin-rs.s { bottom: -2px; }
 .modalpin-rs.e { right: -2px; } .modalpin-rs.w { left: -2px; }
 .modalpin-rs.ne, .modalpin-rs.nw, .modalpin-rs.se, .modalpin-rs.sw { width: 24px; height: 24px; }
-.modalpin-rs.ne { top: -16px; right: -16px; cursor: nesw-resize; }
+.modalpin-rs.ne { top: 0; right: -16px; cursor: nesw-resize; }
 .modalpin-rs.sw { bottom: -16px; left: -16px; cursor: nesw-resize; }
-.modalpin-rs.nw { top: -16px; left: -16px; cursor: nwse-resize; }
+.modalpin-rs.nw { top: 0; left: -16px; cursor: nwse-resize; }
 .modalpin-rs.se { bottom: -16px; right: -16px; cursor: nwse-resize; }
 /* ONE TITLE, NOT TWO (Astra 2026-09-06). A window names itself in its title
    bar, and every one of these panels also opens with its own <h3> saying the
