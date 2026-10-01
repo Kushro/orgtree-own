@@ -823,7 +823,13 @@ function SpawnChips({ onSpawn, free, seats, maxTier, side, soleHire,
     <div className={'hsof' + (side ? ` side side-${side[0]}` : '')
       + (farCompact ? ' hire-compact' : '')
       + (farCompact && expanded ? ' is-expanded' : '')}
-      onPointerDown={(e) => e.stopPropagation()}>
+      onPointerDown={(e) => e.stopPropagation()}
+      /* a PRESS must not focus a token (user report 2026-10-01): the card
+         reveals its far-zoom name while anything in it has focus (nameFocus,
+         `.sq.mini:focus-within`), so a pressed arrow kept the name up after
+         the pointer left, dragged or not. The click still fires, and Tab
+         still focuses the buttons for keyboard users. */
+      onMouseDown={(e) => e.preventDefault()}>
       {away && rows}
       {expand}
       {!away && rows}

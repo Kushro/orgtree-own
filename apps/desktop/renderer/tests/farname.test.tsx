@@ -227,3 +227,47 @@ test('after Escape with the pointer still over the card, the name stays (hover r
   assert.equal(document.querySelector('.ctxmenu'), null)
   assert.ok(view.el.querySelector('.sq-far-ghost')?.classList.contains('on'), 'pointer still over: label kept')
 })
+
+// user report 2026-10-01 (3.0.8): "if i click the expand button for the hire
+// tokens and drag my cursor off, the expanded name stays behind". A browser
+// focuses a button on mousedown unless the mousedown is cancelled, and the card
+// keeps its name up while anything inside it has focus — so the pressed arrow
+// held the name after the pointer left. jsdom does not focus on mousedown, so
+// the press does what the browser does: focus the target unless the default was
+// prevented.
+for (const release of ['dragged off and released elsewhere', 'clicked, then left'] as const) {
+  test(`pressing a far-zoom hire arrow, ${release}: no name stays behind`, async (t) => {
+    const view = await card('mini')
+    t.after(() => view.unmount())
+    await hover(view.el)
+    const arrow = view.el.querySelector<HTMLButtonElement>('.hsof:not(.side) .hire-expand')
+    assert.ok(arrow, 'the far-zoom bottom strip is the compact arrow')
+    await inAct(() => {
+      arrow!.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }))
+      const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+      if (arrow!.dispatchEvent(down)) arrow!.focus()
+    })
+    const up = (at: Element) => inAct(() => {
+      at.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, cancelable: true }))
+      at.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }))
+    })
+    const leave = () => inAct(() => {
+      view.el.querySelector('.sq')!.dispatchEvent(new MouseEvent('pointerout', { bubbles: true, relatedTarget: document.body }))
+    })
+    if (release === 'clicked, then left') {
+      await up(arrow!)
+      await inAct(() => { arrow!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      assert.ok(view.el.querySelector('.hsof.is-expanded'), 'the click still opens the tiers')
+      await leave()
+    } else {
+      // held while the pointer leaves the card, then released out on the canvas
+      await leave()
+      await up(document.body)
+    }
+    assert.equal(view.el.querySelector('.hsof.is-expanded'), null, 'leaving closes the tiers')
+    assert.ok(await gone(view.el), 'and the name is retracted and removed')
+    await inAct(() => new Promise((r) => setTimeout(r, 300)))
+    assert.equal(view.el.querySelector('.sq-far-ghost'), null, 'and it stays gone after the release')
+    assert.equal(view.el.querySelector('.hsof.is-expanded'), null, 'tiers stay closed after the release')
+  })
+}
