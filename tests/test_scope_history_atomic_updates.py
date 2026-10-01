@@ -1047,14 +1047,14 @@ class AtomicReopen(unittest.TestCase):
         with self.assertRaises(LedgerError):
             # outsider-c is neither an existing participant nor owner-a's
             # subtree/superior; W01 intentionally allows the participant peer.
-            upd(org, wid, reopen=True, status="review", reviewer="outsider-c")
+            upd(org, wid, reopen=True, status="review", reviewer="outsider-c", review_candidate="a" * 40)
         self.assertEqual(snapshot(item(org, wid)), before)
 
     def test_a_reviewer_that_does_not_exist_is_refused_before_anything(self):
         org, wid = self.closed()
         before = snapshot(item(org, wid))
         with self.assertRaises(Exception):
-            upd(org, wid, reopen=True, status="review", reviewer="nobody-here")
+            upd(org, wid, reopen=True, status="review", reviewer="nobody-here", review_candidate="a" * 40)
         self.assertEqual(snapshot(item(org, wid)), before)
 
     def test_a_refused_third_party_ASSIGNMENT_leaves_the_item_untouched(self):
@@ -1072,7 +1072,7 @@ class AtomicReopen(unittest.TestCase):
         org, wid = fixture()
         before = snapshot(item(org, wid))
         with self.assertRaises(LedgerError) as cm:
-            upd(org, wid, status="review", title="would have been written")
+            upd(org, wid, status="review", title="would have been written", review_candidate="a" * 40)
         self.assertIn("names its reviewer", str(cm.exception))
         self.assertEqual(snapshot(item(org, wid)), before)
 
@@ -1081,7 +1081,7 @@ class AtomicReopen(unittest.TestCase):
         unreachable. owner-a's own subordinate is nameable."""
         org, wid = fixture()
         org.hire(USER, "owner-a", "haiku", 0, "sub-c")
-        upd(org, wid, status="review", reviewer="sub-c")
+        upd(org, wid, status="review", reviewer="sub-c", review_candidate="a" * 40)
         it = item(org, wid)
         self.assertEqual(it["status"], "review")
         self.assertEqual(it["reviewer"]["node"], "sub-c")
@@ -1090,7 +1090,7 @@ class AtomicReopen(unittest.TestCase):
         org, wid = fixture()
         before = snapshot(item(org, wid))
         with self.assertRaises(LedgerError) as cm:
-            upd(org, wid, status="review", reviewer="owner-a")
+            upd(org, wid, status="review", reviewer="owner-a", review_candidate="a" * 40)
         self.assertIn("cannot review its own work", str(cm.exception))
         self.assertEqual(snapshot(item(org, wid)), before)
 

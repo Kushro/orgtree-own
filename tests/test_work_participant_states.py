@@ -126,7 +126,7 @@ class ParticipantStateTests(unittest.TestCase):
     def _at_review(self):
         org, wid = fixture()
         org.work_update("owner-a", wid, ["ready"], [], status="review",
-                        reviewer="rev-r")
+                        reviewer="rev-r", review_candidate="a" * 40)
         return org, wid
 
     def test_reviewer_mutates_state_without_claiming(self):
@@ -176,7 +176,7 @@ class ParticipantStateTests(unittest.TestCase):
         # …and so does naming a replacement reviewer
         with self.assertRaises(LedgerError):
             org.work_update("rev-r", wid, ["x"], [], status="review",
-                            reviewer="peer-b")
+                            reviewer="peer-b", review_candidate="a" * 40)
 
     def test_reviewer_identity_stays_owner_level(self):
         org, wid = self._at_review()

@@ -141,7 +141,7 @@ class AssignmentLeavesTheStatusAlone(unittest.TestCase):
                     # the status rule and not the reviewer-empties rule.
                     org.work_update(manager, slug, ["ready"], ["review it"],
                                     status="review", reviewer=_three,
-                                    owner=_one)
+                                    owner=_one, review_candidate="a" * 40)
 
                 result = org.work_assign(manager, slug, two)
 
@@ -320,7 +320,7 @@ class EveryFieldChangesAlone(unittest.TestCase):
         restating the status or the progress lists."""
         org, slug, manager, workers = fixture()
         org.work_update(manager, slug, ["ready"], ["review it"],
-                        status="review", reviewer=workers[1], owner=workers[0])
+                        status="review", reviewer=workers[1], owner=workers[0], review_candidate="a" * 40)
         before = snapshot(org, manager, slug)
 
         org.work_update(manager, slug, reviewer=workers[2], owner=workers[0])
@@ -374,7 +374,7 @@ class DocumentedSideEffectsStillFire(unittest.TestCase):
         seat empties rather than standing as a prohibited self-review."""
         org, slug, manager, workers = fixture()
         org.work_update(manager, slug, ["ready"], ["review it"],
-                        status="review", reviewer=workers[1], owner=workers[0])
+                        status="review", reviewer=workers[1], owner=workers[0], review_candidate="a" * 40)
         before = snapshot(org, manager, slug)
 
         org.work_assign(manager, slug, workers[1])

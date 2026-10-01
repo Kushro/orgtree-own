@@ -206,7 +206,7 @@ class MaterialReads(MaterialFixture,unittest.TestCase):
                             self.assertEqual(got['access']['item'],self.item)
                             self.assertEqual(got['access']['standing'],'holder' if actor == 'reader' else 'participant')
             self.mutate(lambda o:o.work_update(ledger.USER,self.item,status='review',reviewer='outsider',
-                owner='reader',done_so_far=['fixture review'],working_on_next=[]))
+                owner='reader',done_so_far=['fixture review'],working_on_next=[],review_candidate='a'*40))
             for tool in TOOLS:
                 self.assertEqual(self.okay(self.call(tool,actor='outsider'))['access']['standing'],'reviewer')
 

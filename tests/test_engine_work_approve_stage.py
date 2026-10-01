@@ -80,7 +80,7 @@ def item(org, slug):
 
 def under_review(org, slug):
     org.work_update('owner-a', slug, ['implemented'], ['review this commit'],
-                    status='review', reviewer='reviewer-b')
+                    status='review', reviewer='reviewer-b', review_candidate="a" * 40)
 
 
 class ApproveStageTests(unittest.TestCase):
@@ -179,7 +179,7 @@ class ApproveStageTests(unittest.TestCase):
                         blocked_reason='waiting on the build; the build '
                                        'notification is how I will hear')
         org.work_update('owner-a', slug, ['implemented'], ['review it'],
-                        status='review', reviewer='reviewer-b')
+                        status='review', reviewer='reviewer-b', review_candidate="a" * 40)
         org.work_review_decide('reviewer-b', slug, 'approve_stage',
                                candidate=SHA)
         row = item(org, slug)
@@ -267,7 +267,7 @@ class LandingThenCompletionTests(unittest.TestCase):
             acceptance=['the push is on main', 'the suite is green'])
         slug = str(created['slug'])
         org.work_update('owner-a', slug, ['implemented'], ['review'],
-                        status='review', reviewer='reviewer-b')
+                        status='review', reviewer='reviewer-b', review_candidate="a" * 40)
         org.work_review_decide('reviewer-b', slug, 'approve_stage',
                                candidate=SHA)
         # one condition checked, but only as qualified evidence

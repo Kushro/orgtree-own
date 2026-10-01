@@ -67,7 +67,7 @@ def make_item(org, owner, title, status="in_progress", parent=None,
     slug = it["slug"]
     if status == "review":
         org.work_update(owner, slug, ["drafted"], ["await review"],
-                        status="review", reviewer=(reviewer or "coordinator"))
+                        status="review", reviewer=(reviewer or "coordinator"), review_candidate="a" * 40)
     elif status == "blocked":
         org.work_update(owner, slug, ["drafted"], ["unblock"], status="blocked",
                         blocked_reason="waiting on a fixture event; the "
@@ -201,7 +201,7 @@ class GenerationAdvanceKeepsOwnershipTests(unittest.TestCase):
         org = fixture()
         slug = make_item(org, "perf-pass", "Routing after a compaction")
         review = make_item(org, "perf-pass", "Reviewed by a compacted agent",
-                           status="review", reviewer="review-sub")
+                       status="review", reviewer="review-sub")
         org.cheap_compact(USER, "perf-pass")
         org.cheap_compact(USER, "review-sub")
         gen = org.nodes["perf-pass"]["generation"]
@@ -354,7 +354,7 @@ class PreservedStaleAndAssignmentBehaviourTests(unittest.TestCase):
         org = fixture()
         slug = make_item(org, "perf-pass", "Legacy reference under test")
         review = make_item(org, "perf-pass", "Legacy reviewer reference",
-                           status="review", reviewer="review-sub")
+                       status="review", reviewer="review-sub")
         for s in (slug, review):
             for f in ("owner", "reviewer"):
                 if isinstance(stored(org, s).get(f), dict):
@@ -400,7 +400,7 @@ class PreservedStaleAndAssignmentBehaviourTests(unittest.TestCase):
                     target = "peer-agent"
                 else:
                     org.work_update("perf-pass", slug, ["drafted"], ["review"],
-                                    status="review", reviewer="review-sub")
+                                    status="review", reviewer="review-sub", review_candidate="a" * 40)
                     target = "review-sub"
                 it = stored(org, slug)
                 before = copy.deepcopy(it["history"])
@@ -426,7 +426,7 @@ class PreservedStaleAndAssignmentBehaviourTests(unittest.TestCase):
         org = fixture()
         slug = make_item(org, "perf-pass", "Which fields carry what")
         org.work_update("perf-pass", slug, ["d"], ["r"], status="review",
-                        reviewer="review-sub")
+                        reviewer="review-sub", review_candidate="a" * 40)
         org.delete(USER, "perf-pass")           # marks the CURRENT owner ref
         org.work_assign(USER, slug, "peer-agent")   # …which becomes a `from`
         it = stored(org, slug)

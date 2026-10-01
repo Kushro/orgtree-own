@@ -330,7 +330,8 @@ class ItemScopedReads(unittest.TestCase):
         # superior as reviewer, and `stranger` is neither to `second`
         o.work_update(ledger.USER, self.shared, done_so_far=["built"],
                       working_on_next=[], status="review",
-                      reviewer=self.stranger, owner=self.second)
+                      reviewer=self.stranger, owner=self.second,
+                      review_candidate="a" * 40)
         store.save_org(o)
         self.assertEqual(
             self.read_scratch(self.stranger, self.first)["access"]["standing"],

@@ -157,7 +157,7 @@ def mailcount(org):
 def review_seat(org, wid):
     """Put the item under review by rev-r, ready for a decision."""
     org.work_update("owner-a", wid, ["built it"], ["await review"],
-                    status="review", reviewer="rev-r")
+                    status="review", reviewer="rev-r", review_candidate="a" * 40)
 
 
 class LosslessNotes(unittest.TestCase):

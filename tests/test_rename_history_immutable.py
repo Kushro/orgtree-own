@@ -134,7 +134,7 @@ class RenameKeepsAuthoredHistoryTests(unittest.TestCase):
         org = fixture()
         slug = make_item(org, "owner-agent", "Reviewer is renamed under it")
         org.work_update("owner-agent", slug, ["drafted"], ["await review"],
-                        status="review", reviewer="reviewer-sub")
+                        status="review", reviewer="reviewer-sub", review_candidate="a" * 40)
         it = stored(org, slug)
         row = rows(it, "reviewer")[-1]
         self.assertEqual(row["to"]["node"], "reviewer-sub")
@@ -155,7 +155,7 @@ class RenameKeepsAuthoredHistoryTests(unittest.TestCase):
         org = fixture()
         slug = make_item(org, "owner-agent", "Verdict after a rename")
         org.work_update("owner-agent", slug, ["drafted"], ["await review"],
-                        status="review", reviewer="reviewer-sub")
+                        status="review", reviewer="reviewer-sub", review_candidate="a" * 40)
         org.rename(USER, "reviewer-sub", "reviewer-renamed")
         out = org.work_review_decide("reviewer-renamed", slug, "changes",
                                      note="one more pass please")
