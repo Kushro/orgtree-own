@@ -8169,7 +8169,7 @@ def work_item_reply(slug: str, wid: str, body: WorkReply,
 
 @app.post("/api/orgs/{slug}/work-items/{wid}/dismiss-attention")
 def work_item_dismiss(slug: str, wid: str, body: WorkDismiss) -> dict[str, Any]:
-    """Dismiss a MANUAL attention flag: clears it, sets the work Blocked,
+    """Dismiss a MANUAL attention flag: clears it, blocks work except done/review,
     records the dismissal; pending questions are untouched (they keep the
     item orange). 409 on a stale `set_rev` or an already-cleared flag."""
     # PG-3w: one `org_tx`; the dismissal and its status mail commit together
@@ -8182,7 +8182,7 @@ def work_item_dismiss(slug: str, wid: str, body: WorkDismiss) -> dict[str, Any]:
         notify = r.get("notify")
         if notify:
             # passive: the flag's author learns the user saw and dismissed it,
-            # and that the work now stands Blocked — without spending a turn
+            # without spending a turn; done/review keep their status
             try:
                 # typed (family answer_decision): decision.attention_dismissed on
                 # the item's WorkItemRef (canonical slug — the old text echoed the
@@ -9297,7 +9297,7 @@ def _work_read_call(body: AgentCall, a: dict[str, Any]) -> dict[str, Any]:
             from . import workdetail
             it = workdetail.get(body.org, body.node, _work_ref(a),
                                 compact=_arg_flag(a, "compact"),
-                                projection=_work_projection(a, "full"),
+                                projection=_work_projection(a, "compact"),
                                 fields=a.get("fields"))
             if it is not None:
                 return {"item": {"slug": it.get("slug"),
@@ -9350,7 +9350,7 @@ def _work_read_call(body: AgentCall, a: dict[str, Any]) -> dict[str, Any]:
                 fields=a.get("fields")))
         it = org.work_get(body.node, _work_ref(a),
                           compact=_arg_flag(a, "compact"),
-                          projection=_work_projection(a, "full"),
+                          projection=_work_projection(a, "compact"),
                           fields=a.get("fields"))
         # hoisted to the front with the rest of the header (ledger W10): a
         # reference sitting behind 160 KB of payload is a reference nobody

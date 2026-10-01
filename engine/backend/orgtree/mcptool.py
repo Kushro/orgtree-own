@@ -346,7 +346,7 @@ TOOLS: list[dict[str, Any]] = [
             "\n\nACTIONS: `list` — items you may read; include_archived / "
             "include_backlogged return those in their own keys, never inside "
             "`items` (`groups` gives every group's size). `get` — one item "
-            "(narrow with projection/fields). `create` — title, REQUIRED "
+            "(compact by default; projection=full for the complete record). `create` — title, REQUIRED "
             "objective, kind code|non-code, owner (you or a subordinate), "
             "participants, acceptance, optional first progress lists. `update` "
             "— THE status update: always carries done_so_far AND "
@@ -425,7 +425,8 @@ TOOLS: list[dict[str, Any]] = [
             "exactly matches the stated spec needs no user acceptance once "
             "agents verify it. Omitting `attention` leaves a standing flag in "
             "place: retract your own with attention:false, refine it with "
-            "attention_amend. A user dismissal blocks the item and an exact "
+            "attention_amend. A user dismissal preserves done/review, blocks "
+            "other statuses, and an exact "
             "repeat is refused. ⚠ `addendum` IS HOW YOU WITHDRAW A STALE "
             "ATTENTION FLAG on a done or dropped item (attention:false + "
             "`note`; nothing else changes). The user's replies on an item go to "
@@ -459,15 +460,18 @@ TOOLS: list[dict[str, Any]] = [
                                                                           "`items`)")},
                 "projection": {"type": "string", "description": ("list/get: `summary` (identity and state; "
                                                                  "list default), `compact` (adds "
-                                                                 "description and acceptance) or `full` "
-                                                                 "(everything; get default). What is left "
+                                                                 "description, acceptance and latest_verdict; get default), "
+                                                                 "`scope_decisions` (current scope and rulings) or `full` "
+                                                                 "(everything). What is left "
                                                                  "out is declared in `omissions_how`. "
                                                                  "receipt: summary by default; full "
                                                                  "returns complete provenance")},
                 "fields": {"type": "array", "items": {"type": "string"}, "description": ("list/get: return ONLY these fields per "
                                                                                          "item (list or comma-separated); `slug` "
                                                                                          "is always included. Unknown names are "
-                                                                                         "refused with the valid list")},
+                                                                                         "refused with the complete valid list. Aliases: "
+                                                                                         "description=objective, attention=effective_attention, "
+                                                                                         "review=latest_verdict; decisions selects rulings")},
                 "compact": {"type": "boolean", "description": ("list/get: shorthand for "
                                                                "projection=compact")},
                 "title": {"type": "string", "description": "create/update: short concrete title. finding: REQUIRED defect title." + _cap("title")},
@@ -2246,7 +2250,7 @@ def _post(payload: dict[str, Any], timeout: float = 30) -> tuple[str, str]:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return "ok", r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return "refused", e.read().decode("utf-8", "replace")[:500]
+        return "refused", e.read().decode("utf-8", "replace")
     except Exception as e:                                   # noqa: BLE001
         return _lost_kind(e), str(e)
 

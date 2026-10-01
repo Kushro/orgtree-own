@@ -14076,7 +14076,7 @@ class Org:
 
     @staticmethod
     def _work_compact_view(full: dict[str, Any]) -> dict[str, Any]:
-        """Return the explicit, opt-in compact docket projection.
+        """Return the compact docket projection.
 
         The caller must construct ``full`` through ``_work_view`` first.  That
         ordering is important: ``_work_view`` applies all item authorization
@@ -14091,6 +14091,7 @@ class Org:
         """
         omitted: dict[str, int] = {}
         out = dict(full)
+        out["latest_verdict"] = Org._work_latest_verdict(full)
         for field in ("history", "scope", "scope_archive", "evidence",
                       "attachments", "dismissals", "attention_sources"):
             value = full.get(field)
@@ -14176,8 +14177,8 @@ class Org:
         out["omissions_how"] = (
             "the collections counted in `omissions` were omitted by the "
             "`compact` projection, not dropped: read them whole with "
-            "`orgtree_work get slug=<name>` (projection=full, the default for "
-            "`get`), or ask for just the ones you want with "
+            "`orgtree_work get slug=<name> projection=full`, or ask for "
+            "just the ones you want with "
             "fields=[...]") if omitted else None
         for field, count in omitted.items():
             out[f"omitted_{field}_count"] = count
@@ -14229,7 +14230,49 @@ class Org:
     #: is identity and state only — who holds it, what state it is in, whether
     #: it wants attention — which is the answer to "what is on my plate", the
     #: single most common docket call and the one that was costing 200 KB.
-    WORK_PROJECTIONS: Final = ("full", "compact", "summary")
+    WORK_PROJECTIONS: Final = ("full", "compact", "summary", "scope_decisions")
+
+    WORK_FIELD_ALIASES: Final = {"description": "objective",
+                                 "attention": "effective_attention",
+                                 "review": "latest_verdict"}
+
+    @staticmethod
+    def _work_decisions(view: dict[str, Any]) -> list[dict[str, Any]]:
+        """Rulings from the append-only scope record, without spec rewrites."""
+        return [dict(row) for field in ("scope_archive", "scope")
+                for row in (view.get(field) or [])
+                if isinstance(row, dict) and row.get("kind") == "decision"]
+
+    @staticmethod
+    def _work_latest_verdict(view: dict[str, Any]) -> dict[str, Any] | None:
+        """Newest review outcome; candidate notes live outside history."""
+        outcomes = []
+        for row in view.get("candidate_verdicts") or []:
+            if isinstance(row, dict):
+                outcomes.append(dict(row))
+        current = view.get("candidate_verdict")
+        if isinstance(current, dict):
+            outcomes.append(dict(current))
+        accepted = view.get("accepted")
+        if isinstance(accepted, dict) and accepted.get("via") == "review_approve":
+            outcomes.append(dict(accepted) | {"decision": "approve"})
+        for row in view.get("history") or []:
+            if not isinstance(row, dict):
+                continue
+            op = row.get("op")
+            decision = {"review_changes": "changes",
+                        "review_approve_stage": "approve_stage",
+                        "review_approve": "approve"}.get(op)
+            if decision:
+                summary = {k: row[k] for k in
+                           ("at", "by", "candidate", "note") if k in row}
+                if op == "review_approve" and isinstance(accepted, dict):
+                    summary["note"] = accepted.get("note")
+                outcomes.append(summary | {"decision": decision})
+        # Prefer the complete candidate record (including evidence and note)
+        # over its history pointer when both were minted at the same time.
+        return max(outcomes, key=lambda row: str(row.get("at") or ""),
+                   default=None)
 
     #: `summary`. Every one of these is bounded or tiny; not one of them is an
     #: unbounded prose field or a growing collection, which is the property
@@ -14283,11 +14326,13 @@ class Org:
         silently lacks the field the caller asked for — because they typed
         `state` for `status` — is the same failure this whole package exists
         to end, one field smaller."""
-        wanted = list(dict.fromkeys(list(Org.WORK_FIELDS_ALWAYS) + fields))
+        wanted = list(dict.fromkeys(list(Org.WORK_FIELDS_ALWAYS) +
+                      [Org.WORK_FIELD_ALIASES.get(f, f) for f in fields]))
         unknown = [f for f in wanted
                    if f not in view and f not in Org.WORK_FIELDS_STAMPED]
         if unknown:
-            known = sorted(set(view) | set(Org.WORK_FIELDS_STAMPED))
+            known = sorted(set(view) | set(Org.WORK_FIELDS_STAMPED) |
+                           set(Org.WORK_FIELD_ALIASES))
             raise LedgerError(
                 f"fields names {', '.join(sorted(unknown))}, which "
                 f"{'is not a field' if len(unknown) == 1 else 'are not fields'}"
@@ -14301,7 +14346,7 @@ class Org:
             f"{len(left)} field(s) were omitted because `fields` did not ask "
             f"for them — nothing was dropped from the record. Name them in "
             f"`fields`, or call `orgtree_work {source}` without `fields` for "
-            f"the whole item. `slug` is always served (and the backend stamps "
+            f"the whole item with projection=full. `slug` is always served (and the backend stamps "
             f"`ref` beside it): that is the item's identity, and every other "
             f"call in the tool takes it as its argument")
         return Org._work_header_first(out)
@@ -14326,14 +14371,21 @@ class Org:
             # kind of field a `fields` caller asks for by name.
             base["candidate"] = self._work_compact_view(dict(view)).get(
                 "candidate")
+            base["latest_verdict"] = Org._work_latest_verdict(view)
+            base["decisions"] = Org._work_decisions(view)
             return self._work_select(base, fields, source)
         out = dict(view)
         if projection == "compact":
             out = self._work_compact_view(out)
-        elif projection == "summary":
+        elif projection in ("summary", "scope_decisions"):
             out = self._work_compact_view(out)
             keep = [f for f in self.WORK_SUMMARY_FIELDS if f in out]
+            if projection == "scope_decisions":
+                keep += [f for f in ("objective", "objective_notice", "acceptance")
+                         if f in out]
             kept = {k: out[k] for k in keep}
+            if projection == "scope_decisions":
+                kept["decisions"] = Org._work_decisions(view)
             # ⚠ NAMED AGAINST THE WHOLE ITEM, not against the compact view
             # this was built from. A reader asking "what is not here?" wants
             # `objective`, `evidence`, `history` — the fields of the record —
@@ -14342,11 +14394,11 @@ class Org:
             dropped = sorted(k for k in view if k not in kept)
             kept["omitted_fields"] = dropped
             kept["omissions_how"] = (
-                f"the `summary` projection serves identity and state only, so "
-                f"{len(dropped)} field(s) — the description, acceptance, "
-                f"evidence, scope, history and the rest — are not in this "
+                f"the `{projection}` projection serves identity and state"
+                f"{' plus current scope and decisions' if projection == 'scope_decisions' else ' only'}, so "
+                f"{len(dropped)} field(s) listed in `omitted_fields` are not in this "
                 f"payload. Nothing was dropped from the record: read one item "
-                f"whole with `orgtree_work get slug=<name>`, or ask for exactly "
+                f"whole with `orgtree_work get slug=<name> projection=full`, or ask for exactly "
                 f"what you want with fields=[...]")
             out = kept
         out["projection"] = projection
@@ -16621,9 +16673,10 @@ class Org:
                                    ((assigned or {}).get("notified"), rev_notify)
                                    if n],
                 "manual_attention": bool(it.get("manual_attention")),
-                "note": ("the standing attention flag was CLEARED by this "
-                         "update (pass attention=true to keep one)"
-                         if prev and attention is not True else None)}
+                "note": ("the standing attention flag was CLEARED by this update"
+                         if prev and not it.get("manual_attention") else
+                         "the standing attention flag was AMENDED by this update"
+                         if prev and attention_amend else None)}
 
     # ================================================ the post-completion
     # addendum (W-post-done). The two fields the user actually reads to know
@@ -19871,7 +19924,7 @@ class Org:
     # ---- the user's two controls
     def work_dismiss_attention(self, wid: str, set_rev: int) -> dict[str, Any]:
         """The list's Dismiss on a MANUAL flag: CAS on the flag revision it
-        was shown for, clears it, sets the work Blocked immediately, records
+        was shown for, clears it, blocks unfinished work except review, records
         the dismissal. Lists, last updater, docket clock and every pending
         question are untouched — pending questions keep the item orange."""
         it, phys = self._work_find(wid)
@@ -19889,7 +19942,9 @@ class Org:
              "reason": cur.get("reason")})
         it["manual_attention"] = None
         frm = it.get("status")
-        it["status"] = "blocked"
+        preserve_status = frm in ("done", "review")
+        if not preserve_status:
+            it["status"] = "blocked"
         # the SYSTEM's own transition into blocked, and it carries its own real
         # reason — it must keep working without agent input (Astra 2026-09-05).
         #
@@ -19899,21 +19954,23 @@ class Org:
         # ⚠ ONLY WHEN IT MOVED THE VALUE. On an item ALREADY blocked this
         # assigns `blocked` over `blocked`, and stamping that would make "most
         # recently changed state" mean "most recently touched".
-        if frm != "blocked":
+        if not preserve_status and frm != "blocked":
             self._work_stamp_status(it)
         # The clear comes FIRST and the new reason after it: the item may have
         # arrived here from `waiting` or from `dropped`, and every reason it
         # was carrying describes a state it has just left. It reads the state
         # map, so it also covers the `waiting_reason` line this replaces.
-        self._work_clear_state_info(it)
+        if not preserve_status:
+            self._work_clear_state_info(it)
         # ⚠ NOT SLICED. This string is COMPOSED by the product out of a reason
         # the contract already bounded on the way in, so the only thing the
         # old `[:500]` could ever cut was the tail of the very reason the
         # agent is being told not to re-raise — leaving it unable to tell
         # which of its sentences the user rejected.
-        it["blocked_reason"] = (f"attention flag dismissed by the user "
-                                f"({cur.get('reason')})")
-        if phys:
+        if not preserve_status:
+            it["blocked_reason"] = (f"attention flag dismissed by the user "
+                                    f"({cur.get('reason')})")
+        if phys and not preserve_status:
             # a dismissed flag on an archived item leaves it blocked, which is
             # open work — it comes back to the active list
             self._work_archive().remove(it)
@@ -19933,7 +19990,7 @@ class Org:
         # The explicit no-comment notice belongs to the assigned agent, not
         # the person who most recently edited the item.
         notify = self._work_actor_node(it.get("owner"))
-        return {"dismissed": wid, "rev": it["rev"], "status": "blocked",
+        return {"dismissed": wid, "rev": it["rev"], "status": it["status"],
                 "pending_questions": len(self._work_questions(wid)),
                 "notify": notify if notify in self.nodes else None,
                 "reason": cur.get("reason")}

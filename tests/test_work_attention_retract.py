@@ -585,10 +585,9 @@ class WhatADismissalMeansHere(RetractBase):
 
     A dismissal is not a quieter kind of retraction and must not become one. The
     facts, read from `work_dismiss_attention`: the dismissal ITSELF takes the
-    flag down, moves the item to `blocked`, and un-archives it if it was
-    archived. So after a dismissal there is nothing left for an agent to
-    retract, and the item is no longer closed — two independent refusals, both
-    correct rather than a gap. What the retraction route must never become is a
+    flag down and preserves a done item's state and archive. So after a
+    dismissal there is nothing left for an agent to retract. What the
+    retraction route must never become is a
     way to erase the record that the user rejected something."""
 
     def dismissed(self) -> str:
@@ -597,11 +596,11 @@ class WhatADismissalMeansHere(RetractBase):
             wid, self.item(wid)['manual_attention']['set_rev'])
         return wid
 
-    def test_a_dismissal_already_took_the_flag_down_and_blocked_the_item(self):
+    def test_a_dismissal_took_the_flag_down_and_kept_the_item_done(self):
         wid = self.dismissed()
         it = self.item(wid)
         self.assertIsNone(it['manual_attention'])
-        self.assertEqual(it['status'], 'blocked')
+        self.assertEqual(it['status'], 'done')
         self.assertEqual(len(it['dismissals']), 1)
 
     def test_so_the_retraction_route_refuses_a_dismissed_flag(self):
@@ -610,8 +609,7 @@ class WhatADismissalMeansHere(RetractBase):
         with self.assertRaises(ledger.LedgerError) as e:
             self.org.work_addendum(self.agent, wid, 'taking it back',
                                    attention=False)
-        # the item is blocked, which is not closed — the first of the two
-        self.assertIn('not closed', str(e.exception))
+        self.assertIn('nothing to retract', str(e.exception))
         self.assertEqual(self.snapshot(wid), before)
 
     def test_and_refuses_it_again_once_the_item_is_finished_afterwards(self):
@@ -619,8 +617,6 @@ class WhatADismissalMeansHere(RetractBase):
         'not closed' refusal cannot be what fires, and confirm the missing
         flag is refused on its own terms with the dismissal called out."""
         wid = self.dismissed()
-        self.org.work_update(self.agent, wid, ['measured it'], [],
-                             status='done')
         with self.assertRaises(ledger.LedgerError) as e:
             self.org.work_addendum(self.agent, wid, 'taking it back',
                                    attention=False)
@@ -638,7 +634,8 @@ class WhatADismissalMeansHere(RetractBase):
         # a fresh flag, then finish the item, then try to amend it BACK to the
         # exact sentence the user already rejected
         self.org.work_update(self.agent, wid, ['measured it'], ['x'],
-                             attention=True, attention_reason='something else')
+                             reopen=True, attention=True,
+                             attention_reason='something else')
         self.org.work_update(self.agent, wid, ['measured it'], ['x'],
                              status='done', attention=True,
                              attention_reason='something else')
@@ -657,7 +654,7 @@ class WhatADismissalMeansHere(RetractBase):
         self.org.work_dismiss_attention(
             wid, self.item(wid)['manual_attention']['set_rev'])
         self.org.work_update(self.agent, wid, ['measured it'], ['x'],
-                             status='done', attention=True,
+                             reopen=True, status='done', attention=True,
                              attention_reason='a different question')
         dismissals = copy.deepcopy(self.item(wid)['dismissals'])
         blocked_was = self.item(wid)['blocked_reason']

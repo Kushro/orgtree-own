@@ -73,6 +73,20 @@ class AttentionThroughTheApiDoor(unittest.TestCase):
     def _flag(self):
         return self.org.work_get(self.agent, self.wid).get("manual_attention")
 
+    def test_update_note_only_says_cleared_when_the_flag_is_gone(self):
+        self._raise_flag()
+        kept = self._update({"done_so_far": ["progress"], "working_on_next": []})
+        self.assertIsNone(kept["note"])
+        amended = self._update({"done_so_far": ["progress"], "working_on_next": [],
+                                "attention_amend": True,
+                                "attention_reason": "A fuller explanation"})
+        self.assertIn("AMENDED", amended["note"])
+        self.assertNotIn("CLEARED", amended["note"])
+        cleared = self._update({"done_so_far": ["progress"], "working_on_next": [],
+                                "attention": False})
+        self.assertIn("CLEARED", cleared["note"])
+        self.assertIsNone(self._flag())
+
     def test_an_agent_can_retract_its_own_flag_through_update(self):
         """THE DEFECT (f3). `attention: false` was collapsed to `None` by the
         update branch, so this retraction was silently a no-op — and because
