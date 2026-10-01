@@ -6,7 +6,7 @@
   "anchors": [
    {
     "path": "engine/backend/orgtree/ledger.py",
-    "sha256": "b9c7de2305b4e7de0205187a98bf68e82a7774d5cce114f266f0d86d3c8ad5f9"
+    "sha256": "dd4126319bcca07278a8749ba15fe0688c94e17cf430e5e962e65c424a1d97f7"
    },
    {
     "path": "engine/backend/orgtree/openrouter.py",
@@ -18,7 +18,7 @@
    },
    {
     "path": "engine/backend/orgtree/api.py",
-    "sha256": "904e10aa6b2cda2b05df3d408f3dceea04b734aec39281c0d54dfcce9977b86d"
+    "sha256": "c787521c49af42a1aeb2bc49163124d29bd836b925b1827055b7c1dd4a3d1560"
    }
   ]
  },
