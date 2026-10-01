@@ -449,6 +449,12 @@ test('§8 the Pin button pins the desk and closes the modal; a pinned agent gets
       assert.ok(modal(), 'picking the entry did not open the temporary desk')
     }
     await openTemporarily()
+    // user 2026-10-01: no visible "opened temporarily" label (the aria-label keeps it)
+    assert.equal(/opened temporarily/.test(modal()!.textContent ?? ''), false,
+      'the temporary desk still shows the "opened temporarily" label')
+    assert.equal(Boolean(modal()!.querySelector('.tempdesk-note')), false, 'the note span is back')
+    assert.equal(Boolean(modal()!.querySelector('.tempdesk-head .pinwin-name')), true,
+      'control failed: the title bar lost the agent name')
     assert.equal(Boolean(v.el.querySelector('.pinwin')), false, 'pinned before the click')
     const pin = modal()!.querySelector<HTMLButtonElement>('.tempdesk-head .tempdesk-pin')
     assert.ok(pin, 'the temporary desk has no Pin button')

@@ -133,7 +133,6 @@ export function TempDeskModal({ node, close, onPin, desk }: TempDeskProps) {
         aria-label={`${node.id} · desk, opened temporarily`}>
         <div className="tempdesk-head pinwin-title" data-copy-agent-name={node.id}>
           <AgentName id={node.id} tier={node.tier} nameClass="pinwin-name" />
-          <span className="tempdesk-note pinwin-state">opened temporarily</span>
           <span className="spacer" />
           {onPin && (
             <button className="tempdesk-pin pinwin-unpin" onClick={onPin}
