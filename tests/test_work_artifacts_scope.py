@@ -338,7 +338,7 @@ class ReceiptActionTests(W08Base):
         self.assertTrue(rc['fingerprint'].startswith('sha256:'))
         self.assertEqual(body['execution'], 'independent')
         # and it is on the item, as evidence, with its provenance
-        code, seen = self.call('author', action='get')
+        code, seen = self.call('author', action='get', projection='full')
         ev = seen['item']['evidence'][-1]
         self.assertEqual(ev['execution'], 'independent')
         self.assertIn('ran the command itself', ev['execution_means'])
@@ -442,7 +442,7 @@ class ReceiptActionTests(W08Base):
                                ref='suite.log', note='trust me',
                                execution='owner_report')
         self.assertEqual(code, 200, body)
-        code, seen = self.call('author', action='get')
+        code, seen = self.call('author', action='get', projection='full')
         ev = seen['item']['evidence'][-1]
         self.assertEqual(ev['execution'], 'owner_report')
         self.assertNotIn('receipt', ev,
@@ -462,7 +462,7 @@ class ReceiptActionTests(W08Base):
                               ref='suite.log', receipt=self.FORGED)
         self.assertEqual(code, 422, ref)
         self.assertIn('cannot be supplied by the caller', str(ref))
-        code, seen = self.call('author', action='get')
+        code, seen = self.call('author', action='get', projection='full')
         self.assertFalse([e for e in seen['item']['evidence']
                           if e.get('ref') == 'suite.log'],
                          'the refused row was not written')
@@ -479,7 +479,7 @@ class ReceiptActionTests(W08Base):
         self.assertIn('cannot be supplied by the caller', str(ref))
         self.assertIn('items[1]', str(ref),
                       'the refusal names which element was wrong')
-        code, seen = self.call('author', action='get')
+        code, seen = self.call('author', action='get', projection='full')
         self.assertFalse([e for e in seen['item']['evidence']
                           if e.get('ref') in ('b' * 40, 'suite.log')],
                          'ATOMIC: the good first element was not written '
@@ -493,7 +493,7 @@ class ReceiptActionTests(W08Base):
             {'kind': 'log', 'ref': 'other.log', 'execution': 'owner_report'}])
         self.assertEqual(code, 200, body)
         self.assertEqual(body['executions'], ['independent', 'owner_report'])
-        code, seen = self.call('author', action='get')
+        code, seen = self.call('author', action='get', projection='full')
         rows = {e['ref']: e for e in seen['item']['evidence']}
         self.assertEqual(rows['c' * 40]['execution'], 'independent')
         self.assertEqual(rows['other.log']['execution'], 'owner_report')
@@ -701,10 +701,10 @@ class SuppliedBaseIsChecked(W08Base):
         self.assertIn('same commit', str(ref))
 
     def test_a_refused_base_writes_no_evidence_row(self):
-        code, seen = self.call('author', action='get')
+        code, seen = self.call('author', action='get', projection='full')
         before = len(seen['item']['evidence'])
         self.receipt(base=self.unrelated)
-        code, after = self.call('author', action='get')
+        code, after = self.call('author', action='get', projection='full')
         self.assertEqual(len(after['item']['evidence']), before,
                          'a receipt refused for a false base leaves nothing '
                          'on the item')
