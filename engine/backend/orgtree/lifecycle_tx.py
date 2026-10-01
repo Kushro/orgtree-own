@@ -200,9 +200,7 @@ def _move_rows(org, actor: str, nid: str, new_parent: str | None
         return {nid}, set()           # the move refuses; nothing to lock beyond
     p_old = n["parent"]
     moved = {nid, *org.lineage_stack(nid)}
-    upd = set(moved)
-    for m in moved:
-        upd |= set(org.descendants(m, live_only=False))
+    upd = moved | org.descendant_set(moved, live_only=False)
     try:
         lca = org._lca(p_old, tgt)
         upd |= set(org._chain_up(p_old, lca))
@@ -696,8 +694,8 @@ def dissolve_all(slug: str, actor: str) -> dict[str, int]:
 
 def _move_batch_rows(org, actor: str, moves: list[tuple[str, str | None]]
                      ) -> tuple[set[str], set[str]]:
-    import copy as _copy
-    sim = type(org)(_copy.deepcopy(org.d))
+    # the replay copy is never saved: `dry_run_copy` (see `_promote_rows`)
+    sim = type(org)(store.dry_run_copy(org.d))
     upd: set[str] = set()
     share: set[str] = set()
     for n, p in moves:
@@ -730,26 +728,30 @@ def move_batch(slug: str, actor: str, moves: list[tuple[str, str | None]]
 # target rises into nid's slot with its team, then nid descends beneath it —
 # exactly two internal `_move`s, authority already checked, after a seat
 # policy step that rewrites only the two agents' scopes. Rows: the union of
-# the two legs' `_move_rows`, the second computed on the tree the first
-# leaves (replayed on a private copy with `_authorized=True`, as the ledger
-# does: the public `move` would refuse a self-subjugation's first leg and
-# the replay would stop before the second). Sections are move's own.
+# the two legs' `_move_rows`. Sections are move's own.
+#
+# ⚠ THE SECOND LEG IS PLANNED ON THE TREE AS IT IS, NOT REPLAYED. It used to
+# be computed on a private copy after replaying the first leg; a deep copy of
+# an on-demand document loads every section and log first — measured on a
+# copy of the live org, 12-16 s per copy, twice per self-subjugation (the
+# plan and its re-check), refused or not (2026-10-01). Planning "nid under
+# target" on the current tree names a SUPERSET of what the replay named:
+# the target is still inside nid's subtree, so nid's descendants still
+# include everything that stays with nid; the release chain from nid's
+# parent is the same chain; the path down from that parent to the target
+# now runs through nid's branch, all of it already named; and every
+# ancestor the replay could read is an ancestor here too. A row named and
+# not touched costs a lock, never a bug (`_move_rows`).
 
 
 def _promote_rows(org, actor: str, nid: str, target: str
                   ) -> tuple[set[str], set[str]]:
-    import copy as _copy
     n, t = org.nodes.get(nid), org.nodes.get(target)
     if n is None or t is None:
         return {nid, target} & set(org.nodes) or {nid}, set()
     p_a = n["parent"]
     upd, share = _move_rows(org, actor, target, p_a)
-    sim = type(org)(_copy.deepcopy(org.d))
-    try:
-        sim._move("promote", actor, target, p_a, _authorized=True, _quiet=True)
-    except LedgerError:
-        return upd | {nid}, share - upd - {nid}       # the verb refuses
-    u2, s2 = _move_rows(sim, actor, nid, target)
+    u2, s2 = _move_rows(org, actor, nid, target)
     upd |= u2 | {nid, target}
     share |= s2
     if actor in org.nodes:

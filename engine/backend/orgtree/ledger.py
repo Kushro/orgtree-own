@@ -132,6 +132,13 @@ def _q(x: float) -> float:
     computed total and every mutated grant — see CREDIT_PLACES."""
     return round(x, CREDIT_PLACES)
 
+
+def _rollback_copy(d: Any) -> Any:
+    """The restore point of an all-or-nothing verb: `store.rollback_copy`
+    (which does not load an on-demand document's every log to copy it)."""
+    from . import store                              # noqa: PLC0415 — cycle
+    return store.rollback_copy(d)
+
 # №34 runaway insurance, and NOTHING else (user ruling 2026-08-04): "no need to
 # have any practical limit other than to prevent infinite recursion from a bug
 # that spawns unlimited subagents". Both were low enough to be felt as design
@@ -1896,10 +1903,73 @@ class Org:
         return out
 
     def descendants(self, nid: str, live_only: bool = True) -> list[str]:
+        """Depth-first, each node's children in `children()` order.
+
+        The candidates are gathered one generation at a time first, as
+        `_taken_with` does: on on-demand rows one statement per generation
+        (`store.lazy_children_index`), on whole rows one `children_index`.
+        Asking `children()` per node instead scanned the whole node table per
+        call — a move of the live org's largest manager (1145 descendants,
+        1206 rows) made 8194 such calls, 8.6 million row reads and ~5 s of
+        its commit (2026-10-01). `children()` still decides who counts."""
+        from . import store                              # noqa: PLC0415 — cycle
+        if nid is None:
+            return self._descendants_scan(nid, live_only)
+        index: dict[str | None, list[str]] = {}
+        whole: dict[str | None, list[str]] | None = None
+        frontier = [nid]
+        while frontier:
+            gen = [k for k in dict.fromkeys(frontier) if k not in index]
+            if not gen:
+                break
+            found = store.lazy_children_index(self, gen)
+            if found is None:
+                whole = found = self.children_index() if whole is None else whole
+            frontier = []
+            for k in gen:
+                index[k] = list(found.get(k, ()))
+                frontier.extend(self.children(k, live_only, index=index))
+        out: list[str] = []
+
+        def walk(k: str) -> None:
+            for c in self.children(k, live_only, index=index):
+                out.append(c)
+                walk(c)
+        walk(nid)
+        return out
+
+    def descendant_set(self, roots: Iterable[str],
+                       live_only: bool = True) -> set[str]:
+        """The union of `descendants(r)` over `roots`, from ONE generation
+        walk for all of them. A move unions the subtree of the node and of
+        every generation in its lineage stack (47 roots for the live org's
+        largest manager); one `descendants` call per root paid a statement
+        per root even for generations with no children."""
+        from . import store                              # noqa: PLC0415 — cycle
+        out: set[str] = set()
+        seen: set[str] = set()
+        whole: dict[str | None, list[str]] | None = None
+        frontier = [r for r in roots if r is not None]
+        while frontier:
+            gen = [k for k in dict.fromkeys(frontier) if k not in seen]
+            if not gen:
+                break
+            seen.update(gen)
+            found = store.lazy_children_index(self, gen)
+            if found is None:
+                whole = found = self.children_index() if whole is None else whole
+            frontier = []
+            for k in gen:
+                kids = self.children(k, live_only, index=found)
+                out.update(kids)
+                frontier.extend(kids)
+        return out
+
+    def _descendants_scan(self, nid: str | None, live_only: bool) -> list[str]:
         out: list[str] = []
         for c in self.children(nid, live_only):
             out.append(c)
-            out.extend(self.descendants(c, live_only))
+            out.extend(self._descendants_scan(c, live_only))
         return out
 
     def depth(self, nid: str) -> int:
@@ -6764,7 +6834,7 @@ class Org:
         # seat redistribution counts as one. Taking it after would leave a
         # refused promotion holding a silently re-scoped pair — a partial
         # mutation of precisely the sort this verb promises cannot happen.
-        snap = copy.deepcopy(self.d)
+        snap = _rollback_copy(self.d)
         try:
             # Seat-scoped capacity is settled BEFORE the moves, so that the
             # containment sweeps inside `_move` see the intended end state
@@ -7015,15 +7085,23 @@ class Org:
         kids_a = [k for k in self.children(a) if k != b]
         kids_b = [k for k in self.children(b) if k != a]
 
+        # every row whose parent is a or b, retired ones included (each stores
+        # its parent), named from the children index of those two alone: the
+        # whole-table walk this replaced decoded and exposed every node row
+        # of the org (1206 on the live one) to re-point a few hundred
+        from . import store                              # noqa: PLC0415 — cycle
+        idx = store.lazy_children_index(self, [a, b])
+        if idx is None:
+            idx = self.children_index()
+        under_a = [k for k in self.children(a, live_only=False, index=idx) if k != b]
+        under_b = [k for k in self.children(b, live_only=False, index=idx) if k != a]
+
         # ---- mutation: a pure relabeling plus field trades; nothing below
         # raises, so a refusal above has left the tree byte-identical (§2b)
-        for k, v in self.nodes.items():
-            if k == a or k == b:
-                continue
-            if v["parent"] == a:
-                v["parent"] = b
-            elif v["parent"] == b:
-                v["parent"] = a
+        for k in under_a:
+            self.nodes[k]["parent"] = b
+        for k in under_b:
+            self.nodes[k]["parent"] = a
         n_b["parent"] = p_a
         n_a["parent"] = b if direct else p_b
         for k in self.lineage_stack(a):        # §8.5: a stack shares its
@@ -7150,7 +7228,7 @@ class Org:
                               "moves")
         if len(mv) > 20:
             raise LedgerError(f"at most 20 moves per batch (got {len(mv)})")
-        snap = copy.deepcopy(self.d)
+        snap = _rollback_copy(self.d)
         results: list[dict[str, Any]] = []
         for i, (n, p) in enumerate(mv):
             try:
@@ -7495,9 +7573,7 @@ class Org:
             # lineage_stack() stop it hanging; they do not stop it existing,
             # and a cyclic org is corrupt whether or not the walk terminates.
             moved = {nid, *self.lineage_stack(nid)}
-            forbidden = set(moved)
-            for m in moved:
-                forbidden |= set(self.descendants(m, live_only=False))
+            forbidden = moved | self.descendant_set(moved, live_only=False)
             if new_parent in forbidden:
                 raise LedgerError("target is inside the moved subtree — cycle (§4.5)")
         if p_old is not None and not _authorized:

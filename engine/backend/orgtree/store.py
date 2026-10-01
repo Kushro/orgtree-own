@@ -3290,19 +3290,95 @@ def dry_run_copy(doc: Any) -> Any:
     it. `copy.deepcopy`/`json.dumps` go through `items()`, which loads every
     log first — measured on the live org: 190 MB and 9-12 s for one model
     switch of a busy agent (agent-settings-save). Any other document is
-    copied by the JSON round trip, as before."""
+    copied by the JSON round trip, as before.
+
+    ⚠ A NODE ROW DECODED BUT NEVER CHANGED IS NOT COPIED EITHER: it goes back
+    to undecoded in the copy, its baseline dropped with it, so the copy
+    decodes it again from the same stored row — the value it was decoded
+    from, since writes stay in memory until the save. "Never changed" is the
+    row's own mutation mark (`_NodeDict`: neither dirty nor aliased); a row
+    replaced wholesale, or decoded and then changed, is copied as before.
+    A promotion's rollback point copied the 1209 rows its plan had decoded
+    to walk a 1145-node subtree, 0.8 s, and changed a handful (measured on a
+    copy of the live org, 2026-10-01). A COMPLETE on-demand map is copied
+    whole: there an id it lacks is an id that was deleted.
+
+    ⚠ A WHOLE (non-lazy) node map — the resident document a lock plan is
+    computed on — becomes an ON-DEMAND map in the copy, holding only its
+    changed and unsaved rows; an id it has a baseline for and no longer holds
+    is recorded as deleted, so the copy never fetches it back. A dry run
+    reads rows as they are stored when it reaches them, which may be newer
+    than a resident copy: a plan is re-derived under its locks anyway. A
+    move batch's plan deep-copied all 1216 rows of the resident document,
+    0.65 s, to replay two moves (measured, 2026-10-01). `rollback_copy` does
+    not do this: a restore point must hold the document's own view."""
     if type(doc) is not LazyDoc:
         return json.loads(json.dumps(doc))
+    return _copy_lazy_doc(doc, whole_on_demand=True)
+
+
+def _copy_lazy_doc(doc: "LazyDoc", whole_on_demand: bool) -> "LazyDoc":
+    """`dry_run_copy` / `rollback_copy` of a `LazyDoc` (see both)."""
     new = LazyDoc.__new__(LazyDoc)
     memo: dict[int, Any] = {id(doc): new}
+    nodes = dict.get(doc, "nodes")
+    baselines = doc.__dict__.get("_snap_nodes")
+    baselines = baselines if isinstance(baselines, dict) else {}
+    clean: list[str] = []
+    out: Any = None
+    if isinstance(nodes, LazyNodesMap) and not nodes._complete:
+        out = LazyNodesMap.__new__(LazyNodesMap)
+        memo[id(nodes)] = out
+        nodes._copy_state(out, memo)
+    elif (whole_on_demand and type(nodes) is NodesMap and baselines
+          and STORE_BACKEND == "postgres" and doc._slug):
+        out = LazyNodesMap(doc._slug, new)
+        memo[id(nodes)] = out
+        for k, v in nodes.__dict__.items():
+            object.__setattr__(out, k, copy.deepcopy(v, memo))
+        held = set(dict.keys(nodes))
+        out._deleted.update(k for k in baselines if k not in held)
+    if out is not None:
+        for nid, v in dict.items(nodes):
+            if type(v) is _NodeDict and not v._mutation.dirty \
+                    and not v._mutation.aliased and nid in baselines:
+                clean.append(nid)
+                continue
+            dict.__setitem__(out, nid, copy.deepcopy(v, memo))
     for k, v in doc.__dict__.items():
         object.__setattr__(new, k, copy.deepcopy(v, memo))
     for k, v in dict.items(doc):
         dict.__setitem__(new, k, copy.deepcopy(v, memo))
+    if clean:
+        copied = new.__dict__.get("_snap_nodes")
+        if isinstance(copied, dict):
+            for nid in clean:
+                copied.pop(nid, None)
     return new
 
 
-def lazy_children_index(org: Org, parents: Iterable[str]
+def rollback_copy(doc: Any) -> Any:
+    """A snapshot an all-or-nothing ledger verb (`promote_subtree`,
+    `move_batch`) restores wholesale — `self.d = snap` — when a later step
+    refuses.
+
+    A `LazyDoc` is copied as `dry_run_copy` copies it: what it already holds
+    is deep-copied, a section it never loaded stays unloaded. That is an exact
+    restore point, because a section this document has not loaded has not
+    been changed by it: the verb's writes are all in memory until the save,
+    so after the restore an unloaded section loads from rows that still hold
+    what they held at the snapshot. The original is dropped, so the copy is
+    the only one of the two that can ever be saved. `copy.deepcopy` of a
+    `LazyDoc` loads every section and log first — measured on a copy of the
+    live org, 12-16 s per snapshot (2026-10-01), for a promotion that then
+    touched a handful of sections. Any other document is deep-copied as
+    before (a plain dict keeps its exact Python values)."""
+    if type(doc) is not LazyDoc:
+        return copy.deepcopy(doc)
+    return _copy_lazy_doc(doc, whole_on_demand=False)
+
+
+def lazy_children_index(org: Org, parents: Iterable[str | None]
                         ) -> dict[str | None, list[str]] | None:
     """The candidate children of each of `parents` (every state), in the
     shape `Org.children(index=...)` takes — or None when the table is not on
@@ -3312,14 +3388,21 @@ def lazy_children_index(org: Org, parents: Iterable[str]
     and re-judges every row this copy already holds, so a parent changed in
     this transaction counts as it is now (agent-settings-save: the scope
     plan's `_taken_with` walked `children()`, which decoded all 1095 rows —
-    13 MB — on every save)."""
+    13 MB — on every save).
+
+    The TOP LEVEL is a parent too (`None`): `node_index` stores its rows'
+    parent as '' (`orgtree_foreground_meta`), and the same re-judging keeps
+    only rows whose parent is really null. Without it every peer list of a
+    top-level seat — any move to or from the top — decoded the whole table
+    (1206 rows on the live org, 2026-10-01)."""
     want = set(parents)
     nodes = dict.get(cast("dict[str, Any]", org.d), "nodes")
     if not want or not isinstance(nodes, LazyNodesMap) or nodes._complete:
         return None
     ids = _node_ids_where(
         org, "id IN (SELECT id FROM node_index WHERE meta->>'parent' = ANY(?))",
-        (sorted(want),), lambda n: isinstance(n, dict) and n.get("parent") in want)
+        (sorted("" if p is None else p for p in want),),
+        lambda n: isinstance(n, dict) and n.get("parent") in want)
     idx: dict[str | None, list[str]] = {p: [] for p in want}
     for i in ids:
         idx[dict.__getitem__(nodes, i)["parent"]].append(i)
@@ -3336,10 +3419,10 @@ LAZY_CHILD_QUERIES = 32
 def lazy_children_of(org: Org, nid: str | None) -> list[str] | None:
     """`Org.children`'s candidates for ONE parent from one statement over
     `node_index` — or None (the caller walks the table) when the nodes are
-    not on on-demand rows, already whole, `nid` is the top level, or this
-    map has already answered `LAZY_CHILD_QUERIES` such questions."""
+    not on on-demand rows, already whole, or this map has already answered
+    `LAZY_CHILD_QUERIES` such questions. `nid` None is the top level."""
     nodes = dict.get(cast("dict[str, Any]", org.d), "nodes")
-    if nid is None or not isinstance(nodes, LazyNodesMap) or nodes._complete:
+    if not isinstance(nodes, LazyNodesMap) or nodes._complete:
         return None
     asked = nodes.__dict__.get("_child_queries", 0)
     if asked >= LAZY_CHILD_QUERIES:
@@ -5582,6 +5665,49 @@ def _cas(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...], what: str)
                          "(another writer committed it); nothing was written")
 
 
+def _cas_nodes(conn: sqlite3.Connection, rows: list[tuple[str, str, str]]) -> None:
+    """Compare-and-set several node rows — (id, new value, loaded value) — in
+    ONE statement on PostgreSQL, refusing exactly as `_cas` does when any of
+    them changed since this save loaded it.
+
+    One UPDATE per row made a save's statement count grow with the rows it
+    rewrites: a seat swap re-points every child row, retired ones included
+    (each stores its parent), and a manager with 477 archived reports sent
+    477 statements (measured on a copy of the live org, 2026-10-01). The rows
+    and the triggers they fire are the same; only the round trips go. One
+    row, or SQLite, keeps the single-row statement."""
+    if len(rows) == 1 or STORE_BACKEND != "postgres":
+        for nid, new, old in rows:
+            _cas(conn, "UPDATE nodes SET val=? WHERE id=? AND val=?",
+                 (new, nid, old), f"node {nid!r}")
+        return
+    ids = [r[0] for r in rows]
+    done = {cast(str, r[0]) for r in conn.execute(
+        "UPDATE nodes AS n SET val = u.val "
+        "FROM unnest(?::text[], ?::text[], ?::text[]) AS u(id, val, old) "
+        "WHERE n.id = u.id AND n.val = u.old RETURNING n.id",
+        (ids, [r[1] for r in rows], [r[2] for r in rows])).fetchall()}
+    stale = [nid for nid in ids if nid not in done]
+    if stale:
+        raise StaleWrite(f"node {stale[0]!r} changed since this save loaded it "
+                         "(another writer committed it); nothing was written")
+
+
+def _node_rows(conn: sqlite3.Connection, nids: Iterable[str]) -> dict[str, str]:
+    """The stored value of each of `nids` that exists — one statement on
+    PostgreSQL (a refresh after a 477-row swap re-read them one by one)."""
+    ids = list(dict.fromkeys(nids))
+    if len(ids) > 1 and STORE_BACKEND == "postgres":
+        return {cast(str, i): cast(str, v) for i, v in conn.execute(
+            "SELECT id, val FROM nodes WHERE id = ANY(?)", (ids,)).fetchall()}
+    out: dict[str, str] = {}
+    for nid in ids:
+        row = conn.execute("SELECT val FROM nodes WHERE id=?", (nid,)).fetchone()
+        if row is not None:
+            out[nid] = cast(str, row[0])
+    return out
+
+
 def _write_receipts(conn: sqlite3.Connection, lazy: LazyDoc | None, v: Any,
                     changes: SaveChanges | None,
                     receipts: list[tuple[Any, Any]] | None) -> None:
@@ -5799,6 +5925,8 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
                 and not nodes._touched_all and db_ids is None \
                 and snap_nodes is not None:
             node_touched = nodes._changed()
+        # compare-and-set rewrites, sent together after the walk (`_cas_nodes`)
+        cas_rows: list[tuple[str, str, str]] = []
         # ⚠ dict.items, NOT nodes.items(): the differ itself must not trip
         # the read barrier it consumes
         for nid, nv in dict.items(nodes):
@@ -5815,8 +5943,7 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
                 if snap_nodes is None or db_ids is not None or snap_nodes.get(nid) != s:
                     if _ROW_CAS and snap_nodes is not None and db_ids is None \
                             and nid in snap_nodes:
-                        _cas(conn, "UPDATE nodes SET val=? WHERE id=? AND val=?",
-                             (s, nid, snap_nodes[nid]), f"node {nid!r}")
+                        cas_rows.append((nid, s, snap_nodes[nid]))
                     else:
                         conn.execute("UPDATE nodes SET val=? WHERE id=?", (s, nid))
                     if changes is not None:
@@ -5830,6 +5957,8 @@ def _write_doc(conn: sqlite3.Connection, d: dict[str, Any], lazy: LazyDoc | None
                 next_ord += 1
                 if changes is not None:
                     changes.node_inserts.append(nid)
+        if cas_rows:
+            _cas_nodes(conn, cas_rows)
         for nid in known_ids - set(new_nodes):
             if _ROW_CAS and snap_nodes is not None and db_ids is None \
                     and nid in snap_nodes:
@@ -8248,12 +8377,7 @@ def _assemble_snapshot(slug: str, prev: Org) -> tuple[Org, int] | None:
                         # delta even under GIL contention
                         id_order = list(dict.keys(prev_nodes))
                     _tb = time.perf_counter()
-                    fresh_nodes: dict[str, str] = {}
-                    for nid in nids:
-                        row = conn.execute("SELECT val FROM nodes WHERE id=?",
-                                           (nid,)).fetchone()
-                        if row is not None:
-                            fresh_nodes[nid] = cast(str, row[0])
+                    fresh_nodes: dict[str, str] = _node_rows(conn, nids)
                     _tc = time.perf_counter()
                     receipt = _receipt_view(conn, slug, bind=False)
                     conn.execute("COMMIT")
@@ -8589,13 +8713,12 @@ def _advance_resident(slug: str, d: LazyDoc) -> bool:
                     nodes = dict.get(d, "nodes")
                     if not isinstance(nodes, dict):
                         raise _AssembleBail("nodes not a dict during advance")
+                    stored = _node_rows(conn, nids)
                     for nid in nids:
-                        row = conn.execute("SELECT val FROM nodes WHERE id=?",
-                                           (nid,)).fetchone()
-                        if row is not None:
-                            dict.__setitem__(nodes, nid,
-                                             json.loads(cast(str, row[0])))
-                            d._snap_nodes[nid] = cast(str, row[0])
+                        raw = stored.get(nid)
+                        if raw is not None:
+                            dict.__setitem__(nodes, nid, json.loads(raw))
+                            d._snap_nodes[nid] = raw
                         else:
                             if dict.__contains__(nodes, nid):
                                 dict.__delitem__(nodes, nid)

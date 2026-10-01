@@ -19,6 +19,13 @@ from . import workindex, workrows
 log = logging.getLogger(__name__)
 
 
+#: parent rows one refresh keeps. A row is an id and a parent id, so this
+#: bounds memory at a few MB; it is sized so that one batched refresh holds
+#: every chain of an org this size (1206 node rows live, 2026-10-01) and its
+#: prefetch is not answered row by row once the cache is full.
+_CACHE_MAX = 16384
+
+
 class _Parents(Mapping):
     """Only touched ancestor rows; bounded cache even during migration."""
     def __init__(self, raw, schema):
@@ -31,7 +38,7 @@ class _Parents(Mapping):
         if key not in self.cache:
             row = self.raw.execute(f"SELECT val::json->'parent' FROM {self.schema}.nodes WHERE id=%s",(key,)).fetchone()
             self.cache[key] = None if row is None else {'parent': row[0]}
-            if len(self.cache)>1024: self.cache.popitem(last=False)
+            if len(self.cache)>_CACHE_MAX: self.cache.popitem(last=False)
         value = self.cache[key]
         self.cache.move_to_end(key)
         if value is None: raise KeyError(key)
@@ -41,21 +48,37 @@ class _Parents(Mapping):
 
     def prefetch(self, ids):
         """Load these nodes and their parent chains in ONE statement instead of
-        one read per level. Only rows found are cached; anything else is still
-        read one by one on access. Does not mark anything touched."""
+        one read per level. Rows found are cached, and so is the absence of
+        an asked-for id; a parent beyond the cache bound is still read one by
+        one on access. Does not mark anything touched.
+
+        ⚠ EACH STEP CARRIES ITS PARENT ID FORWARD AND FOLLOWS IT BY PRIMARY
+        KEY. The first form joined `nodes n ON n.id = c.val::json->>'parent'`,
+        which the planner answered by parsing EVERY node row's JSON at every
+        level: ~150 ms per call on the live org's 1206 rows, called 237 times
+        by one move of a manager with 1145 descendants — 36 of that move's
+        40 s (measured on a copy of the live org, 2026-10-01). Now only the
+        rows on the chains are read."""
         ids=[i for i in ids if isinstance(i,str) and i not in self.cache]
         if not ids: return
+        step=("CASE WHEN json_typeof({v}::json->'parent')='string' "
+              "THEN {v}::json->>'parent' END")
         rows=self.raw.execute(
-            f"WITH RECURSIVE up(id) AS ("
-            f"SELECT id FROM {self.schema}.nodes WHERE id=ANY(%s) "
-            f"UNION SELECT n.id FROM up JOIN {self.schema}.nodes c ON c.id=up.id "
-            f"JOIN {self.schema}.nodes n ON json_typeof(c.val::json->'parent')='string' "
-            f"AND n.id=c.val::json->>'parent') "
+            f"WITH RECURSIVE up(id,p) AS ("
+            f"SELECT id,{step.format(v='val')} FROM {self.schema}.nodes WHERE id=ANY(%s) "
+            f"UNION SELECT n.id,{step.format(v='n.val')} FROM up "
+            f"JOIN {self.schema}.nodes n ON n.id=up.p) "
             f"SELECT id,val::json->'parent' FROM {self.schema}.nodes WHERE id IN (SELECT id FROM up)",
             (ids,)).fetchall()
         for key,parent in rows:
-            if key not in self.cache and len(self.cache)<1024:
+            if key not in self.cache and len(self.cache)<_CACHE_MAX:
                 self.cache[key]={'parent':parent}
+        # an id asked for and not found is remembered as missing, exactly as
+        # `__getitem__`'s own read remembers it — otherwise every item naming
+        # a deleted actor asked again (31 statements per large move)
+        for key in ids:
+            if key not in self.cache and len(self.cache)<_CACHE_MAX:
+                self.cache[key]=None
 
     def __contains__(self,key):
         try: self[key]; return True
@@ -98,6 +121,16 @@ class _Policy:
         return self.questions.get(slug, [])
 
 
+def _candidates(item):
+    """The node ids `_expected` starts from, for one batched prefetch. A hint
+    only: anything malformed is skipped here and refused by `_expected`."""
+    if not isinstance(item,dict): return []
+    out=[n for n in (Org._work_actor_node(item.get(k)) for k in ('owner','created_by','reviewer')) if n]
+    participants=item.get('participants')
+    if isinstance(participants,list): out.extend(p for p in participants if isinstance(p,str))
+    return [x for x in out if x!=USER]
+
+
 def _expected(policy, item, location):
     """Access set and indexed classification hints; ledger remains the oracle."""
     policy.nodes.touched.clear()
@@ -137,25 +170,48 @@ def _installed(raw,schema):
     return raw.execute('SELECT to_regclass(%s)',(schema+'.work_read_state',)).fetchone()[0] is not None
 
 
-def _replace_access(raw,schema,slug,allowed):
-    old = {r[0] for r in raw.execute(f'SELECT viewer FROM {schema}.work_read_access WHERE slug=%s',(slug,))}
-    for viewer in old-allowed:
-        raw.execute(f'DELETE FROM {schema}.work_read_access WHERE slug=%s AND viewer=%s',(slug,viewer))
-        changed=raw.execute(f'UPDATE {schema}.work_read_totals SET total=total-1 WHERE viewer=%s AND total>0 RETURNING total',(viewer,)).fetchone()
-        if changed is None: raise RuntimeError('docket access counter missing/underflow')
-    for viewer in allowed-old:
-        raw.execute(f'INSERT INTO {schema}.work_read_access VALUES(%s,%s)',(slug,viewer))
-        raw.execute(f'INSERT INTO {schema}.work_read_totals VALUES(%s,1) ON CONFLICT(viewer) DO UPDATE SET total={schema}.work_read_totals.total+1',(viewer,))
+def _pairs(pairs):
+    """Two parallel arrays for `unnest(%s::text[],%s::text[])`."""
+    return [a for a,_ in pairs],[b for _,b in pairs]
 
 
-def _replace_dependencies(raw,schema,slug,deps):
-    """One statement: drop the rows no longer depended on, add the new ones.
-    Rows kept are left alone (ON CONFLICT on the (slug,node_id) key)."""
-    deps=sorted(deps)
-    raw.execute(f'WITH gone AS (DELETE FROM {schema}.work_read_dependency '
-                f'WHERE slug=%s AND NOT node_id=ANY(%s)) '
-                f'INSERT INTO {schema}.work_read_dependency SELECT %s,unnest(%s::text[]) '
-                f'ON CONFLICT DO NOTHING',(slug,deps,slug,deps))
+def _replace_access(raw,schema,allowed):
+    """Make every processed item's viewer rows `allowed[slug]` (an empty set
+    drops them all) and keep the per-viewer totals exact, in at most five
+    statements for any number of items. Removals are counted down before
+    additions are counted up, as the row-by-row form did per item; a total
+    that would go below zero, or is missing, refuses the save."""
+    slugs=sorted(allowed)
+    old={}
+    for slug,viewer in raw.execute(f'SELECT slug,viewer FROM {schema}.work_read_access WHERE slug=ANY(%s)',(slugs,)):
+        old.setdefault(slug,set()).add(viewer)
+    gone=[(s,v) for s in slugs for v in sorted(old.get(s,set())-allowed[s])]
+    new=[(s,v) for s in slugs for v in sorted(allowed[s]-old.get(s,set()))]
+    if gone:
+        raw.execute(f'DELETE FROM {schema}.work_read_access a USING unnest(%s::text[],%s::text[]) g(slug,viewer) '
+                    f'WHERE a.slug=g.slug AND a.viewer=g.viewer',_pairs(gone))
+        down=sorted(Counter(v for _,v in gone).items())
+        changed=raw.execute(f'UPDATE {schema}.work_read_totals t SET total=t.total-d.n '
+                            f'FROM unnest(%s::text[],%s::bigint[]) d(viewer,n) '
+                            f'WHERE t.viewer=d.viewer AND t.total>=d.n RETURNING t.viewer',_pairs(down)).fetchall()
+        if len(changed)!=len(down): raise RuntimeError('docket access counter missing/underflow')
+    if new:
+        raw.execute(f'INSERT INTO {schema}.work_read_access SELECT * FROM unnest(%s::text[],%s::text[])',_pairs(new))
+        raw.execute(f'INSERT INTO {schema}.work_read_totals SELECT * FROM unnest(%s::text[],%s::bigint[]) '
+                    f'ON CONFLICT(viewer) DO UPDATE SET total={schema}.work_read_totals.total+excluded.total',
+                    _pairs(sorted(Counter(v for _,v in new).items())))
+
+
+def _replace_dependencies(raw,schema,slugs,deps):
+    """One statement for every processed item: drop the rows no longer
+    depended on, add the new ones. Rows kept are left alone (ON CONFLICT on
+    the (slug,node_id) key); an item absent from `deps` loses all its rows."""
+    pairs=sorted(deps)
+    raw.execute(f'WITH new(slug,node_id) AS (SELECT * FROM unnest(%s::text[],%s::text[])), '
+                f'gone AS (DELETE FROM {schema}.work_read_dependency d WHERE d.slug=ANY(%s) '
+                f'AND NOT EXISTS (SELECT 1 FROM new WHERE new.slug=d.slug AND new.node_id=d.node_id)) '
+                f'INSERT INTO {schema}.work_read_dependency SELECT slug,node_id FROM new '
+                f'ON CONFLICT DO NOTHING',(*_pairs(pairs),sorted(slugs)))
 
 
 def refresh(raw, org_id: int) -> bool:
@@ -253,17 +309,40 @@ def _refresh(raw, org_id: int, probe=None) -> bool:
     # Cursor streams dirty identities; pending cardinality is the changed work,
     # except the explicit first migration/bootstrap, where it is the raw set.
     dirty=[r[0] for r in raw.execute(f'SELECT slug FROM {schema}.work_read_dirty ORDER BY slug')]
-    for slug in dirty:
-        row=raw.execute(f'SELECT location,summary FROM {schema}.work_index WHERE slug=%s',(slug,)).fetchone()
-        if row:
-            values,allowed,deps=_expected(policy,row[1],row[0])
-            _replace_access(raw,schema,slug,allowed)
-            raw.execute(f'INSERT INTO {schema}.work_read_policy VALUES(%s,%s,%s,%s) ON CONFLICT(slug) DO UPDATE SET location=excluded.location,deadline=excluded.deadline,manual=excluded.manual',(slug,*values))
-            _replace_dependencies(raw,schema,slug,deps)
-        else:
-            _replace_access(raw,schema,slug,set())
-            raw.execute(f'DELETE FROM {schema}.work_read_policy WHERE slug=%s',(slug,))
-            raw.execute(f'DELETE FROM {schema}.work_read_dependency WHERE slug=%s',(slug,))
+    # ⚠ BATCHED, NOT ONE ROUND OF STATEMENTS PER ITEM. Moving a manager makes
+    # every item whose owner sits below it dirty: 1081 items for the live
+    # org's biggest branch, which ran ~6900 statements one item at a time
+    # (2026-10-01). Every item is decided in Python first — a malformed item
+    # raises before anything is written — and then the rows are written in a
+    # fixed handful of statements, whatever the number of items.
+    if dirty:
+        rows={slug:(location,summary) for slug,location,summary in raw.execute(
+            f'SELECT slug,location,summary FROM {schema}.work_index WHERE slug=ANY(%s)',(dirty,))}
+        policy.nodes.prefetch(sorted({x for _,summary in rows.values() for x in _candidates(summary)}))
+        allowed,policies,deps={},[],[]
+        for slug in dirty:
+            allowed[slug]=set()
+            if slug in rows:
+                location,summary=rows[slug]
+                values,allowed[slug],touched=_expected(policy,summary,location)
+                policies.append((slug,*values))
+                deps.extend((slug,n) for n in touched)
+        _replace_access(raw,schema,allowed)
+        if policies:
+            raw.execute(f'INSERT INTO {schema}.work_read_policy SELECT * FROM '
+                        f'unnest(%s::text[],%s::text[],%s::float8[],%s::bool[]) '
+                        f'ON CONFLICT(slug) DO UPDATE SET location=excluded.location,'
+                        f'deadline=excluded.deadline,manual=excluded.manual '
+                        # a moved manager re-derives every archived item below
+                        # it: rewrite only the rows whose policy changed
+                        f'WHERE ({schema}.work_read_policy.location,{schema}.work_read_policy.deadline,'
+                        f'{schema}.work_read_policy.manual) IS DISTINCT FROM '
+                        f'(excluded.location,excluded.deadline,excluded.manual)',
+                        [list(c) for c in zip(*policies)])
+        missing=[slug for slug in dirty if slug not in rows]
+        if missing:
+            raw.execute(f'DELETE FROM {schema}.work_read_policy WHERE slug=ANY(%s)',(missing,))
+        _replace_dependencies(raw,schema,dirty,deps)
     # The processed dirty markers go in the same statement that clears the
     # questions flag. If an item above raised, none of them is cleared.
     raw.execute(f'WITH done AS (DELETE FROM {schema}.work_read_dirty WHERE slug=ANY(%s)) '

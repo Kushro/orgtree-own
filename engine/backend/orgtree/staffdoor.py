@@ -108,6 +108,14 @@ def hire_rows(org: Any, actor: str, a: dict[str, Any]) -> pgdoor.TxSpec:
     # (A separate "add dest's parent" clause was mutation-tested and could
     # never change the result, so it is not here.)
     nodes: list[str] = [] if top_level else list(chain(org, dest, actor))
+    if str(a.get("hire_type") or "") == "superior" and dest in org.nodes:
+        # …EXCEPT the anchor's lineage stack: `insert_parent` re-parents every
+        # bearer sharing the anchor's slot under the new seat (§8.5), and a
+        # stack is not on any chain. Without these rows the first run wrote
+        # rows it did not hold and the door ran the WHOLE hire a second time
+        # (measured on a copy of the live org, 2026-10-01: an insert above a
+        # manager with 46 bearers ran twice, 1.6 s).
+        nodes.extend(k for k in org.lineage_stack(dest) if k not in nodes)
     name = str(a.get("name") or "")
     if name:
         nodes.append(new_node_id(org, name))
@@ -208,9 +216,11 @@ def op_hire_rows(org: Any, body: Any) -> pgdoor.TxSpec:
     insert-above (`above`, which the hire goes UNDER before the splice) and
     `parent` otherwise (None = the top level). The acting identity is
     `body.actor` (the user, or an agent acting through the operator door)."""
-    dest = body.above if getattr(body, "above", None) is not None else body.parent
+    above = getattr(body, "above", None) is not None
+    dest = body.above if above else body.parent
     return hire_rows(org, str(body.actor),
-                     {"target": dest or USER, "name": body.name or ""})
+                     {"target": dest or USER, "name": body.name or "",
+                      "hire_type": "superior" if above else "subordinate"})
 
 
 def op_hire_spec(snapshot: Any, body: Any, a: dict[str, Any]) -> pgdoor.TxSpec:
