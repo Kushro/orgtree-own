@@ -1658,20 +1658,35 @@ export function layoutCircular(root: CanvasNode, hidden: Map<string, string> = n
     }
   }
   walk(root, START, START + 2 * Math.PI, 0)
+  // A ring with fewer agents than fit around it at the dense pitch gathers
+  // them in ONE arc at the dense spacing, centred at the bottom (angle π/2);
+  // the arc grows both ways until its ends meet at the top. Past that the ring
+  // is laid out by wedge angles and grows in radius exactly as before.
   const radius: number[] = [0]
+  const arc: (number[] | null)[] = [null]
   for (let d = 1; d < rings.length; d++) {
     const r = rings[d] ?? []
+    const base = d === 1 ? RING_FIRST : radius[d - 1]! + RING_STEP
+    const dense = 2 * Math.asin(Math.min(1, RING_PITCH / (2 * base)))
+    if (r.length > 0 && r.length <= Math.floor(2 * Math.PI / dense)) {
+      radius[d] = base
+      arc[d] = r.map((_, i) => Math.PI / 2 + (i - (r.length - 1) / 2) * dense)
+      continue
+    }
+    arc[d] = null
     let gap = Math.PI * 2
     for (let i = 1; i < r.length; i++) gap = Math.min(gap, r[i]! - r[i - 1]!)
     if (r.length > 1) gap = Math.min(gap, r[0]! + 2 * Math.PI - r[r.length - 1]!)
     const need = r.length > 1 ? RING_PITCH / (2 * Math.sin(Math.min(gap, Math.PI) / 2)) : 0
-    radius[d] = Math.max(need, d === 1 ? RING_FIRST : radius[d - 1]! + RING_STEP)
+    radius[d] = Math.max(need, base)
   }
   const out = new Map<string, Pt>()
   const cx = EYE_ANCHOR_X + NODE_W / 2
+  const seen: number[] = []
   for (const p of placed) {
     const r = radius[p.depth]!
-    out.set(p.id, { x: cx + r * Math.cos(p.angle) - NODE_W / 2, y: r * Math.sin(p.angle) - NODE_H / 2 })
+    const angle = p.depth > 0 && arc[p.depth] ? arc[p.depth]![(seen[p.depth] = (seen[p.depth] ?? -1) + 1)]! : p.angle
+    out.set(p.id, { x: cx + r * Math.cos(angle) - NODE_W / 2, y: r * Math.sin(angle) - NODE_H / 2 })
   }
   return out
 }

@@ -48,16 +48,62 @@ test('eye at centre, depths on increasing rings, every agent placed', () => {
   assert.equal(overlaps(t), false)
 })
 
-test('a team sits in the wedge behind its parent, sized by team size', () => {
-  const root = eye([node('big', tree(5, 1, 'b')), node('small', [node('s0')])])
-  const t = layout(root, new Map(), 'circular')
+const ringAngles = (t: Map<string, { x: number; y: number }>, ids: string[]) => {
   const c = centre(t.get(USER)!)
-  const ang = (id: string) => Math.atan2(centre(t.get(id)!).y - c.y, centre(t.get(id)!).x - c.x)
-  const wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a))
-  // a child lies within its parent's wedge: 5/6 of the circle for big, so
-  // each of its kids is within half that of the parent's angle
-  for (let i = 0; i < 5; i++) assert.ok(Math.abs(wrap(ang(`b${i}`) - ang('big'))) <= Math.PI * 5 / 6 + 1e-9)
-  assert.ok(Math.abs(wrap(ang('s0') - ang('small'))) < 1e-9)
+  return ids.map(id => Math.atan2(centre(t.get(id)!).y - c.y, centre(t.get(id)!).x - c.x))
+}
+const ringRadius = (t: Map<string, { x: number; y: number }>, id: string) => {
+  const c = centre(t.get(USER)!), p = centre(t.get(id)!)
+  return Math.hypot(p.x - c.x, p.y - c.y)
+}
+const flat = (n: number, pre = 'k') => Array.from({ length: n }, (_, i) => node(`${pre}${i}`))
+const chord = (t: Map<string, { x: number; y: number }>, a: string, b: string) => {
+  const p = centre(t.get(a)!), q = centre(t.get(b)!)
+  return Math.hypot(p.x - q.x, p.y - q.y)
+}
+
+test('a sparse ring packs its agents at the dense spacing in one arc centred at the bottom', () => {
+  for (const n of [1, 2, 3, 4]) {
+    const t = layout(eye(flat(n)), new Map(), 'circular')
+    const ids = Array.from({ length: n }, (_, i) => `k${i}`)
+    const ang = ringAngles(t, ids)
+    const mean = ang.reduce((x, y) => x + y, 0) / n
+    assert.ok(Math.abs(mean - Math.PI / 2) < 1e-9, `n=${n}: arc is centred at the bottom`)
+    for (const id of ids) assert.ok(Math.abs(ringRadius(t, id) - ringRadius(t, 'k0')) < 1e-6)
+    for (let i = 1; i < n; i++) {
+      assert.ok(ang[i]! > ang[i - 1]!, 'ring order is kept')
+      assert.ok(Math.abs(chord(t, `k${i - 1}`, `k${i}`) - 190) < 1e-6, `n=${n}: neighbours sit one dense pitch apart`)
+    }
+    assert.ok(ang.every(a => a > 0 && a < Math.PI), 'a short arc stays on the lower half')
+    assert.equal(overlaps(t), false)
+  }
+})
+
+test('the arc grows until it closes at the top, then the ring grows in radius as before', () => {
+  const r1 = ringRadius(layout(eye(flat(1)), new Map(), 'circular'), 'k0')
+  let cap = 0
+  for (let n = 1; n < 40; n++) {
+    const t = layout(eye(flat(n)), new Map(), 'circular')
+    if (Math.abs(ringRadius(t, 'k0') - r1) > 1e-6) { cap = n - 1; break }
+  }
+  assert.ok(cap > 4, `the first ring fills at ${cap}`)
+  const full = layout(eye(flat(cap)), new Map(), 'circular')
+  const gapAtTop = chord(full, 'k0', `k${cap - 1}`)
+  assert.ok(gapAtTop >= 190 - 1e-6 && gapAtTop < 190 * 1.6, `the two ends meet near the top at about one pitch (${gapAtTop})`)
+  const after = layout(eye(flat(cap + 1)), new Map(), 'circular')
+  assert.ok(ringRadius(after, 'k0') > r1 + 1, 'past full the radius grows')
+  assert.equal(overlaps(after), false)
+})
+
+test('every ring gathers on its own: the second ring is an arc at the bottom too', () => {
+  const root = eye([node('a', flat(3, 'a')), node('b', flat(2, 'b'))])
+  const t = layout(root, new Map(), 'circular')
+  const ids = ['a0', 'a1', 'a2', 'b0', 'b1']
+  const ang = ringAngles(t, ids)
+  assert.ok(Math.abs(ang.reduce((x, y) => x + y, 0) / 5 - Math.PI / 2) < 1e-9)
+  for (let i = 1; i < 5; i++) assert.ok(Math.abs(chord(t, ids[i - 1]!, ids[i]!) - 190) < 1e-6 || chord(t, ids[i - 1]!, ids[i]!) > 190 - 1e-6)
+  assert.ok(ringRadius(t, 'a0') > ringRadius(t, 'a'))
+  assert.equal(overlaps(t), false)
 })
 
 test('1500 agents: no overlap and cheap', () => {
