@@ -304,17 +304,20 @@ function desk(n: CanvasNode, orgDefault = ORG_DEFAULT) {
 const onDesk = (el: HTMLElement) =>
   el.querySelector<HTMLElement>('.cc-head .badge.effort-level')
 
-test('§3a the desk header shows the same non-default level',
+test('§3a the desk header does NOT show the effort card, even non-default',
   async (t: TestContext) => {
+    // user ruling 2026-10-01: the full desk header drops it; only the zoomed
+    // canvas card keeps it. The control: the card for the same agent shows it.
     installFetch(new FakeServer())
-    const view = await mountView(desk(agent('xhigh', 'xhigh')), (el) => el)
+    const n = agent('xhigh', 'xhigh')
+    const c = await card(n, 'norm')
+    t.after(() => c.unmount())
+    const view = await mountView(desk(n), (el) => el)
     t.after(() => view.unmount())
     await flush()
-    const badge = onDesk(view.el)
-    assert.ok(badge, 'no effort card in the desk header')
-    assert.equal(badge!.getAttribute('data-effort-level'), 'xhigh')
-    assert.equal(badge!.closest('.cc-head-meta')?.tagName, 'DIV',
-      'the effort card is not in the header metadata row beside MCP/cache/cost/account')
+    assert.ok(onCard(c.el), 'control failed: the canvas card lost its effort card')
+    assert.equal(onDesk(view.el), null, 'the desk header shows an effort card')
+    assert.equal(view.el.querySelector('.cc-head [data-effort-level]'), null)
   })
 
 test('§3b the desk shows no card and no placeholder at default or unset',
@@ -346,16 +349,15 @@ test('§4a both surfaces say the SAME thing about the same agent',
     const d = await mountView(desk(n), (el) => el)
     t.after(() => d.unmount())
     await flush()
-    const onC = onCard(c.el)!, onD = onDesk(d.el)!
-    assert.equal(onC.getAttribute('data-effort-level'), onD.getAttribute('data-effort-level'))
-    assert.equal(onC.textContent, onD.textContent)
-    assert.equal(onC.getAttribute('title'), onD.getAttribute('title'))
+    const onC = onCard(c.el)!
+    assert.equal(onDesk(d.el), null, 'the desk header shows an effort card')
+    assert.equal(onC.getAttribute('data-effort-level'), 'low')
     // the detail names the level and stops. It used to also say which side of
     // the org default this was and what that default was; the user removed
     // that on 2026-09-21 ("no just the effort name no need for extra info"),
     // so this is an EXACT equality rather than a match — an assertion that
     // fails if anything at all creeps back into the detail.
-    assert.equal(onD.getAttribute('title'), 'thinking effort — low')
+    assert.equal(onC.getAttribute('title'), 'thinking effort — low')
   })
 
 test('§4b changing the agent\'s effort changes BOTH surfaces, live',
@@ -390,8 +392,7 @@ test('§4b changing the agent\'s effort changes BOTH surfaces, live',
     await flush()
     assert.equal(onCard(c.el)?.getAttribute('data-effort-level'), 'max',
       'the card kept describing the old effort')
-    assert.equal(onDesk(d.el)?.getAttribute('data-effort-level'), 'max',
-      'the desk kept describing the old effort')
+    assert.equal(onDesk(d.el), null, 'the desk header shows an effort card')
 
     // …and back to the default: the card must GO, not linger describing a
     // configuration that no longer exists
@@ -434,18 +435,15 @@ test('§4c changing the INHERITED org default changes both surfaces too',
           onDragStart={noop} onDragMove={noop} onDragEnd={noop} onDragCancel={noop} />
       </OrgDefaultEffort.Provider>)
     await flush()
-    const onD = onDesk(d.el), onC = onCard(c.el)
-    assert.ok(onD, 'the org default moved and the desk stayed silent about it')
+    const onC = onCard(c.el)
+    assert.equal(onDesk(d.el), null, 'the desk header shows an effort card')
     assert.ok(onC, 'the org default moved and the card stayed silent about it')
-    assert.equal(onD!.getAttribute('data-effort-level'), 'high')
     assert.equal(onC!.getAttribute('data-effort-level'), 'high')
-    assert.equal(onC!.getAttribute('title'), onD!.getAttribute('title'),
-      'the two surfaces disagreed about the new default')
     // The PROOF that both surfaces followed the org default to its new value
     // is that they now render at all and name `high` (asserted just above) —
     // this agent was silent while the default was still high. The detail no
     // longer names the default, so it is not the carrier of that evidence.
-    assert.equal(onD!.getAttribute('title'), 'thinking effort — high')
+    assert.equal(onC!.getAttribute('title'), 'thinking effort — high')
   })
 
 test('§4d an unsupported ORG override blanks NEITHER surface — the regression, '
@@ -465,18 +463,16 @@ test('§4d an unsupported ORG override blanks NEITHER surface — the regression
     const d = await mountView(desk(n, orgDefault), (el) => el)
     t.after(() => d.unmount())
     await flush()
-    const onC = onCard(c.el), onD = onDesk(d.el)
+    const onC = onCard(c.el)
     assert.ok(onC, 'the canvas card went blank under a junk org override')
-    assert.ok(onD, 'the desk header went blank under a junk org override')
+    assert.equal(onDesk(d.el), null, 'the desk header shows an effort card')
     assert.equal(onC!.getAttribute('data-effort-level'), 'xhigh')
-    assert.equal(onD!.getAttribute('data-effort-level'), 'xhigh')
     // Both measure against the RESOLVED default — which is what the f4
     // regression was about — and the evidence for that is that they RENDER
     // here at all: an unresolved '' default makes nonDefaultEffort return null
     // and both surfaces go silent, which is exactly what 0dbede2 did. The
     // detail itself names only the level (user ruling 2026-09-21).
-    assert.equal(onC!.getAttribute('title'), onD!.getAttribute('title'))
-    assert.equal(onD!.getAttribute('title'), 'thinking effort — xhigh')
+    assert.equal(onC!.getAttribute('title'), 'thinking effort — xhigh')
   })
 
 test('§4e …and an agent AT the resolved default is still silent on both',

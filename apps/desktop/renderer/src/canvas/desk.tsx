@@ -8,7 +8,7 @@ import type { ReplyContext } from '../eventReply'
 import { ReplyPreview, ReplySourceProvider } from './replypreview'
 import { indexReplySources, ReplySourceContent } from './replysource'
 import { copyToClipboard, useContextMenu } from './contextmenu'
-import { EFFORT_LEVELS, EffortLevelBadge, effortChangeToast } from './effort'
+import { EFFORT_LEVELS, effortChangeToast } from './effort'
 import { foldKeysOf, FoldProvider, sysFoldKey, thoughtFoldKey, toolFoldKey, useFold, useFoldState } from './foldstate'
 import { useChangedState } from '../changedstate'
 import { messageCopyText, toolCallCopyText, toolResultCopyText } from './copytext'
@@ -3344,15 +3344,6 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
             on a provider where more than one account is signed in. The desk
             is never far-zoom, so there is no exclusion to apply here. */}
         <ServingAccountBadge account={node.serving_account} />
-        {/* NON-DEFAULT THINKING EFFORT (docket
-            `show-non-default-effort-level-on-agent-headers`), in the same
-            metadata row as the MCP, cache-readiness, cost and account cards,
-            and mounted as the SAME component the canvas card mounts — one
-            source of truth for the level, the wording and the appear rule.
-            The composer's effort CONTROL below is untouched: this is a sign
-            saying the agent is not at the ordinary default, not a second
-            place to change it. */}
-        <EffortLevelBadge node={node} />
         </div>
       </div>
       {/* F-01: superior chip at the TOP. For a top-level agent the superior is
