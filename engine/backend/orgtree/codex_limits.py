@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 import os
 import threading
 import time
@@ -196,6 +197,39 @@ def _snapshots_of(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _credits(snapshots: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The account's EXTRA USAGE CREDITS, exactly as Codex reports them.
+
+    Every rate-limit snapshot from `account/rateLimits/read` carries
+    `credits: {hasCredits, unlimited, balance}` — the balance a decimal
+    STRING in Codex credits (measured 2026-10-01: openai/primary read
+    `"62036.6481075000"` beside a weekly window at 100%, which is why the
+    panel looked exhausted while the account could still work). The balance
+    is account-wide, so the first snapshot that carries one answers.
+
+    `None` when nothing is there to show — no credits, a zero or negative
+    balance, or a value that does not parse. Never estimated: a missing or
+    unreadable balance shows nothing rather than a guess (docket
+    v3-usage-panel-show-extra-usage-credits-per-acco)."""
+    for snapshot in snapshots:
+        raw_credits = snapshot.get("credits")
+        if not isinstance(raw_credits, dict):
+            continue
+        credits: dict[str, Any] = raw_credits
+        if credits.get("hasCredits") is not True:
+            continue
+        if credits.get("unlimited") is True:
+            return {"balance": None, "unit": "credits", "unlimited": True}
+        try:
+            balance = float(credits.get("balance"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(balance) or balance <= 0:
+            continue
+        return {"balance": balance, "unit": "credits", "unlimited": False}
+    return None
+
+
 def _normalize(raw: dict[str, Any],
                observed: dict[str, dict[str, float]] | None = None
                ) -> dict[str, Any]:
@@ -236,7 +270,12 @@ def _normalize(raw: dict[str, Any],
                 # (epoch); None on a board normalized without the ledger
                 "observed_at": seen_slots.get(slot),
             })
-    return {"available": bool(limits), "limits": limits, "plan": plan}
+    out: dict[str, Any] = {"available": bool(limits), "limits": limits,
+                           "plan": plan}
+    credits = _credits(snapshots)
+    if credits is not None:
+        out["credits"] = credits
+    return out
 
 
 def _account(data: dict[str, Any]) -> dict[str, Any]:

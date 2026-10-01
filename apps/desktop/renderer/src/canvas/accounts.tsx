@@ -8,7 +8,7 @@ import { MailHubSettings } from './hosthub'
 import { useEffect, useState } from 'react'
 import type {
   AccountUsage, ProviderInfo, ProvidersPayload, RuntimeSettingsPayload,
-  TierStanding, ToastFn, UsageLimit,
+  TierStanding, ToastFn, UsageCredits, UsageLimit,
 } from '../types'
 import {
   getProviders, peekProviders, getRuntimeSettings,
@@ -137,6 +137,34 @@ export function SpendTotal({ u }: { u: AccountUsage }) {
   </div>
 }
 
+/** "credits: 62,036" / "credits: $12.50" / "credits: unlimited", or null
+ *  when there is nothing to show. Codex credits round DOWN, so the line never
+ *  claims more than the provider reported. */
+export function creditsText(c: UsageCredits | null | undefined): string | null {
+  if (!c) return null
+  if (c.unlimited) return 'credits: unlimited'
+  const n = c.balance
+  if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) return null
+  if (c.unit === 'credits') {
+    return 'credits: ' + Math.floor(n).toLocaleString('en-US')
+  }
+  try {
+    return 'credits: ' + new Intl.NumberFormat('en-US',
+      { style: 'currency', currency: c.unit }).format(n)
+  } catch {
+    return `credits: ${n.toFixed(2)} ${c.unit}`
+  }
+}
+
+/** One line under the account's heading, only when the provider reported
+ *  credits (docket v3-usage-panel-show-extra-usage-credits-per-acco): a
+ *  weekly window at 100% beside a large credit balance is not an exhausted
+ *  account, and the bars alone made it look like one. */
+function CreditsLine({ u }: { u: AccountUsage }) {
+  const text = creditsText(u.credits)
+  return text ? <div className="usage-credits">{text}</div> : null
+}
+
 export function UsageBars({ u }: { u: AccountUsage }) {
   // AN API-KEY ROW IS ANSWERED BEFORE ANY LIMIT BRANCH. It carries no tiers
   // and no limits, so falling through would render an empty card that looks
@@ -175,6 +203,7 @@ export function UsageBars({ u }: { u: AccountUsage }) {
   if (!u.available) {
     return <>
       {tierLine ? <div className="dim">{tierLine}</div> : null}
+      <CreditsLine u={u} />
       <div className="dim">{u.error ?? 'usage unavailable'}</div>
     </>
   }
@@ -183,6 +212,7 @@ export function UsageBars({ u }: { u: AccountUsage }) {
       {isGemini
         ? (tierLine ? <div className="dim">{tierLine}</div> : null)
         : (u.plan ? <div className="dim">{u.provider ?? 'Claude'} {u.plan}</div> : null)}
+      <CreditsLine u={u} />
       {(u.limits ?? []).map((l) => {
         // `percent: null` is a real state (UsageLimit's own type), not an
         // absent 0 — OpenRouter reports it for an uncapped key, where the

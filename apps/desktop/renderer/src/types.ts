@@ -1787,6 +1787,21 @@ export interface UsagePayload {
   email?: string
   /** Time of the provider observation, not merely when the UI read it. */
   observed_at?: string | null
+  /** Extra usage credits the provider REPORTS for this account (docket
+   *  v3-usage-panel-show-extra-usage-credits-per-acco). Absent when there are
+   *  none or the provider reports none — the panel then shows nothing extra,
+   *  never a 0. Codex: `account/rateLimits/read` credits; Claude: the usage
+   *  answer's `spend.balance`. */
+  credits?: UsageCredits
+}
+
+/** An account's extra usage credits, exactly as its provider reported them.
+ *  `unit` is `'credits'` (Codex's own unit) or an ISO currency code. */
+export interface UsageCredits {
+  /** null only when `unlimited` */
+  balance: number | null
+  unit: string
+  unlimited: boolean
 }
 
 /** GET /api/accounts — machine-local account routing (user redesign
@@ -1933,6 +1948,12 @@ export interface AccountSpend {
 export interface AccountUsage {
   account: string
   label: string
+  /** Extra usage credits the provider REPORTS for this account (docket
+   *  v3-usage-panel-show-extra-usage-credits-per-acco). Absent when there are
+   *  none or the provider reports none — the panel then shows nothing extra,
+   *  never a 0. Codex: `account/rateLimits/read` credits; Claude: the usage
+   *  answer's `spend.balance`. */
+  credits?: UsageCredits
   /** Observed login email. Older host payloads carried this in label. */
   email?: string | null
   /** Present for a non-Claude provider section in the combined usage modal. */

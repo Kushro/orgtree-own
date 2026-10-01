@@ -399,6 +399,37 @@ def _identity() -> dict[str, str]:
     return accounts.live_identity()
 
 
+def _credits(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """The account's prepaid USAGE CREDITS balance, when the usage answer
+    carries one: `spend.balance`, a money object shaped like the
+    `spend.used` beside it (`{amount_minor, currency, exponent}`).
+
+    `None` when there is nothing to show — extra usage off (the measured
+    state of this machine's account on 2026-10-01: `balance: null`), a zero
+    balance, or any other shape. Never estimated: an unknown shape shows
+    nothing rather than a guess (docket
+    v3-usage-panel-show-extra-usage-credits-per-acco)."""
+    spend_any = raw.get("spend")
+    if not isinstance(spend_any, dict):
+        return None
+    balance_any = cast("dict[str, Any]", spend_any).get("balance")
+    if not isinstance(balance_any, dict):
+        return None
+    balance = cast("dict[str, Any]", balance_any)
+    minor, exponent = balance.get("amount_minor"), balance.get("exponent")
+    currency = balance.get("currency")
+    if (isinstance(minor, bool) or not isinstance(minor, (int, float))
+            or isinstance(exponent, bool) or not isinstance(exponent, int)
+            or not 0 <= exponent <= 6
+            or not isinstance(currency, str) or not currency.strip()):
+        return None
+    amount = float(minor) / (10 ** exponent)
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    return {"balance": amount, "unit": currency.strip().upper(),
+            "unlimited": False}
+
+
 def fetch(force: bool = False, max_age: float | None = None) -> dict[str, Any]:
     """The normalized readout: `{available, limits[], plan, email}`, or
     `{available: False, error}`. `email` (added for show-the-claude-
@@ -539,6 +570,9 @@ def fetch(force: bool = False, max_age: float | None = None) -> dict[str, Any]:
         data: dict[str, Any] = {"available": True, "limits": _normalize(raw),
                                 "plan": _plan(), "email": identity.get("email") or "",
                                 "observed_at": _iso(observed_at)}
+        credits = _credits(raw)
+        if credits is not None:
+            data["credits"] = credits
         with _lock:
             # stamped when the answer ARRIVED, not when it was asked for: a
             # 14-second response is already 14 seconds stale (redteam).
@@ -613,6 +647,9 @@ def _fetch_for_token(token: str, cache_key: str, *, force: bool = False) -> dict
     raw: dict[str, Any] = (cast("dict[str, Any]", raw_any)
                            if isinstance(raw_any, dict) else {})
     data: dict[str, Any] = {"available": True, "limits": _normalize(raw)}
+    credits = _credits(raw)
+    if credits is not None:
+        data["credits"] = credits
     with _lock:
         _key_cache[cache_key] = {"at": time.time(), "data": data}
     return data
