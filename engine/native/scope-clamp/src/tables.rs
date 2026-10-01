@@ -7,7 +7,7 @@
 
 pub const WINDOWS_BUILD: &str = "10.0.26200";
 pub const PYTHON: &str = "3.13.15";
-pub const TABLES_SHA256: &str = "b56c84dfa98ed489af61dc650193645d5109d952d1e11999edc031c1593a5c14";
+pub const TABLES_SHA256: &str = "8b41e45ccbc0bcbc6f04025872e85d42664e3e605bb8f2d3e1e7f95637460f0f";
 
 /// (code point, lowercase) pairs, sorted; any other code point maps to itself.
 pub static NLS_LOWER: &[(u32, u32)] = &[
@@ -1778,6 +1778,7 @@ pub static PY_WHITESPACE: [u32; 29] = [
 
 /// `ledger.TIERS`: the static seat of each built-in tier.
 pub static TIERS: &[(&str, f64)] = &[
+    ("argon", 2.0),
     ("astra", 10.0),
     ("fable", 10.0),
     ("flash", 1.0),

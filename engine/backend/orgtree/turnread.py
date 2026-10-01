@@ -32,7 +32,8 @@ INT_MAX = 10 ** 15           # a typed count/duration beyond this is null
 LANES = frozenset({"claude", "openrouter", "codex", "antigravity"})
 # ledger.TIERS' keys, copied: this module imports nothing of orgtree
 TIERS = frozenset({"fable", "opus", "sonnet", "haiku", "sol", "terra",
-                   "gpt-reserve", "luna", "astra", "flash", "pro"})
+                   "gpt-reserve", "luna", "astra", "flash", "pro",
+                   "argon"})
 OUTCOMES = frozenset({"completed", "interrupted", "frozen", "killed",
                       "abandoned", "unrecoverable", "redriven", "failed",
                       "crashed", "unknown"})

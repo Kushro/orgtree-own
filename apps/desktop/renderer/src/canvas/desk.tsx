@@ -55,7 +55,7 @@ import {
   isChatActive, isNoticeArmed, registerChat, setActiveChatKey, setNoticeArmed,
   toggleNoticeArmed, unregisterChat, useNoticeArmed,
 } from '../noticestore'
-import { ago, ALL_PRESENT, ALL_TIERS, anyTierSeat, CODEX_TIERS, CopyIcon, EXTERN, fmtCredits, freezeKind, FREEZE_LABEL, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, md, openrouterTierIds, procHaloClass, PROVIDER_LABEL, providerOf, queuedSwitchTitle, reportedLabel, stateLabel, TIER_LETTER, tierCapabilityNotes, optInLegacyHidden, tierLabel, tierShown, USER, useHideRetired, usePolled, useShowLegacyModels } from './shared'
+import { ago, ALL_PRESENT, ALL_TIERS, anyTierSeat, CODEX_TIERS, conditionalTierHidden, CopyIcon, EXTERN, fmtCredits, freezeKind, FREEZE_LABEL, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, md, openrouterTierIds, procHaloClass, PROVIDER_LABEL, providerOf, queuedSwitchTitle, reportedLabel, stateLabel, TIER_LETTER, tierCapabilityNotes, optInLegacyHidden, tierLabel, tierShown, USER, useHideRetired, usePolled, useShowLegacyModels, useOfferedConditionalTiers } from './shared'
 import { closeIfCentred, ModalOverPins, PinFrame } from './modalpin'
 import type { ProviderPresence } from './shared'
 import {
@@ -4163,6 +4163,8 @@ export function LineagePanel({ node, op, slug, presence = ALL_PRESENT,
   map, onFocusAgent, close }: LineagePanelProps) {
   // re-render on the "show legacy models" flip — the tier list reads it
   useShowLegacyModels()
+  // …and when agy starts (or stops) listing a conditional tier (Argon)
+  useOfferedConditionalTiers()
   // spitshined (user request): generation cards in the app's current visual
   // language — tier token, per-generation consult-tier picker (№16: a bearer
   // answers from context, so any tier serves), live bearers marked green
@@ -4285,7 +4287,9 @@ export function LineagePanel({ node, op, slug, presence = ALL_PRESENT,
                       .filter((t) => t !== b.tier
                         && tierShown(presence, t, b.tier)
                         // Terra and Gemini Pro only with "show legacy models" on
-                        && !optInLegacyHidden(t))
+                        && !optInLegacyHidden(t)
+                        // Argon only once agy lists it
+                        && !conditionalTierHidden(t))
                       .map((t) => {
                       const why = rehireWhy(t, b.tier)
                       // same one formatter as every other tier surface —

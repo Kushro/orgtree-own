@@ -106,7 +106,13 @@ from .schema import (AudienceGrant, DirGrant, FrozenInfo, MailEntry, NodeDoc,
 TIERS: Final[dict[str, float]] = {"fable": 10, "opus": 4, "sonnet": 2, "haiku": 1,
                                   "sol": 2, "terra": 2, "gpt-reserve": 0.2,
                                   "luna": 0.1, "astra": 10,
-                                  "flash": 1, "pro": 2}
+                                  "flash": 1, "pro": 2,
+                                  # ⚠ PLACEHOLDER SEAT (coordinator ruling
+                                  # 2026-10-01): Google has published no
+                                  # standing price for Gemini 4 Argon, so it
+                                  # copies the top Gemini tier (pro) until
+                                  # the user corrects it
+                                  "argon": 2}
 
 # The credit grid. Every seat is quantised to 0.01 and every credit quantity
 # is re-quantised after each mutation, which is what makes float arithmetic
@@ -203,6 +209,12 @@ MODELS: Final[dict[str, str]] = {
     # reachable as model VERSIONS below.
     "flash": "gemini-3.8-flash",
     "pro": "gemini-3.1-pro",
+    # Gemini 4 Argon — the id is the USER'S RULING (2026-10-01), not yet a
+    # measurement: agy 1.2.14 did not list it for the user's account that
+    # day. The tier is CONDITIONAL (providers.CONDITIONAL_ANTIGRAVITY_TIERS):
+    # nothing offers or admits it until the live `agy models` registry lists
+    # this id. If Google ships a different id, this is the one correction.
+    "argon": "gemini-4-argon",
 }
 
 # A TIER is a price band — four of them, four chips. A model VERSION is a

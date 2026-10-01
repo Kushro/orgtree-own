@@ -22,7 +22,7 @@ import {
   LockIcon, MailIcon, PinIcon, RetireIcon, SettingsIcon, StopIcon, WarnIcon, DocIcon,
 } from '../icons'
 import {
-  ago, anyTierSeat, codexTierOffer, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DESK_SCALE, deskDpi, DRAFT, familyOffer, fmtCredits, formatCount, freezeKind, FREEZE_LABEL_SHORT, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, NODE_H, optInLegacyHidden, NODE_W, openrouterTierIds, procHaloClass, providerOf, queuedAccountTitle, queuedSwitchTitle, stateLabel, TIER_LETTER, TIER_SEAT, tierLabel, TIERS, unicodeLength, USER, useShowLegacyModels,
+  ago, antigravityTierOffer, anyTierSeat, codexTierOffer, CODEX_TIER_LETTER, CODEX_TIER_SEAT, CODEX_TIERS, DESK_SCALE, deskDpi, DRAFT, familyOffer, fmtCredits, formatCount, freezeKind, FREEZE_LABEL_SHORT, ANTIGRAVITY_TIER_LETTER, ANTIGRAVITY_TIER_SEAT, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, NODE_H, optInLegacyHidden, NODE_W, openrouterTierIds, procHaloClass, providerOf, queuedAccountTitle, queuedSwitchTitle, stateLabel, TIER_LETTER, TIER_SEAT, tierLabel, TIERS, unicodeLength, USER, useShowLegacyModels,
   USER_H, USER_W, useAgentShortcuts, Z_MAX,
 } from './shared'
 import type {
@@ -715,7 +715,9 @@ function SpawnChips({ onSpawn, free, seats, maxTier, side, soleHire,
     // token. remove it entirely").
     const offerOf = (t: string) =>
       (key === 'codex' ? codexTierOffer(hire, t)
-        // an opt-in legacy tier of another family (Gemini Pro), toggle off
+        // Gemini Pro (legacy toggle) and Argon (only once agy lists it)
+        : key === 'antigravity' ? antigravityTierOffer(hire, t)
+        // an opt-in legacy tier of another family, toggle off
         : optInLegacyHidden(t) ? 'hide' : offer)
     // ⚠ FILTERED BEFORE `tiers` IS STORED, because the inward-first sort below
     // orders families by "number of available model tiers" — a hidden chip

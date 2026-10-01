@@ -16067,6 +16067,17 @@ def provider_hire_gate(
                 f"tier '{tier}' is an Antigravity tier and Antigravity is "
                 f"not signed in — run `agy` once on this machine and sign in "
                 f"with your Google account (accounts panel → Antigravity)")
+        if tier in providers.CONDITIONAL_ANTIGRAVITY_TIERS:
+            # Argon: admitted only while the account's live `agy models`
+            # registry lists the pinned id (re-probed fresh when the cached
+            # list lacks it). A model that cannot run is never hired.
+            availability = providers.conditional_antigravity_availability(
+                tier, status=ast)
+            if not availability["enabled"]:
+                raise LedgerError(
+                    f"tier '{tier}' is a conditional Antigravity tier and is "
+                    f"not available to this account right now: "
+                    f"{availability['reason']}")
         if org.d.get("kiosk"):
             raise LedgerError(
                 "kiosk orgs cannot hire Antigravity tiers yet — antigravity "

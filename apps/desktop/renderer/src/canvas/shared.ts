@@ -44,7 +44,7 @@ export const TIER_LETTER: Record<string, string> = {
   'gpt-reserve': 'R', luna: 'L', terra: 'T', sol: 'S', astra: 'A',
   // flash shares F with fable by the same accepted collision as sol/sonnet's
   // S — the chip class carries the family
-  flash: 'F', pro: 'P',
+  flash: 'F', pro: 'P', argon: 'A',
 }
 export const TIERS = ['haiku', 'sonnet', 'opus', 'fable']
 /** seat cost per tier — mirrors ledger.TIERS. One table, four tiers; the
@@ -107,9 +107,20 @@ export const CODEX_TIER_SEAT: Record<string, number> = {
  *  codex family. Seats by the standing rule: flash $1.50 standing → 1 (the
  *  $0.75 launch price is a promo), pro $2 → 2 (the >200K long-context
  *  surcharge never sets a seat). */
-export const ANTIGRAVITY_TIERS = ['flash', 'pro']
-export const ANTIGRAVITY_TIER_LETTER: Record<string, string> = { flash: 'F', pro: 'P' }
-export const ANTIGRAVITY_TIER_SEAT: Record<string, number> = { flash: 1, pro: 2 }
+export const ANTIGRAVITY_TIERS = ['flash', 'pro', 'argon']
+export const ANTIGRAVITY_TIER_LETTER: Record<string, string> =
+  { flash: 'F', pro: 'P', argon: 'A' }
+/** argon's 2 is a PLACEHOLDER copied from pro (coordinator ruling
+ *  2026-10-01) — mirrors ledger.TIERS until the user sets Argon's price. */
+export const ANTIGRAVITY_TIER_SEAT: Record<string, number> =
+  { flash: 1, pro: 2, argon: 2 }
+/** CONDITIONAL antigravity tiers — Gemini 4 Argon (`gemini-4-argon`, user
+ *  2026-10-01). Known to the axis (a node wearing one keeps its letter,
+ *  colour and seat) but offered by NO chooser until the backend's providers
+ *  payload lists it among the Antigravity tier rows, which it does only while
+ *  the account's live `agy models` list contains that id. Mirrors
+ *  providers.CONDITIONAL_ANTIGRAVITY_TIERS. */
+export const CONDITIONAL_ANTIGRAVITY_TIERS = ['argon']
 /** Provider-neutral surfaces (for example the live-agent summary) use this;
  * provider-specific controls keep using their family list. */
 export const ALL_TIERS = [...TIERS, ...CODEX_TIERS, ...ANTIGRAVITY_TIERS]
@@ -510,6 +521,46 @@ export const codexTierOffer = (
   return !CODEX_ALWAYS_TIERS.includes(tier)
     && !h?.offeredTiers?.includes(tier) ? 'hide' : base
 }
+
+/** Offer verdict for one Antigravity tier: an opt-in legacy tier (Gemini Pro)
+ *  hides while "show legacy models" is off, and a CONDITIONAL tier (Argon)
+ *  hides until the payload's tier rows include it — no evidence, no offer.
+ *  Everything else follows the family verdict. */
+export const antigravityTierOffer = (
+  h: HireState | null | undefined, tier: string,
+): FamilyOffer => {
+  if (optInLegacyHidden(tier)) return 'hide'
+  if (CONDITIONAL_ANTIGRAVITY_TIERS.includes(tier)
+    && !h?.offeredTiers?.includes(tier)) return 'hide'
+  return familyOffer(h)
+}
+
+/* ---------------- conditional tiers the payload currently offers (Argon)
+   For surfaces that have no HireState of their own (the bearer rehire list).
+   OrgCanvas feeds it from the same providers poll the hire strips read, so
+   both answer from one payload. Subscribable, so a list re-renders the
+   moment agy starts listing the model. */
+let offeredConditional: string[] = []
+const conditionalSubs = new Set<() => void>()
+export const setOfferedConditionalTiers = (
+  tiers: { tier: string }[] | null | undefined,
+): void => {
+  const next = CONDITIONAL_ANTIGRAVITY_TIERS.filter(
+    (t) => (tiers ?? []).some((r) => r.tier === t))
+  if (next.join(',') === offeredConditional.join(',')) return
+  offeredConditional = next
+  for (const fn of [...conditionalSubs]) fn()
+}
+const subscribeConditional = (fn: () => void): (() => void) => {
+  conditionalSubs.add(fn)
+  return () => { conditionalSubs.delete(fn) }
+}
+const offeredConditionalKey = (): string => offeredConditional.join(',')
+export const useOfferedConditionalTiers = (): string =>
+  useSyncExternalStore(subscribeConditional, offeredConditionalKey)
+/** a conditional tier the payload does not (yet) offer */
+export const conditionalTierHidden = (tier: string): boolean =>
+  CONDITIONAL_ANTIGRAVITY_TIERS.includes(tier) && !offeredConditional.includes(tier)
 
 /** D-202: is this provider part of the product on this machine AT ALL?
  *

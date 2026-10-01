@@ -33,6 +33,7 @@ argv would not, so the resolver learns the safe habit now.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 import datetime as _dt
 import glob
@@ -158,7 +159,8 @@ CODEX_PRICES: Final[dict[str, tuple[float, float, float]]] = {
 # chip letters for the antigravity family. `flash` shares F with fable by
 # collision of English, the same accepted collision as sol/sonnet's S — the
 # chip class (t-flash) carries the family.
-_ANTIGRAVITY_LETTER: Final[dict[str, str]] = {"flash": "F", "pro": "P"}
+_ANTIGRAVITY_LETTER: Final[dict[str, str]] = {"flash": "F", "pro": "P",
+                                               "argon": "A"}
 
 #: which tier names belong to the antigravity provider — the AXIS, nothing
 #: more. Seats and model ids live in ledger.TIERS / ledger.MODELS; these
@@ -167,7 +169,14 @@ _ANTIGRAVITY_LETTER: Final[dict[str, str]] = {"flash": "F", "pro": "P"}
 #: 1 — pro $2 (the ≤200K band; the long-context surcharge never sets a
 #: seat), flash $1.50 standing (3.8-flash's $0.75 is launch pricing through
 #: 2026-12-31, and a promo never sets a seat) → 1.
-_ANTIGRAVITY_TIER_NAMES: Final = ("flash", "pro")
+_ANTIGRAVITY_TIER_NAMES: Final = ("flash", "pro", "argon")
+#: Antigravity tiers that are known to the axis (an existing node keeps its
+#: lane, price and colour) but OFFERED and ADMITTED only while the live
+#: `agy models` registry lists the tier's pinned model id. Argon (user
+#: 2026-10-01: "when it is selectable ...") is Google's conditional rollout:
+#: the registry is server-side per account, so the account itself says when
+#: it may run. Same seam as CONDITIONAL_CODEX_TIERS, one lane over.
+CONDITIONAL_ANTIGRAVITY_TIERS: Final = frozenset({"argon"})
 #: float for the same reason CODEX_TIERS is, even though neither antigravity
 #: seat is fractional today: the type follows ledger.TIERS, not the values
 #: that happen to be in it.
@@ -292,6 +301,10 @@ ANTIGRAVITY_PRICES: Final[dict[str, tuple[float, float, float]]] = {
     "gemini-3.7-flash": (0.75, 0.075, 3.75),
     "gemini-3.6-flash": (0.75, 0.075, 3.75),
     "gemini-3.1-pro": (2.00, 0.20, 12.00),
+    # ⚠ PLACEHOLDER (coordinator ruling 2026-10-01): copies gemini-3.1-pro.
+    # Google's announcement quoted Argon API pricing but the user has not
+    # confirmed which rate Orgtree should use; correct this row when they do.
+    "gemini-4-argon": (2.00, 0.20, 12.00),
 }
 #: a model id with no row above (a version the registry grows later) is
 #: priced at the PRO row: overstating a stranger's cost is recoverable, a
@@ -302,7 +315,8 @@ ANTIGRAVITY_PRICE_FALLBACK: Final[tuple[float, float, float]] = (2.00, 0.20, 12.
 #: ratio every listed row of both this provider and codex publishes.
 ANTIGRAVITY_PRO_LONG: Final[tuple[float, float, float]] = (4.00, 0.40, 18.00)
 ANTIGRAVITY_LONG_THRESHOLD: Final[int] = 200_000
-_ANTIGRAVITY_PRO_IDS: Final = ("gemini-3.1-pro",)
+#: ⚠ gemini-4-argon is here as a PLACEHOLDER copy of pro's long-context rule
+_ANTIGRAVITY_PRO_IDS: Final = ("gemini-3.1-pro", "gemini-4-argon")
 
 #: orgtree's effort vocabulary (ledger EFFORTS: low·medium·high·xhigh·max)
 #: → the CLI's `--effort`, per tier. Measured 2026-09-02 (agy 1.1.24): the
@@ -317,6 +331,10 @@ _ANTIGRAVITY_EFFORT: Final[dict[str, dict[str, str]]] = {
               "xhigh": "high", "max": "high"},
     "pro": {"low": "low", "medium": "high", "high": "high",
             "xhigh": "high", "max": "high"},
+    # ⚠ PLACEHOLDER (coordinator ruling 2026-10-01): a copy of pro's map,
+    # unmeasured — no agy build has listed gemini-4-argon yet
+    "argon": {"low": "low", "medium": "high", "high": "high",
+              "xhigh": "high", "max": "high"},
 }
 
 
@@ -879,12 +897,64 @@ def conditional_codex_availability(
     return {"enabled": True, "evidence": "model-present", "reason": None}
 
 
-def antigravity_tiers() -> list[TierInfo]:
+#: the effort suffixes `agy models` prints on registry ids
+#: (`gemini-3.1-pro-high`, measured agy 1.2.14)
+_AGY_EFFORT_SUFFIXES: Final = ("-low", "-medium", "-high", "-max")
+
+
+def antigravity_model_listed(model_id: str,
+                             registry: Iterable[str] | None) -> bool:
+    """Does the `agy models` registry list `model_id` (a BASE id)?
+
+    The registry prints ids WITH an effort suffix (`gemini-3.1-pro-high`)
+    and the CLI takes the base id on `--model`, so the base id counts as
+    listed when it appears bare or with one of those suffixes. Nothing else
+    matches: no label, no substring (user ruling 2026-10-01 for Argon)."""
+    if not model_id:
+        return False
+    for raw in registry or ():
+        mid = str(raw)
+        if mid == model_id:
+            return True
+        for suffix in _AGY_EFFORT_SUFFIXES:
+            if mid == model_id + suffix:
+                return True
+    return False
+
+
+def antigravity_tiers(registry: Iterable[str] | None = None
+                      ) -> list[TierInfo]:
+    """Antigravity tier rows safe to OFFER. Every unconditional tier always;
+    a CONDITIONAL_ANTIGRAVITY_TIERS row only while `registry` (the live
+    `agy models` ids) lists its pinned id. No registry = no evidence = the
+    conditional rows stay out."""
     return [
         {"tier": t, "provider": "google", "seat": seat,
          "model": ANTIGRAVITY_MODELS[t], "letter": _ANTIGRAVITY_LETTER[t]}
         for t, seat in sorted(ANTIGRAVITY_TIERS.items(), key=lambda kv: kv[1])
+        if t not in CONDITIONAL_ANTIGRAVITY_TIERS
+        or antigravity_model_listed(ANTIGRAVITY_MODELS[t], registry)
     ]
+
+
+def conditional_antigravity_availability(
+        tier: str, *, status: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Is a conditional Antigravity tier (Argon) runnable on this account
+    right now? Asks the registry the connect probe already read; when the
+    cached read does not list the model, probes once more FRESH before
+    saying no, so a model Google switched on a minute ago is not refused on
+    a stale list. Unconditional tiers answer `not-conditional`."""
+    if tier not in CONDITIONAL_ANTIGRAVITY_TIERS:
+        return {"enabled": True, "reason": None, "evidence": "not-conditional"}
+    model_id = ANTIGRAVITY_MODELS[tier]
+    st = status if status is not None else antigravity_status()
+    if not antigravity_model_listed(model_id, st.get("models")):
+        st = antigravity_status(force=True)
+    if antigravity_model_listed(model_id, st.get("models")):
+        return {"enabled": True, "reason": None, "evidence": "model-present"}
+    return {"enabled": False, "evidence": "model-missing", "reason":
+            (f"model '{model_id}' is not in the model list the Antigravity "
+             "CLI returns for this account yet")}
 
 
 # ── antigravity CLI detection ──────────────────────────────────────────────
@@ -1586,7 +1656,9 @@ def providers_payload(claude_status: dict[str, Any], force: bool = False,
             # label: the CLI's own product name, not the vendor's.
             "label": PROVIDER_LABEL["google"],
             "cli": "Antigravity CLI",
-            "tiers": antigravity_tiers(),
+            # Argon (a conditional row) only while the registry this same
+            # probe read lists its id
+            "tiers": antigravity_tiers(antigravity.get("models")),
             "status": antigravity,
             "hire_enabled": bool(antigravity_on
                                  and antigravity.get("installed")
@@ -1689,6 +1761,12 @@ def tier_availability(tier: str) -> tuple[bool, str | None]:
             return False, f"Antigravity CLI is not installed — {install_hint('google')}"
         if not ast.get("connected") and not antigravity_key_available():
             return False, "Antigravity CLI is not signed in — run `agy` and sign in"
+        if tier in CONDITIONAL_ANTIGRAVITY_TIERS:
+            availability = conditional_antigravity_availability(
+                tier, status=ast)
+            if not availability.get("enabled"):
+                return False, (f"tier '{tier}' is not available: "
+                               f"{availability.get('reason')}")
         return True, None
 
     if openrouter.is_tier(tier):
