@@ -86,6 +86,8 @@ class ModuleResult:
     #: counted no tests is not the same thing as a module that passed, and this
     #: is the field that tells them apart.
     tests_ran: int | None = None
+    failed_tests: list[str] = field(default_factory=list)
+    tests_skipped: int = 0
 
 
 def _canonical(path: Path) -> Path:
@@ -660,6 +662,15 @@ def _tests_ran(stdout: str, stderr: str) -> int | None:
     return sum(int(value) for value in found) if found else None
 
 
+def _test_details(stdout: str, stderr: str) -> tuple[list[str], int]:
+    """Extract unittest names and skip counts BEFORE trimming either stream."""
+    text = f"{stdout}\n{stderr}"
+    names = list(dict.fromkeys(re.findall(r"^(?:FAIL|ERROR): (.+)$", text, re.MULTILINE)))
+    skipped = sum(int(value) for value in re.findall(
+        r"^(?:OK|FAILED) \([^\n]*\bskipped=(\d+)[^\n]*\)$", text, re.MULTILINE))
+    return names, skipped
+
+
 def _cleanup(path: Path) -> list[str]:
     try:
         shutil.rmtree(path)
@@ -781,6 +792,9 @@ def run_modules(
             stderr = str(exc)
         else:
             stderr = captured_stderr
+        failed_tests, tests_skipped = _test_details(clean_stdout, stderr)
+        if phase in {"pass", "skip"} and (not tests_ran or tests_skipped >= tests_ran):
+            phase = "not_executed"
         duration = int((time.monotonic() - started) * 1000)
         failure_id = f"{label}:{phase}" if phase in FAILURE_PHASES else None
         result = ModuleResult(
@@ -798,6 +812,8 @@ def run_modules(
             baseline_match=failure_id in baseline if failure_id else False,
             structured_result=structured,
             tests_ran=tests_ran,
+            failed_tests=failed_tests,
+            tests_skipped=tests_skipped,
         )
         result.cleanup_errors = _cleanup(private_root)
         if result.cleanup_errors:
@@ -822,8 +838,11 @@ def _receipt(repo_root: Path, interpreter: Interpreter, data_root: Path, roots: 
         "modules": [asdict(result) for result in results],
         "summary": {
             "total": len(results),
+            "tests_ran_total": sum(result.tests_ran or 0 for result in results),
+            "failed_tests": [name for result in results for name in result.failed_tests],
             "passed": sum(result.phase == "pass" for result in results),
             "skipped": sum(result.phase == "skip" for result in results),
+            "not_executed": sum(result.phase == "not_executed" for result in results),
             "failures": sum(bool(result.failure_id) for result in results),
             "unexpected_failures": unexpected,
             "cleanup_errors": len(cleanup_errors),

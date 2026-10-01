@@ -44,7 +44,7 @@ class PythonVerificationRunner(unittest.TestCase):
     def test_each_module_gets_private_data_root_and_pass_receipt(self):
         path = self.module("pass.py", "from pathlib import Path\nimport os\nPath(os.environ['ORGTREE_DATA']).joinpath('seen').write_text('ok')\n")
         [result] = self.execute(path)
-        self.assertEqual(result.phase, "pass")
+        self.assertEqual(result.phase, "not_executed")
         self.assertNotEqual(Path(result.data_root), self.data)
         self.assertFalse(Path(result.data_root).exists())
         self.assertIn(str(ROOT), result.import_roots)
@@ -53,8 +53,44 @@ class PythonVerificationRunner(unittest.TestCase):
         self.module("release_guards.py", "VALUE = 'pinned-sibling'\n")
         path = self.module("verifier.py", "from release_guards import VALUE\nassert VALUE == 'pinned-sibling'\n")
         [result] = self.execute(path)
-        self.assertEqual(result.phase, "pass")
+        self.assertEqual(result.phase, "not_executed")
         self.assertTrue(any(Path(root).samefile(self.fixture) for root in result.import_roots))
+
+    def test_full_failure_names_survive_the_stderr_tail(self):
+        source = """
+import unittest
+class T(unittest.TestCase):
+    def test_early_failure(self): self.fail('first')
+    def test_late_failure(self): self.fail('x' * 70000)
+unittest.main()
+"""
+        [result] = self.execute(self.module("large_failure.py", source))
+        self.assertEqual(result.tests_ran, 2)
+        self.assertNotIn("FAIL: test_early_failure", result.stderr)
+        self.assertEqual(result.failed_tests, [
+            "test_early_failure (__main__.T.test_early_failure)",
+            "test_late_failure (__main__.T.test_late_failure)"])
+        receipt = runner._receipt(ROOT, runner.select_interpreter(ROOT), self.data, [], [result], set())
+        self.assertEqual(receipt["summary"]["tests_ran_total"], 2)
+        self.assertEqual(receipt["summary"]["failed_tests"], result.failed_tests)
+
+    def test_no_tests_and_all_skipped_are_not_executed_but_partial_skip_passes(self):
+        for name, body, count, phase in (
+            ("empty", "pass", 0, "not_executed"),
+            ("all_skip", "class T(unittest.TestCase):\n    @unittest.skip('no DB')\n    def test_skip(self): pass", 1, "not_executed"),
+            ("partial_skip", "class T(unittest.TestCase):\n    @unittest.skip('no DB')\n    def test_skip(self): pass\n    def test_ok(self): pass", 2, "pass"),
+        ):
+            [result] = self.execute(self.module(name + ".py", "import unittest\n" + body + "\nunittest.main()\n"))
+            self.assertEqual(result.phase, phase, result.stderr)
+            self.assertEqual(result.tests_ran, count)
+            receipt = runner._receipt(ROOT, runner.select_interpreter(ROOT), self.data, [], [result], set())
+            self.assertEqual(receipt["summary"]["passed"], int(phase == "pass"))
+
+    def test_failure_with_zero_tests_is_still_a_failure(self):
+        [result] = self.execute(self.module("setup_failure.py", "import unittest\ndef setUpModule(): raise RuntimeError('broken setup')\nclass T(unittest.TestCase):\n    def test_ok(self): pass\nunittest.main()\n"))
+        self.assertIsNotNone(result.failure_id)
+        self.assertEqual(result.tests_ran, 0)
+        self.assertTrue(result.failed_tests)
 
     def _runtime_fixture(self):
         data = self.fixture / "engine-data"
@@ -107,13 +143,13 @@ class PythonVerificationRunner(unittest.TestCase):
 
     def test_classifies_skip_assertion_and_import_failures(self):
         for name, source, expected in (
-            ("skip.py", "from unittest import SkipTest\nraise SkipTest('environment')\n", "skip"),
+            ("skip.py", "from unittest import SkipTest\nraise SkipTest('environment')\n", "not_executed"),
             ("assertion.py", "assert False, 'red'\n", "assertion_failure"),
             ("import.py", "import module_that_does_not_exist\n", "import_failure"),
         ):
             [result] = self.execute(self.module(name, source))
             self.assertEqual(result.phase, expected)
-            if expected == "skip":
+            if expected == "not_executed":
                 self.assertIsNone(result.failure_id)
             else:
                 self.assertEqual(result.failure_id, f"{name}:{expected}")
@@ -171,7 +207,7 @@ if __name__ == '__main__':
             "unterminated.py",
             "import sys\nprint('a normal line')\nsys.stdout.write('tail with no newline')\n")
         [result] = self.execute(path)
-        self.assertEqual(result.phase, "pass")
+        self.assertEqual(result.phase, "not_executed")
         # The defect, pinned: this was {} before the fix.
         self.assertIn("orgtree", result.import_provenance)
         self.assertIn("engine", result.import_provenance)
@@ -194,7 +230,7 @@ if __name__ == '__main__':
             f"print({self.MARKER + forged!r})\nprint('after the forgery')\n")
         [result] = self.execute(path)
         # The forged payload claimed skip; the real one says pass.
-        self.assertEqual(result.phase, "pass")
+        self.assertEqual(result.phase, "not_executed")
         self.assertNotIn("forged", json.dumps(result.import_provenance))
         self.assertTrue(str(result.import_provenance["orgtree"]).startswith(str(ROOT)))
         # Every marker line is stripped from the reported stdout, the module's
@@ -210,7 +246,7 @@ if __name__ == '__main__':
             "forged_tail.py",
             f"import sys\nsys.stdout.write({self.MARKER + forged!r})\n")
         [result] = self.execute(path)
-        self.assertEqual(result.phase, "pass")
+        self.assertEqual(result.phase, "not_executed")
         self.assertNotIn("forged", json.dumps(result.import_provenance))
         self.assertEqual(result.stdout, "")
 
@@ -275,7 +311,7 @@ if __name__ == '__main__':
             "sys.stdout.buffer.flush()\n"
         )
         [result] = self.execute(self.module("noisy_stdout.py", source))
-        self.assertEqual(result.phase, "pass")
+        self.assertEqual(result.phase, "not_executed")
         self.assertIn("�", result.stdout)
         # Proves the noise did not cost the run its provenance.
         self.assertIn("orgtree", result.import_provenance)
@@ -312,7 +348,7 @@ if __name__ == '__main__':
         # A missing stream must not read as a module that printed nothing, and
         # the module must still get a verdict rather than taking the run down.
         self.assertNotEqual(result.stdout, "")
-        self.assertIn(result.phase, {"pass", "execution_failure"})
+        self.assertIn(result.phase, {"not_executed", "execution_failure"})
 
     def execute_cached(self, path: str, pycache: Path):
         interpreter = runner.select_interpreter(ROOT, os.environ.get("ORGTREE_V2_PYTHON") or os.sys.executable)
@@ -328,7 +364,7 @@ if __name__ == '__main__':
         path = self.module("uses_helper.py",
                            "from cached_helper import VALUE\nprint('VALUE=' + VALUE)\n")
         [result] = self.execute_cached(path, pycache)
-        self.assertEqual(result.phase, "pass", result.stderr)
+        self.assertEqual(result.phase, "not_executed", result.stderr)
         self.assertIn("VALUE=first", result.stdout)
         cached = list(pycache.rglob("cached_helper.*.pyc"))
         self.assertEqual(len(cached), 1, "the imported helper is compiled into the prefix tree")
@@ -336,7 +372,7 @@ if __name__ == '__main__':
         # An edit of a different size must be recompiled, never served stale.
         Path(helper).write_text("VALUE = 'second, and longer'\n", encoding="utf-8")
         [result] = self.execute_cached(path, pycache)
-        self.assertEqual(result.phase, "pass", result.stderr)
+        self.assertEqual(result.phase, "not_executed", result.stderr)
         self.assertIn("VALUE=second, and longer", result.stdout)
 
     def test_a_same_size_edit_in_the_same_second_is_never_served_stale(self):
@@ -377,7 +413,7 @@ if __name__ == '__main__':
     def test_without_a_pycache_dir_nothing_is_compiled_to_disk(self):
         self.module("plain_helper.py", "VALUE = 1\n")
         [result] = self.execute(self.module("uses_plain.py", "from plain_helper import VALUE\n"))
-        self.assertEqual(result.phase, "pass", result.stderr)
+        self.assertEqual(result.phase, "not_executed", result.stderr)
         self.assertFalse(list(self.fixture.rglob("*.pyc")))
 
     def test_pycache_dir_is_refused_inside_the_checkout_and_off_means_none(self):

@@ -8,6 +8,8 @@ import {
   classifyReleaseChanges,
   createVerificationReceipt,
   isVersionOnlyChange,
+  isFullyGatedReceipt,
+  recordFullyGatedBuild,
   reusableReceipt,
   runVerification,
   resolveVerificationPlan,
@@ -202,7 +204,7 @@ test('--plan and execution resolve the same Git-aware profile', () => {
   assert.deepEqual(resolved.plan.changedFiles, ['docs/release-notes-2.1.4-RC1.md', 'package-lock.json', 'package.json'])
 })
 
-test('real Git graph resolves the immediate parent and preserves the three-file version diff', () => {
+test('real Git graph preserves a three-file version diff against an explicit gated base', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orgtree-release-git-'))
   const gitRun = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
   try {
@@ -228,7 +230,7 @@ test('real Git graph resolves the immediate parent and preserves the three-file 
     assert.equal(gitRun(['rev-parse', `${candidate}^{commit}`]), candidate)
     assert.equal(gitRun(['diff', '--name-only', `${candidate}^{commit}...${candidate}`]), '')
 
-    const resolved = resolveVerificationPlan({ root, candidate, git })
+    const resolved = resolveVerificationPlan({ root, base, candidate, git })
     assert.equal(resolved.base, base)
     assert.notEqual(resolved.base, resolved.candidate)
     assert.deepEqual(resolved.plan.changedFiles, ['docs/release-notes-2.1.4-RC1.md', 'package-lock.json', 'package.json'])
@@ -236,6 +238,46 @@ test('real Git graph resolves the immediate parent and preserves the three-file 
   } finally {
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('test-only tip includes application edits since the last fully gated build', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orgtree-gated-base-'))
+  const gitRun = args => execFileSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
+  try {
+    gitRun(['init', '-q'])
+    gitRun(['config', 'user.email', 'gated@example.invalid'])
+    gitRun(['config', 'user.name', 'Gate Test'])
+    fs.mkdirSync(path.join(root, 'apps/desktop'), { recursive: true })
+    fs.mkdirSync(path.join(root, 'tests'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'apps/desktop/main.ts'), 'base')
+    gitRun(['add', '.']); gitRun(['commit', '-qm', 'fully gated'])
+    const base = gitRun(['rev-parse', 'HEAD'])
+    const plan = selectReleaseVerification(['apps/desktop/main.ts'])
+    const receipt = createVerificationReceipt({ plan, candidate: base, source: 'sha256:fixture',
+      results: plan.checks.map(check => ({ gate: check.gate, status: 0 })),
+      startedAt: '2026-10-01T00:00:00Z' })
+    assert.equal(isFullyGatedReceipt(receipt), true)
+    assert.equal(recordFullyGatedBuild(root, receipt), true)
+    fs.writeFileSync(path.join(root, 'apps/desktop/main.ts'), 'changed renderer input')
+    gitRun(['add', '.']); gitRun(['commit', '-qm', 'app change'])
+    const parent = gitRun(['rev-parse', 'HEAD'])
+    fs.writeFileSync(path.join(root, 'tests/release-verification.test.mjs'), 'test-only tip')
+    gitRun(['add', '.']); gitRun(['commit', '-qm', 'test tip'])
+    for (const supplied of [undefined, parent]) {
+      const resolved = resolveVerificationPlan({ root, base: supplied })
+      assert.equal(resolved.base, base)
+      assert.ok(resolved.plan.changedFiles.includes('apps/desktop/main.ts'))
+      assert.deepEqual(resolved.plan.checks.map(check => check.gate), ['full-node', 'full-renderer'])
+    }
+    assert.equal(recordFullyGatedBuild(root, { ...receipt, green: false }), false)
+    assert.equal(recordFullyGatedBuild(root, { ...receipt, area: 'release' }), false)
+    assert.equal(isFullyGatedReceipt({ ...receipt, results: receipt.results.slice(0, 1) }), false)
+    assert.equal(isFullyGatedReceipt({ ...receipt, fingerprint: 'bad' }), false)
+    fs.writeFileSync(path.join(root, '.git/orgtree-last-fully-gated.json'), '{}')
+    const fallback = resolveVerificationPlan({ root })
+    assert.deepEqual(fallback.plan.changedFiles, ['tests/release-verification.test.mjs'])
+    assert.equal(fallback.plan.area, 'full', 'an invalid/missing baseline must still run the renderer')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
 })
 
 test('receipt reuse requires the exact candidate, commands, source bytes, and intact fingerprint', () => {
@@ -262,7 +304,7 @@ test('receipt reuse requires the exact candidate, commands, source bytes, and in
   }
 })
 
-test('verification runner reuses only the receipt from the exact version parent', () => {
+test('verification runner reuses only the receipt from the exact explicit version base', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'orgtree-release-parent-'))
   try {
     const sourcePath = path.join(root, 'tools/release-windows.mjs')
@@ -290,12 +332,12 @@ test('verification runner reuses only the receipt from the exact version parent'
     })
     const exactPath = path.join(root, 'exact.json')
     fs.writeFileSync(exactPath, JSON.stringify(makeReceipt('base')))
-    const reused = runVerification({ root, candidate: 'head', receiptPath: exactPath, git, runner: () => { throw new Error('exact parent should reuse') } })
+    const reused = runVerification({ root, base: 'base', candidate: 'head', receiptPath: exactPath, git, runner: () => { throw new Error('exact parent should reuse') } })
     assert.equal(reused.reused, true)
     const oldPath = path.join(root, 'old.json')
     fs.writeFileSync(oldPath, JSON.stringify(makeReceipt('older')))
     let ran = 0
-    const rerun = runVerification({ root, candidate: 'head', receiptPath: oldPath, git, runner: () => { ran++; return { status: 0 } } })
+    const rerun = runVerification({ root, base: 'base', candidate: 'head', receiptPath: oldPath, git, runner: () => { ran++; return { status: 0 } } })
     assert.equal(rerun.reused, undefined)
     assert.equal(ran, 2)
   } finally {
@@ -341,10 +383,11 @@ test('release fixture audit requires cleanup structure for normal and failed run
 test('verification runner captures hidden child options, commands, and measured durations', () => {
   const calls = []
   const receipt = runVerification({
-    root: process.cwd(), files: ['tools/release-windows.mjs'], candidate: 'abc123',
+    root: process.cwd(), files: ['tools/release-windows.mjs'], base: 'base123', candidate: 'abc123',
     git: (_command, args) => {
       if (args[0] === 'rev-parse') {
-        assert.equal(args[1], 'abc123^')
+        if (args[1] === '--git-common-dir') throw new Error('no stored baseline in fixture')
+        assert.equal(args[1], 'base123^{commit}')
         return 'base123\n'
       }
       if (args[0] === 'diff') return 'tools/release-windows.mjs\n'

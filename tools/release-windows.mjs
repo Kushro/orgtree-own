@@ -13,7 +13,7 @@ import crypto from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { REQUIRED_PACKAGE_INPUTS } from './preflight-lib.mjs'
-import { runVerification } from './release-verification.mjs'
+import { recordFullyGatedBuild, runVerification } from './release-verification.mjs'
 import { assertPublicReleaseAllowed } from './private-alpha-policy.mjs'
 import { assertPostgresRuntime } from './postgres-layout.mjs'
 import {
@@ -1202,6 +1202,7 @@ export async function produceWindowsRelease(options, dependencies = {}) {
     verificationPath,
   })
   verifyLocalCandidate({ root, manifest, uploadDir: staged.uploadDir, resources, engineHashes })
+  recordFullyGatedBuild(root, verification, execFileSyncImpl)
   writeJson(verificationPath, verification, false)
   const manifestPath = path.join(releaseDir, 'release-manifest.json')
   const handoffPath = path.join(releaseDir, 'installation-handoff.json')

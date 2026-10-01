@@ -177,6 +177,11 @@ export function classifyReleaseChanges(files, options = {}) {
 
 export function selectReleaseVerification(files, options = {}) {
   const classification = classifyReleaseChanges(files, options)
+  if (options.forceFull) {
+    classification.area = 'full'
+    classification.versionOnly = false
+    classification.reason = 'no last fully gated build is recorded and no explicit base was supplied; run both full suites'
+  }
   const checks = classification.area === 'full' ? FULL.map(([gate, command]) => ({ gate, command }))
     : (classification.area === 'installer' ? INSTALLER : RELEASE).map(([gate, command]) => ({ gate, command }))
   return {
@@ -268,16 +273,56 @@ function gitCommit(root, ref, git = execFileSync) {
   return git('git', ['rev-parse', revision], { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
 }
 
+function fullyGatedPath(root, git) {
+  const directory = git('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
+  return path.resolve(root, directory, 'orgtree-last-fully-gated.json')
+}
+
+export function isFullyGatedReceipt(receipt) {
+  if (!receipt || receipt.area !== 'full' || receipt.reused || !/^[0-9a-f]{40}$/.test(receipt.candidate || '')) return false
+  const checks = selectReleaseVerification(['apps/desktop/main.ts']).checks
+  return checks.every(check => receipt.results?.some(result => result.gate === check.gate && result.status === 0 && !result.reused))
+    && reusableReceipt(receipt, { candidate: receipt.candidate, source: receipt.sourceFingerprint,
+      commands: checks.map(check => ({ gate: check.gate, command: check.command })) })
+}
+
+// Shared by all worktrees of this repository; written only after the canonical
+// build has passed its artifact checks. A focused build never advances it.
+export function recordFullyGatedBuild(root, receipt, git = execFileSync) {
+  if (!isFullyGatedReceipt(receipt)) return false
+  const target = fullyGatedPath(root, git)
+  const temporary = `${target}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, JSON.stringify(receipt, null, 2) + '\n')
+  fs.renameSync(temporary, target)
+  return true
+}
+
+function fullyGatedBase(root, candidate, git) {
+  try {
+    const receipt = JSON.parse(fs.readFileSync(fullyGatedPath(root, git), 'utf8'))
+    if (!isFullyGatedReceipt(receipt)) return null
+    git('git', ['merge-base', '--is-ancestor', receipt.candidate, candidate], { cwd: root, windowsHide: true })
+    return receipt.candidate
+  } catch { return null }
+}
+
 export function resolveVerificationPlan({ root = process.cwd(), files, base, candidate = 'HEAD', git = execFileSync } = {}) {
   const resolvedCandidate = gitCandidate(root, candidate, git)
-  const resolvedBase = gitCommit(root, base || `${resolvedCandidate}^`, git)
+  const lastFull = fullyGatedBase(root, resolvedCandidate, git)
+  let resolvedBase = gitCommit(root, base || lastFull || `${resolvedCandidate}^`, git)
+  if (lastFull && base) {
+    // A supplied base may widen the range, but cannot hide edits since the
+    // last fully gated build by naming a more recent parent.
+    try { git('git', ['merge-base', '--is-ancestor', resolvedBase, lastFull], { cwd: root, windowsHide: true }) }
+    catch { resolvedBase = lastFull }
+  }
   const derivedFiles = gitChangedFiles({ root, base: resolvedBase, candidate: resolvedCandidate, git })
   const selectedFiles = files?.length ? normalizeFiles(files) : derivedFiles
   if (JSON.stringify(selectedFiles) !== JSON.stringify(derivedFiles)) throw new Error('explicit changed paths must exactly match the Git diff; omit the list to derive it safely')
   return {
     candidate: resolvedCandidate, base: resolvedBase,
     plan: selectReleaseVerification(selectedFiles, {
-      root, base: resolvedBase, candidate: resolvedCandidate, git,
+      root, base: resolvedBase, candidate: resolvedCandidate, git, forceFull: !lastFull && !base,
     }),
   }
 }
@@ -350,7 +395,7 @@ export function main(argv = process.argv.slice(2)) {
     return 0
   }
   console.log(`Selected ${plan.profile} (${plan.area}); ${plan.reason}`)
-  const receipt = runVerification({ root, files: plan.changedFiles, base: selected.base, candidate: selected.candidate, receiptPath, jsonOutput })
+  const receipt = runVerification({ root, files: plan.changedFiles, base, candidate: selected.candidate, receiptPath, jsonOutput })
   console.log(JSON.stringify(receipt, null, 2))
   return receipt.green ? 0 : 1
 }
