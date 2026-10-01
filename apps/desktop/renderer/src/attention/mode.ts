@@ -38,10 +38,12 @@ export interface AttentionLayout {
   /** the agents list is COLLAPSED by default (ticket) — rolled out on hover,
    *  or held open by this flag once the user opens it deliberately */
   listOpen: boolean
+  /** the two panels' left/right order is reversed: Needs attention on the right */
+  swapped: boolean
 }
 
 export const DEFAULT_LAYOUT: AttentionLayout = {
-  split: SPLIT_DEFAULT, agent: null, listOpen: false,
+  split: SPLIT_DEFAULT, agent: null, listOpen: false, swapped: false,
 }
 
 export const clampSplit = (v: number): number =>
@@ -142,6 +144,7 @@ function readLayouts(): Record<string, AttentionLayout> {
       split: clampSplit(typeof o.split === 'number' ? o.split : SPLIT_DEFAULT),
       agent: typeof o.agent === 'string' && o.agent ? o.agent : null,
       listOpen: o.listOpen === true,
+      swapped: o.swapped === true,
     }
   }
   layoutCache = out

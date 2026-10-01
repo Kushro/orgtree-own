@@ -34,6 +34,7 @@ import type {
 import type { ToastFn, TreePayload } from '../types'
 import type { CanvasNode, MailLinkFn, OpFn, PolledStatus, Pt } from '../canvas/shared'
 import type { DeskChatProps } from '../canvas/desk'
+import { useContextMenu } from '../canvas/contextmenu'
 import { PinFrame, unpinModal, useModalPin, usePersistedModalOpen } from '../canvas/modalpin'
 import {
   restoredWindows, subscribeWindowLayout, useRestoreWindows, windowLayoutRevision,
@@ -456,7 +457,8 @@ export function AttentionView(props: AttentionViewProps) {
   const fromPointer = (clientX: number): number | null => {
     const box = stageRef.current?.getBoundingClientRect()
     if (!box || box.width <= 0) return null
-    return clampSplit((clientX - box.left) / box.width)
+    const x = (clientX - box.left) / box.width
+    return clampSplit(layout.swapped ? 1 - x : x)
   }
   const onDividerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return
@@ -482,8 +484,9 @@ export function AttentionView(props: AttentionViewProps) {
   const onDividerKey = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     const step = e.shiftKey ? 0.1 : 0.02
     let next: number | null = null
-    if (e.key === 'ArrowLeft') next = split - step
-    else if (e.key === 'ArrowRight') next = split + step
+    const dir = layout.swapped ? -1 : 1
+    if (e.key === 'ArrowLeft') next = split - dir * step
+    else if (e.key === 'ArrowRight') next = split + dir * step
     else if (e.key === 'Home') next = SPLIT_MIN
     else if (e.key === 'End') next = SPLIT_MAX
     if (next === null) return
@@ -491,8 +494,14 @@ export function AttentionView(props: AttentionViewProps) {
     commit(next)
   }
 
-  const leftStyle = { flex: `0 0 ${(split * 100).toFixed(2)}%` }
-  const rightStyle = { flex: '1 1 0' }
+  // SWAPPED reverses the visual order with flex `order`, not the JSX order, so
+  // neither panel remounts and the split stays the Needs-attention panel's own
+  // share. The divider keeps its place in the DOM (and tab order).
+  const swapped = layout.swapped
+  const leftStyle = { flex: `0 0 ${(split * 100).toFixed(2)}%`, order: swapped ? 3 : 1 }
+  const rightStyle = { flex: '1 1 0', order: swapped ? 1 : 3 }
+  const dividerStyle = { order: 2 }
+  const menu = useContextMenu(props.toast)
 
   return (
     <div ref={stageRef}
@@ -529,6 +538,11 @@ export function AttentionView(props: AttentionViewProps) {
           aria-valuenow={Math.round(split * 100)}
           onPointerDown={onDividerDown} onPointerMove={onDividerMove}
           onPointerUp={endDrag} onPointerCancel={endDrag}
+          style={dividerStyle}
+          onContextMenu={(e) => menu.open(e, [{
+            label: 'Swap panels',
+            onSelect: () => setAttentionLayout(slug, { swapped: !layout.swapped }),
+          }])}
           onKeyDown={onDividerKey}>
           <span className="attn-divider-grip" aria-hidden="true" />
         </div>
@@ -546,6 +560,7 @@ export function AttentionView(props: AttentionViewProps) {
           </PinFrame>
         </div>
       )}
+      {menu.node}
     </div>
   )
 }

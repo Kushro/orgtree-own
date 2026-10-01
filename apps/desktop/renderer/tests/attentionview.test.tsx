@@ -230,7 +230,7 @@ test('§4 returning to the Attention view restores both panels and the split', a
   assert.equal(s.queue, true, 'the retained pinned panel is still the pinned one')
   assert.equal(s.desk, true, 'and the embedded panel comes back')
   assert.equal(isModalPinned(QUEUE_KIND, SLUG), true, 'nothing was unpinned on the way')
-  assert.deepEqual(attentionLayout(SLUG), { split: 0.62, agent: 'scout', listOpen: false },
+  assert.deepEqual(attentionLayout(SLUG), { split: 0.62, agent: 'scout', listOpen: false, swapped: false },
     'the split and the selected agent are exactly as they were left')
   await v.unmount()
 })
@@ -624,5 +624,90 @@ test('§6 the header toggle is what moves between the two views', async () => {
     .find((b) => b.textContent?.includes('Attention')) as HTMLElement
   await inAct(() => { attention.click() })
   assert.deepEqual(v.last(), ['Canvas:false', 'Attention:true'])
+  await v.unmount()
+})
+
+// ------------------------------------------------------ swap panels (divider menu)
+const openDividerMenu = async () => {
+  const divider = document.querySelector('.attn-divider') as HTMLElement
+  await inAct(() => { divider.dispatchEvent(new window.MouseEvent('contextmenu',
+    { bubbles: true, cancelable: true, button: 2, clientX: 40, clientY: 30 })) })
+  await inAct(() => flush(3))
+}
+const menuLabels = () =>
+  [...document.querySelectorAll('.ctxmenu button')].map((b) => b.textContent?.trim())
+const orderOf = () => {
+  const slot = (c: string) => Number((document.querySelector(c) as HTMLElement).style.order)
+  return { queue: slot('.attn-slot-queue'), divider: slot('.attn-divider'), desk: slot('.attn-slot-desk') }
+}
+
+test('§6 right-clicking the divider offers exactly one entry, Swap panels, which swaps and is remembered per org', async () => {
+  reset()
+  setOrgView(SLUG, 'attention')
+  setAttentionLayout(SLUG, { split: 0.3 })
+  const v = await mountView(view(), () => shape())
+  await inAct(() => flush())
+  const queueNode = document.querySelector('.attn-slot-queue')
+  const o = orderOf()
+  assert.ok(o.queue < o.divider && o.divider < o.desk, 'queue left of desk by default')
+
+  await openDividerMenu()
+  assert.deepEqual(menuLabels(), ['Swap panels'], 'exactly one entry')
+  await inAct(() => {
+    ;(document.querySelector('.ctxmenu button') as HTMLButtonElement).click()
+  })
+  await inAct(() => flush(3))
+  const s = orderOf()
+  assert.ok(s.desk < s.divider && s.divider < s.queue, 'the panels trade places around the divider')
+  assert.equal(document.querySelector('.attn-slot-queue') === queueNode, true, 'the panel is moved, not remounted')
+  const queueFlex = (document.querySelector('.attn-slot-queue') as HTMLElement).style.flex
+  assert.equal(queueFlex, '0 0 30.00%',
+    'the queue keeps its 30% share on its new side')
+  assert.equal(Number(document.querySelector('.attn-divider')!.getAttribute('aria-valuenow')), 30)
+  assert.equal(attentionLayout(SLUG).swapped, true)
+  assert.equal(attentionLayout('other-org').swapped, false, 'other orgs are unaffected')
+
+  // survives a reload: drop the in-memory cache and read storage again
+  forgetAttentionMode()
+  assert.equal(attentionLayout(SLUG).swapped, true, 'remembered in storage')
+  assert.equal(attentionLayout(SLUG).split, 0.3)
+
+  await openDividerMenu()
+  await inAct(() => {
+    ;(document.querySelector('.ctxmenu button') as HTMLButtonElement).click()
+  })
+  await inAct(() => flush(3))
+  assert.equal(attentionLayout(SLUG).swapped, false, 'swapping again puts them back')
+  await v.unmount()
+})
+
+test('§6.1 when swapped, dragging and arrow keys still move the divider the way the pointer goes', async () => {
+  reset()
+  setOrgView(SLUG, 'attention')
+  setAttentionLayout(SLUG, { split: 0.4, swapped: true })
+  const v = await mountView(view(), () => shape())
+  await inAct(() => flush())
+  const stage = document.querySelector('.attn-stage') as HTMLElement
+  const divider = document.querySelector('.attn-divider') as HTMLElement
+  stage.getBoundingClientRect = () => ({
+    left: 0, top: 0, right: 1000, bottom: 800, width: 1000, height: 800, x: 0, y: 0,
+    toJSON: () => ({}),
+  }) as DOMRect
+  divider.setPointerCapture = () => {}
+  divider.releasePointerCapture = () => {}
+  const point = (type: string, clientX: number) => inAct(() => {
+    const e = new window.MouseEvent(type, { bubbles: true, clientX, button: 0 })
+    Object.defineProperty(e, 'pointerId', { value: 1 })
+    divider.dispatchEvent(e)
+  })
+  // the queue is on the right: a divider at x=700 leaves it 30% of the stage
+  await point('pointerdown', 400)
+  await point('pointermove', 700)
+  await point('pointerup', 700)
+  assert.ok(Math.abs(attentionLayout(SLUG).split - 0.3) < 1e-9)
+  // ArrowRight moves the divider right, which shrinks the right-hand queue
+  await inAct(() => { divider.dispatchEvent(new window.KeyboardEvent('keydown',
+    { key: 'ArrowRight', bubbles: true })) })
+  assert.ok(attentionLayout(SLUG).split < 0.3)
   await v.unmount()
 })
