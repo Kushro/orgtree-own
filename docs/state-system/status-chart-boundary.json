@@ -82,11 +82,11 @@
       "self": {
         "present": [
           "Your reports:",
-          "its identity is not disclosed to you"
+          "Your superior:"
         ],
         "absent": [
           "Your peers:",
-          "Your superior:",
+          "its identity is not disclosed to you",
           "Your full suborganization:",
           "The full organization chart"
         ]

@@ -322,16 +322,17 @@ class ChartBoundary(_Door):
                     self.assertIn(mark, text)
                 for mark in marks['absent']:
                     self.assertNotIn(mark, text)
-                self.assertEqual('Your superior: boss' in text, level != 'self')
+                self.assertIn('Your superior: boss', text)
 
-    def test_self_visibility_still_names_the_superior_in_the_claude_md_caveat(self):
-        # recorded legacy defect (S2d correction of chart.authority): the identity prompt says the
-        # superior is not disclosed, and the live guidance in the same answer names it
+    def test_self_visibility_names_the_superior_and_promises_nothing_else(self):
+        # the S2d legacy defect is fixed (user ruling 2026-10-01, item
+        # self-visibility-agents-are-told-their-superior-i): a self-visibility agent may know its superior, so
+        # the identity prompt names it and no longer claims it is not disclosed
         self.edit(lambda org: org.node('worker')['scope'].update(org_visibility='self'))
         text = self.okay(self.chart())['chart']
-        self.assertIn('its identity is not disclosed to you', text)
+        self.assertNotIn('not disclosed', text)
+        self.assertIn('Your superior: boss', text)
         self.assertIn('as directed at your direct superior (boss) instead', text)
-        self.assertEqual(text.count('boss'), 1)
 
     def test_missing_visibility_is_backfilled_as_full_before_the_chart_reads_it(self):
         self.edit(lambda org: org.node('worker')['scope'].pop('org_visibility'))

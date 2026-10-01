@@ -8898,13 +8898,12 @@ def identity_prompt(org: Org, nid: str, include_archived: bool = False, *,
     now, with its note."""
     n = org.node(nid)
     sc = n["scope"]
-    vis = sc.get("org_visibility", "team")
 
-    if vis == "self":
-        position = ("You have a superior you can escalate to; its identity is "
-                    "not disclosed to you.")
-    else:
-        position = f"Your superior: {n['parent'] or 'the user'}."
+    # Every visibility level is told who its superior is, `self` included (user
+    # ruling 2026-10-01, item self-visibility-agents-are-told-their-superior-i).
+    # `self` used to be told the superior was "not disclosed", while every
+    # turn's org-state block named it anyway, so the promise was false.
+    position = f"Your superior: {n['parent'] or 'the user'}."
     # ⚠ THE POINTER IS LOAD-BEARING (D-181). Without it an agent reads a system
     # prompt that names no reports and no peers and concludes it has none —
     # which is exactly the false inference the old single-string prompt could
