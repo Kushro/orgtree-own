@@ -35,5 +35,5 @@
     },
     "summary": "runtime.background_task_stopped·summary"
   },
-  "body": "[BACKGROUND TASK STOPPED — \"runtime.background_task_stopped·object.description\" did not complete]\ntask id: runtime.background_task_stopped·object.id\nCLI summary: runtime.background_task_stopped·summary\npartial output: runtime.background_task_stopped·output_file\n\nThis was reported by the CLI itself while your process was still alive — it did not die and nothing killed it. Whatever you were waiting for did not finish. Do NOT assume the work landed; check the actual state before continuing."
+  "body": "[BACKGROUND TASK STOPPED — \"runtime.background_task_stopped·object.description\" did not complete]\ntask id: runtime.background_task_stopped·object.id\nCLI summary: runtime.background_task_stopped·summary\npartial output: runtime.background_task_stopped·output_file\n\nThe CLI reported that this background task stopped while your agent process was still alive. Check the exit code, output and actual state before continuing."
 }

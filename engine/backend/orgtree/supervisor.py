@@ -47,6 +47,7 @@ from typing import Any, Final, Protocol, TypeVar, cast
 
 from . import halt, inbox, maildrain, mailtx, turnslots
 from . import lifecycle_tx, orgtx
+from .background_notices import BackgroundNotices, stop_summary
 from . import (accounts, agentauth, antigravity_limits, appsettings,
                cachecontinuity, clipin, codex_limits, codex_route, deployment,
                envelope, events, events_table, failfix, handoff, imgblock,
@@ -22078,6 +22079,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
             # id from mailing twice.
             bg_desc: dict[str, str] = {}
             bg_reported: set[str] = set()
+            bg_notices = BackgroundNotices()
             bg_lock = threading.Lock()      # written here, read by _dog
 
             def _bg_count() -> int:
@@ -22423,6 +22425,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                         turnlog.emit(_trec, "api_retry", code=ev.get("error"),
                                      n=_tl_retries[0])
                         continue
+                    bg_notices.observe(ev)
                     if ev.get("type") == "system" and ev.get("subtype") == "init":
                         # №14: the CLI's own resolution of what this turn can
                         # actually do — tools, MCP server health, model, mode
@@ -22487,29 +22490,12 @@ def _run_one_turn_recorded(slug: str, nid: str,
                                     outf = str(ev.get("output_file") or "")
                                     if outf:
                                         bg_out[tid] = outf
-                                    # A TERMINAL status the CLI itself reports
-                                    # (2026-09-01 incident, fable-cli-
-                                    # migration): "completed" is the only
-                                    # success value observed; a missing status
-                                    # is left alone (older/unknown shape — do
-                                    # not invent a verdict it never gave).
-                                    # Anything else means the task ended
-                                    # WITHOUT the process dying — the one case
-                                    # `_bg_orphaned` cannot see. Gate on
-                                    # `bg_reported`, NOT on `tid in bg_live`:
-                                    # the CLI's own `background_tasks_changed`
-                                    # snapshot removes a finished id from
-                                    # `bg_live` BEFORE this notification
-                                    # arrives (measured against fakecli.js's
-                                    # own completion sequence), so by the time
-                                    # `status` shows up the id is routinely
-                                    # already gone from `bg_live` — checking
-                                    # it here would make a stopped/failed
-                                    # status unreachable by construction, and
-                                    # in fact WAS: that status/summary used to
-                                    # be read by nobody at all.
-                                    status = str(ev.get("status") or "")
-                                    if (status and status != "completed"
+                                    # Foreground failures and results already
+                                    # returned to the agent need no second wake.
+                                    # Keep background history after a snapshot
+                                    # removes a task: its terminal notification
+                                    # normally follows that empty snapshot.
+                                    if (bg_notices.should_report(ev)
                                             and tid not in bg_reported):
                                         bg_reported.add(tid)
                                         bg_live.pop(tid, None)
@@ -22519,7 +22505,7 @@ def _run_one_turn_recorded(slug: str, nid: str,
                             if stopped_desc:
                                 _bg_task_stopped(
                                     slug, nid, tid, stopped_desc,
-                                    str(ev.get("summary") or ""),
+                                    stop_summary(ev),
                                     str(ev.get("output_file") or ""))
                         with _state_lock:
                             st["bg_tasks"] = _bg_count()

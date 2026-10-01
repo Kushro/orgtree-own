@@ -14,6 +14,7 @@ test checks that the grandchild, the CLI and the turn are all gone.
 Every process and ledger is a local fixture; no provider is contacted.
 """
 import contextlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -53,6 +54,19 @@ emit({'type':'result','subtype':'success','is_error':False,'total_cost_usd':0,'u
 for line in sys.stdin:pass
 job.wait()
 emit({'type':'system','subtype':'background_tasks_changed','tasks':[]})
+'''
+
+_NOTICE_CHILD = r'''
+import json,sys
+from pathlib import Path
+marker=sys.argv[1]
+def emit(event):print(json.dumps(event),flush=True)
+emit({'type':'system','subtype':'init','session_id':'fixture-session','tools':[]})
+sys.stdin.readline()
+for event in json.loads(Path(marker+'.events').read_text()):emit(event)
+Path(marker).write_text('0')
+emit({'type':'result','subtype':'success','is_error':False,'total_cost_usd':0,'usage':{'output_tokens':1}})
+for line in sys.stdin:pass
 '''
 
 REQUEST = SimpleNamespace(state=SimpleNamespace())
@@ -150,14 +164,17 @@ class BackgroundTasksStop(unittest.TestCase):
 
     # ---- helpers
 
-    def start(self):
-        """A real turn that leaves one background job running: the runner
-        does not park a process with live children, so the turn stays busy."""
+    def start_turn(self):
         cmd = [sys.executable, str(self.script), str(self.marker)]
         self.stack.enter_context(patch.object(sup, "_build_cmd", return_value=cmd))
         self.thread = threading.Thread(target=lambda: sup._run_one_turn(
             self.slug, self.nid, {"cmd": True, "text": "/fixture"}), daemon=True)
         self.thread.start()
+
+    def start(self):
+        """A real turn that leaves one background job running: the runner
+        does not park a process with live children, so the turn stays busy."""
+        self.start_turn()
         self.assertTrue(eventually(self.marker.exists), self.st.get("last_error"))
         self.assertTrue(eventually(lambda: self.st.get("bg_tasks") == 1),
                         "the runner must see the CLI's background task")
@@ -273,6 +290,111 @@ class BackgroundTasksStop(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertTrue(alive(self.job))
         self.assertEqual(self.st["bg_tasks"], 1)
+
+    def notices(self, events):
+        self.script.write_text(_NOTICE_CHILD, encoding='utf-8')
+        Path(str(self.marker) + '.events').write_text(json.dumps(events), encoding='utf-8')
+        wake = self.stack.enter_context(patch.object(sup, 'send_message'))
+        self.start_turn()
+        self.thread.join(15)
+        self.assertFalse(self.thread.is_alive(), 'the notification fixture must finish')
+        self.assertTrue(self.marker.exists(), 'the stand-in must actually emit every event')
+        # This fixture has no child process; do not hand teardown a fake PID.
+        self.marker.unlink()
+        mails = store.load_org(self.slug).d.get('mail', {}).get(self.nid, [])
+        return [m for m in mails if 'BACKGROUND TASK STOPPED' in m.get('body', '')], wake
+
+    @staticmethod
+    def task_events(status='failed', **extra):
+        return [
+            {'type': 'system', 'subtype': 'background_tasks_changed', 'tasks': [
+                {'task_id': 'job1', 'tool_use_id': 'bash1', 'description': 'test job'}]},
+            {'type': 'system', 'subtype': 'background_tasks_changed', 'tasks': []},
+            {'type': 'system', 'subtype': 'task_notification', 'task_id': 'job1',
+             'tool_use_id': 'bash1', 'status': status, **extra}]
+
+    @staticmethod
+    def tool_result(tool='bash1', content='exit code 1: no matches'):
+        return {'type': 'user', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': tool, 'content': content}]}}
+
+    def test_foreground_nonzero_notification_sends_no_stop_notice(self):
+        notify = self.task_events(exit_code=75)[-1]
+        mails, wake = self.notices([self.tool_result(), notify])
+        self.assertEqual(mails, [])
+        wake.assert_not_called()
+
+    def test_returned_background_output_sends_no_stop_notice(self):
+        events = self.task_events(exit_code=1)
+        events.insert(1, self.tool_result())
+        mails, wake = self.notices(events)
+        self.assertEqual(mails, [])
+        wake.assert_not_called()
+
+    def test_launch_ack_does_not_hide_a_real_stop_and_duplicates_mail_once(self):
+        events = self.task_events(status='stopped', exit_code=-9)
+        events.insert(1, self.tool_result(content='Command running in background with ID: job1'))
+        events.append(events[-1].copy())
+        mails, wake = self.notices(events)
+        self.assertEqual(len(mails), 1)
+        self.assertIn('status: stopped; exit code: -9', mails[0]['body'])
+        self.assertNotIn('nothing killed it', mails[0]['body'])
+        wake.assert_called_once()
+
+    def test_completed_and_unknown_notifications_do_not_claim_a_stop(self):
+        events = self.task_events(status='completed')
+        events.append(dict(events[-1], status='running'))
+        events.append(dict(events[-1], status='stopped'))
+        mails, wake = self.notices(events)
+        self.assertEqual(mails, [])
+        wake.assert_not_called()
+
+    def test_normal_background_nonzero_exit_does_not_claim_a_stop(self):
+        events = self.task_events(exit_code=75)
+        events.append(dict(events[-1], status='stopped'))
+        mails, wake = self.notices(events)
+        self.assertEqual(mails, [])
+        wake.assert_not_called()
+
+    def test_real_stop_keeps_zero_exit_code(self):
+        mails, _ = self.notices(self.task_events(status='stopped', exit_code=0))
+        self.assertEqual(len(mails), 1)
+        self.assertIn('exit code: 0', mails[0]['body'])
+
+    def test_real_stop_uses_summary_exit_code_or_says_unavailable(self):
+        from orgtree.background_notices import stop_summary
+        self.assertIn('exit code: 75', stop_summary({'status': 'failed', 'summary': 'exit code 75'}))
+        mails, _ = self.notices(self.task_events(status='stopped'))
+        self.assertEqual(len(mails), 1)
+        self.assertIn('exit code: unavailable (not reported by CLI)', mails[0]['body'])
+
+    def test_agent_requested_stop_does_not_wake_it_again(self):
+        events = self.task_events(status='stopped')
+        events.insert(1, {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'id': 'stop1', 'name': 'TaskStop', 'input': {'task_id': 'job1'}}]}})
+        mails, wake = self.notices(events)
+        self.assertEqual(mails, [])
+        wake.assert_not_called()
+
+    def test_task_output_result_consumes_the_original_job(self):
+        events = self.task_events()
+        events[1:1] = [
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'read1', 'name': 'TaskOutput', 'input': {'task_id': 'job1'}}]}},
+            self.tool_result('read1', '<status>failed</status>exit code 1')]
+        mails, wake = self.notices(events)
+        self.assertEqual(mails, [])
+        wake.assert_not_called()
+
+    def test_task_output_timeout_does_not_hide_a_later_stop(self):
+        events = self.task_events(status='stopped')
+        events[1:1] = [
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'read1', 'name': 'TaskOutput', 'input': {'task_id': 'job1'}}]}},
+            self.tool_result('read1', '<retrieval_status>timeout</retrieval_status>')]
+        mails, wake = self.notices(events)
+        self.assertEqual(len(mails), 1)
+        wake.assert_called_once()
 
 
 if __name__ == "__main__":

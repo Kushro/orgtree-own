@@ -1216,10 +1216,9 @@ def _r_bg_task(ev: _R) -> str:
             f"task id: {o['id']}\n"
             + (f"CLI summary: {ev['summary']}\n" if ev.get("summary") else "")
             + (f"partial output: {ev['output_file']}\n" if ev.get("output_file") else "")
-            + "\nThis was reported by the CLI itself while your process was still "
-              "alive — it did not die and nothing killed it. Whatever you were waiting "
-              "for did not finish. Do NOT assume the work landed; check the actual "
-              "state before continuing.")[:8000]
+            + "\nThe CLI reported that this background task stopped while your "
+              "agent process was still alive. Check the exit code, output and "
+              "actual state before continuing.")[:8000]
 
 
 def installed_version_line(version: Any, provenance: Any) -> str:

@@ -294,10 +294,23 @@ class ServerRefuses(unittest.TestCase):
         self.assertIn('`mode` is retired', str(cm.exception.detail))
 
     def test_a_valid_message_and_notice_still_deliver(self):
-        self.call('orgtree_message', {'to': 'boss', 'body': 'hello'})
-        self.call('orgtree_send_notice', {'to': 'boss', 'body': 'fyi'})
+        result = self.call('orgtree_message', {'to': 'boss', 'body': 'hello'})
+        notice = self.call('orgtree_send_notice', {'to': 'boss', 'body': 'fyi'})
         self.assertEqual([m.get('body') for m in self.mailbox('boss')],
                          ['hello', 'fyi'])
+        ids = [m['id'] for m in self.mailbox('boss')]
+        self.assertEqual([result['id'], notice['id']], ids)
+        self.assertTrue(all(isinstance(mid, str) and mid for mid in ids))
+        self.assertNotEqual(*ids)
+        self.assertEqual(ids, [m['id'] for m in self.mailbox('boss')],
+                         'ids must survive a fresh store reload')
+
+    def test_valid_body_with_unknown_field_still_refuses(self):
+        for tool in ('orgtree_message', 'orgtree_send_notice'):
+            with self.assertRaises(api.HTTPException) as cm:
+                self.call(tool, {'to': 'boss', 'body': 'hello', 'message': 'extra'})
+            self.assertIn('did you mean `body`?', str(cm.exception.detail))
+        self.assertEqual(self.mailbox('boss'), [])
 
 
 if __name__ == '__main__':
