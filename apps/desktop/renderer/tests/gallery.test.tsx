@@ -602,14 +602,12 @@ uiTest('AgentGalleryView: lists only presentations for the specified agent in tw
   assert.ok(el.querySelector('.mailer'))
   assert.ok(el.querySelector('.mailer-list'))
   assert.ok(el.querySelector('.mailer-read'))
-  assert.match(pane(el)?.textContent ?? '', /select a document to read it/)
+  assert.ok(rows(el)[0]!.classList.contains('on'), 'the newest presentation is selected on open')
 })
 
 uiTest('AgentGalleryView: selecting a row renders the document in DocPane', async (mount) => {
   mockDocs([row({ id: 'd1', node: 'agent-1', title: 'agent1 report' })], { d1: '# Agent Notes\n\nSome findings here' })
   const { el } = await mount(agentGallery('agent-1'))
-  await flush()
-  await inAct(() => { (rows(el)[0] as HTMLElement).click() })
   await flush()
   assert.ok(rows(el)[0]!.classList.contains('on'))
   assert.match(pane(el)?.textContent ?? '', /Some findings here/)
@@ -621,8 +619,6 @@ uiTest('AgentGalleryView: dismissing a document removes it from the list', async
   const calls = mockDocs([row({ id: 'd1', node: 'agent-1', title: 'agent1 report' })], { d1: 'body' })
   let changed = false
   const { el } = await mount(agentGallery('agent-1', { onChanged: () => { changed = true } }))
-  await flush()
-  await inAct(() => { (rows(el)[0] as HTMLElement).click() })
   await flush()
   const btn = pane(el)?.querySelector('.doc-pane-title-row .chip-x') as HTMLElement
   assert.ok(btn, 'dismiss button found')

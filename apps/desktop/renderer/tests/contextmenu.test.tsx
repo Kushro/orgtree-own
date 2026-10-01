@@ -565,8 +565,8 @@ uiTest('§B3b gallery row: Dismiss runs the pane\'s dismiss — the same DELETE;
   const rows = [...v.el.querySelectorAll('.doc-gallery-row')] as HTMLElement[]
   assert.equal(rows.length, 1, 'positive control: the row rendered')
   await rightClick(rows[0]!)
-  assert.deepEqual(labels(), ['Open', 'Copy title', 'Copy reference', 'Download as Markdown', 'Dismiss'])
-  assert.ok(!rows[0]!.classList.contains('on'), 'not selected by the right-click')
+  assert.deepEqual(labels(), ['Close', 'Copy title', 'Copy reference', 'Download as Markdown', 'Dismiss'])
+  assert.ok(rows[0]!.classList.contains('on'), 'selected on open, not by the right-click')
   await pick('Dismiss')
   await flush(3)
   const del = calls.find((c) => c.method === 'DELETE')

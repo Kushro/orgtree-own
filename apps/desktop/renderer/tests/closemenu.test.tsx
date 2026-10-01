@@ -671,6 +671,11 @@ test('§9 both document galleries: Close closes the OPEN document only', async (
   await flush(6)
   const rows = () => [...one.el.querySelectorAll('.doc-gallery-row')] as HTMLElement[]
   assert.equal(rows().length, 2, 'POSITIVE CONTROL: the agent gallery listed both')
+  assert.ok(rows()[0]!.classList.contains('on'), 'the newest document opened automatically')
+  await rightClick(rows()[0]!)
+  assert.equal(labels()[0], 'Close', 'the automatically opened document offers Close')
+  await pick('Close')
+  assert.ok(!rows()[0]!.classList.contains('on'), 'the automatic selection stays closed')
   await rightClick(rows()[0]!)
   await pick('Open')
   assert.ok(rows()[0]!.classList.contains('on'), 'POSITIVE CONTROL: it opened')

@@ -250,12 +250,12 @@ for (const scope of ['agent', 'org']) {
       : <DocGalleryModal slug="mine" toast={noop} close={BAD} onFocusAgent={BAD} />)
     const row = document.querySelector('.doc-gallery-row') as HTMLElement
     const selectedOnOpen = row.classList.contains('on')
-    assert.equal(selectedOnOpen, scope === 'org',
-      'the org gallery opens its newest document; the agent gallery waits for selection')
+    assert.equal(selectedOnOpen, true,
+      'both galleries open their newest document')
     await copy(row.querySelector('.l2')!, 'Copy agent name')
     assert.equal(row.classList.contains('on'), selectedOnOpen,
       'copying the publisher does not change document selection')
-    await inAct(() => row.click()); await flush(3)
+    await flush(3)
     await copy(document.querySelector('.doc-pane-meta-row .cc-name')!, 'Copy agent name')
     assert.deepEqual(writes, ['worker', 'worker'])
     await context(row)
