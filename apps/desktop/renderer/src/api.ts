@@ -394,9 +394,12 @@ const staleAfter = <T,>(slug: string, done: Promise<T>): Promise<T> =>
   done.then((r) => { markTreeStale(slug); return r })
 
 export const assignAccount = (slug: string, nid: string, account: string):
-  Promise<{ account: string; label: string; billing_mode: string
-            standing: { state: string; until?: number; provenance?: string }
-            session_boundary: boolean }> =>
+  Promise<{ account: string; label: string; billing_mode?: string
+            standing?: { state: string; until?: number; provenance?: string }
+            session_boundary: boolean
+            /** a busy node: the change waits for the turn boundary and the
+             *  reply carries no billing mode or standing yet */
+            queued?: boolean; pending_account?: string; cancelled?: string }> =>
   staleAfter(slug, req(`/api/orgs/${slug}/nodes/${nid}/account`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

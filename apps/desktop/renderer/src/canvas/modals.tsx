@@ -1112,13 +1112,21 @@ export function NodeConfig({ node, map, tree, slug, op, toast, codexProvider,
              ...(acct ? { account: acct } : {}) })
       : acctChanged && acct
         ? assignAccount(slug, node.id, acct).then((d) => {
-            toast([`${node.id} → account ${d.account} (${d.billing_mode})`
-              + (d.standing.state === 'limited'
+            if (d.queued) {
+              toast([`${node.id} → account ${d.account} queued — applies when the current turn ends`])
+              return
+            }
+            if (d.cancelled) {
+              toast([`${node.id}: queued account change to ${d.cancelled} cancelled — keeps ${d.account}`])
+              return
+            }
+            toast([`${node.id} → account ${d.account}`
+              + (d.billing_mode ? ` (${d.billing_mode})` : '')
+              + (d.standing?.state === 'limited'
                 ? ` — WILL WAIT until ${new Date(
-                    ((d.standing as { until?: number }).until ?? 0) * 1000)
+                    (d.standing.until ?? 0) * 1000)
                     .toLocaleString()}`
-                  + ((d.standing as { provenance?: string }).provenance
-                    === 'inferred' ? ' (inferred)' : '')
+                  + (d.standing.provenance === 'inferred' ? ' (inferred)' : '')
                 : '')
               + (d.session_boundary ? ' — session restarts next turn' : '')])
           })
