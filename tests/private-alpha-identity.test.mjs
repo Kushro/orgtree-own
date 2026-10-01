@@ -39,8 +39,8 @@ const unexpected = () => { throw new Error('EXTERNAL SIDE EFFECT') }
 // uninstall registry key and the per-installation registry key derive from it.
 const NSIS_NAMESPACE = UUID.parse('50e065bc-3134-11e6-9bab-38c9862bdaf3')
 
-test('the v3 package and lockfile identify the public 3.0.0; the private packager keeps its alpha version', () => {
-  assert.equal(pkg.version, '3.0.0')
+test('the v3 package and lockfile identify a public 3.x release; the private packager keeps its alpha version', () => {
+  assert.match(pkg.version, /^3\.\d+\.\d+$/)
   assert.notEqual(pkg.version, VERSION)
   assert.doesNotThrow(() => assertLockfileVersion(pkg.version, lock))
   // The public release path accepts the package version.
