@@ -13,6 +13,7 @@
 // a cycle: App.tsx already imports AccountsPanel.
 import { useEffect, useMemo, useState } from 'react'
 import { getDefaults, getProviders, saveDefaults } from '../api'
+import { SetToggle } from '../canvas/settingskit'
 import { availableAutopsyModels, fmtCredits, usePolled, useShowLegacyModels } from '../canvas/shared'
 import type { DefaultsPayload, ToastFn } from '../types'
 
@@ -121,16 +122,9 @@ export function DefaultsForm({ toast, onDone }: {
             onChange={(e) => set('auto_resume_compact', e.target.checked)} />
           cheap-compact limit-frozen agents before auto-resume wakes them
         </label>
-        <div className="field-label">app-wide Luna reserve default</div>
-        <label className="checkline">
-          <input type="checkbox" checked={d.prefer_reserve !== false}
-            onChange={(e) => set('prefer_reserve', e.target.checked)} />
-          prefer reserve capacity first when no individual preference is set
-        </label>
         <div className="hint">
-          Other defaults apply only when creating an organization. The
-          app-wide Luna reserve default also reaches existing agents that have
-          no individual preference; an explicit agent preference always wins.
+          These defaults apply only when creating an organization; existing
+          organizations keep their own settings.
         </div>
         <div className="row">
           <button className="primary" onClick={() =>
@@ -147,14 +141,39 @@ export function DefaultsForm({ toast, onDone }: {
               cascade_alloc: d.cascade_alloc !== false,
               auto_resume: !!d.auto_resume,
               auto_resume_compact: !!d.auto_resume_compact,
-              prefer_reserve: d.prefer_reserve !== false,
             }).then(() => {
-              toast(['default org settings and app-wide Luna default saved'])
+              toast(['default org settings saved'])
               close()
             })
               .catch((e: Error) => toast([`error: ${e.message}`]))}>save</button>
           <button onClick={close}>cancel</button>
         </div>
     </>
+  )
+}
+
+/** The app-wide Luna reserve default, in App settings > Runtime. It is read live
+ *  for every agent with no preference of its own (an explicit agent preference
+ *  always wins), so it saves on its own and posts only this one key. */
+export function LunaReserveSetting({ toast }: { toast: ToastFn }) {
+  const [on, setOn] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    let live = true
+    getDefaults().then((d) => { if (live) setOn(d.prefer_reserve !== false) })
+      .catch(() => { if (live) setOn(true) })
+    return () => { live = false }
+  }, [])
+  return (
+    <SetToggle label="prefer Luna reserve capacity first" checked={on !== false}
+      disabled={on === null || busy}
+      hint="App-wide default for every agent with no individual preference; an agent's own preference always wins."
+      onChange={(next) => {
+        setBusy(true)
+        saveDefaults({ prefer_reserve: next })
+          .then((d) => setOn(d.prefer_reserve !== false))
+          .catch((e: Error) => toast([`error: ${e.message}`]))
+          .finally(() => setBusy(false))
+      }} />
   )
 }

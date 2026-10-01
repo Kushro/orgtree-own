@@ -38,7 +38,7 @@ import { fmtWhen } from '../timefmt'
 import type { StartView } from './shared'
 import { AutorenewIcon } from '../icons'
 import { AboutSection, StartupWindowsSetting, useAppVersion } from '../shell/general'
-import { DefaultsForm } from '../shell/defaults'
+import { DefaultsForm, LunaReserveSetting } from '../shell/defaults'
 import { EngineDebugToggle } from './enginedebug'
 
 // small local copies of the usage-modal label helpers (App.tsx owns the
@@ -738,6 +738,7 @@ export function AccountsPanel({ toast, close, initialTab }: {
           disabled={!runtime || busy} onChange={v => changeRuntime(setWarmingEnabled, v)}
           hint="Keep supported harness processes ready between turns." />
         <OpenRouterHarnessSetting toast={toast} />
+        <LunaReserveSetting toast={toast} />
       </SetGroup>
       <SetGroup title="Turns">
         <TurnLimitSetting runtime={runtime} busy={busy} onSave={limit => {
