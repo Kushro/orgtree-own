@@ -71,7 +71,7 @@ test('a sparse ring packs its agents at the dense spacing in one arc centred at 
     assert.ok(Math.abs(mean - Math.PI / 2) < 1e-9, `n=${n}: arc is centred at the bottom`)
     for (const id of ids) assert.ok(Math.abs(ringRadius(t, id) - ringRadius(t, 'k0')) < 1e-6)
     for (let i = 1; i < n; i++) {
-      assert.ok(ang[i]! > ang[i - 1]!, 'ring order is kept')
+      assert.ok(centre(t.get(`k${i}`)!).x > centre(t.get(`k${i - 1}`)!).x, 'ring order reads left to right')
       assert.ok(Math.abs(chord(t, `k${i - 1}`, `k${i}`) - 190) < 1e-6, `n=${n}: neighbours sit one dense pitch apart`)
     }
     assert.ok(ang.every(a => a > 0 && a < Math.PI), 'a short arc stays on the lower half')
@@ -181,32 +181,107 @@ test('a hire-coworker button puts the new agent in the gap between the anchor an
     const tree = build(weights)
     const t = layout(withDraftTree(tree, null), new Map(), 'circular')
     const ids = weights.map((_, i) => 'k' + i), n = ids.length
+    const eyeC = centre(t.get(USER)!)
     for (let i = 0; i < n; i++) {
       const a = centre(t.get(ids[i]!)!)
-      const neighbours = [ids[(i + n - 1) % n]!, ids[(i + 1) % n]!]
-      const cos = (id: string, side: 'left' | 'right') => {
+      // each gap points at the sibling on that side; the first and last have an
+      // open end that heads on along the (counter-clockwise) ring instead
+      const gapDx = (id: string | undefined, step: 1 | -1, side: 'left' | 'right') => {
+        const want = side === 'left' ? -1 : 1
+        if (id === undefined) return want * step * (a.y - eyeC.y) / Math.hypot(a.x - eyeC.x, a.y - eyeC.y)
         const p = centre(t.get(id)!), dx = p.x - a.x, dy = p.y - a.y
-        return (side === 'left' ? -dx : dx) / Math.hypot(dx, dy)
+        return want * dx / Math.hypot(dx, dy)
       }
       for (const side of ['left', 'right'] as const) {
         const pin = ringInsertSide(side, ids[i]!, ids, t, true)
-        // the hire lands between the anchor and this ring neighbour (before = previous one)
-        const chosen = neighbours[pin === 'left' ? 0 : 1]!, other = neighbours[pin === 'left' ? 1 : 0]!
-        assert.ok(cos(chosen, side) >= cos(other, side) - 1e-9, `${weights} #${i} ${side}: the neighbour pointing closest to the arrow is chosen`)
+        const before = gapDx(ids[i - 1], -1, side), after = gapDx(ids[i + 1], 1, side)
+        const chosen = pin === 'left' ? before : after, other = pin === 'left' ? after : before
+        assert.ok(chosen >= other - 1e-9, `${weights} #${i} ${side}: the gap pointing closest to the arrow is chosen`)
         cases++; if (pin !== side) flips++
-        // and the real insertion puts the draft between the anchor and that neighbour in ring order
+        // and the real insertion puts the draft right next to the anchor in ring order
         const withDraft = withDraftTree(tree, { parent: null, tier: 't', beside: { anchor: ids[i]!, side: pin } })
         const order = withDraft.children.map(c => c.id)
-        const at = order.indexOf(DRAFT), me = order.indexOf(ids[i]!)
-        assert.equal(order[(at + (pin === 'left' ? 1 : order.length - 1)) % order.length], ids[i]!, 'draft sits next to the anchor')
-        assert.equal(order[(at + (pin === 'left' ? order.length - 1 : 1)) % order.length], chosen, 'and next to the chosen neighbour')
-        assert.ok(me >= 0)
+        assert.equal(order.indexOf(DRAFT) + (pin === 'left' ? 1 : -1), order.indexOf(ids[i]!), 'draft sits next to the anchor')
       }
     }
   }
-  assert.ok(cases >= 80 && flips > 20, `covered ${cases} cases, ${flips} flipped`)
+  assert.ok(cases >= 80 && flips >= 15, `covered ${cases} cases, ${flips} flipped`)
   const t = layout(withDraftTree(build([0, 0, 0, 0]), null), new Map(), 'row')
   assert.equal(ringInsertSide('left', 'k1', ['k0', 'k1', 'k2', 'k3'], t, false), 'left', 'row layout is unchanged')
+})
+
+// user 2026-10-01 (3.0.8): "the arc swaps the left-right ordering of agents
+// when going between circular and row alignment"
+test('the circle arc and the row show agents in the same left-to-right order', () => {
+  const xs = (t: Map<string, { x: number; y: number }>, ids: string[]) => ids.map(id => centre(t.get(id)!).x)
+  const ascending = (v: number[]) => v.every((x, i) => i === 0 || x > v[i - 1]!)
+  const r1 = ringRadius(layout(eye(flat(1)), new Map(), 'circular'), 'k0')
+  let cap = 0
+  for (let n = 1; n < 40; n++) {
+    const ids = Array.from({ length: n }, (_, i) => `k${i}`)
+    const circle = layout(eye(flat(n)), new Map(), 'circular')
+    if (Math.abs(ringRadius(circle, 'k0') - r1) > 1e-6) { cap = n - 1; break }
+    assert.ok(ascending(xs(layout(eye(flat(n)), new Map(), 'row'), ids)), `n=${n}: row reads k0..k${n - 1} left to right`)
+    if (n <= 4) assert.ok(ascending(xs(circle, ids)), `n=${n}: the arc reads k0..k${n - 1} left to right too`)
+    // a longer arc curls up the sides; along its lower half it still reads left to right
+    const low = ids.filter(id => centre(circle.get(id)!).y > centre(circle.get(USER)!).y)
+    assert.ok(ascending(xs(circle, low)), `n=${n}: the lower half of the arc reads left to right`)
+  }
+  assert.ok(cap > 4)
+  // the full ring the arc grows into keeps the same direction: first agent just left of the top
+  const full = layout(eye(flat(cap + 1)), new Map(), 'circular'), eyeC = centre(full.get(USER)!)
+  assert.ok(centre(full.get('k0')!).x < eyeC.x && centre(full.get(`k${cap}`)!).x > eyeC.x, 'first agent left of the top, last right of it')
+  const ids = Array.from({ length: cap + 1 }, (_, i) => `k${i}`)
+  assert.ok(ascending(xs(full, ids.filter(id => centre(full.get(id)!).y > eyeC.y))), 'the bottom of the full ring reads left to right')
+  // a second ring: teams stay left to right, and so do the agents inside them
+  const two = eye([node('a', flat(3, 'a')), node('b', flat(2, 'b'))])
+  for (const mode of ['row', 'circular'] as const) {
+    const t = layout(two, new Map(), mode)
+    assert.ok(ascending(xs(t, ['a', 'b'])), `${mode}: a left of b`)
+    assert.ok(ascending(xs(t, ['a0', 'a1', 'a2', 'b0', 'b1'])), `${mode}: a0 a1 a2 b0 b1 left to right`)
+  }
+})
+
+// user 2026-10-01 (3.0.8): "neighbor hires appear on the wrong sides of agents
+// again" — the 3.0.6 arc drew siblings right to left, and its open ends were
+// treated as touching, so the pressed side and the drawn side disagreed
+test('a neighbour hire lands next to its anchor on the pressed side, in the circle arc and the row, and stays there after the hire', () => {
+  type T = Parameters<typeof withDraftTree>[0]
+  const leaf = (id: string) => ({ id, title: id, tier: 't', state: 'live', children: [] as unknown[] })
+  const configs: { name: string; tree: T; parent: string | null; sibs: string[] }[] = []
+  for (let n = 1; n <= 6; n++) {
+    const sibs = Array.from({ length: n }, (_, i) => `k${i}`)
+    configs.push({ name: `top ${n}`, tree: { roots: sibs.map(leaf) } as unknown as T, parent: null, sibs })
+  }
+  for (const [team, size] of [['a', 3], ['b', 2], ['b', 1]] as const) {
+    const sibs = Array.from({ length: size }, (_, i) => `${team}${i}`)
+    const other = team === 'a' ? ['b0', 'b1'] : ['a0', 'a1', 'a2']
+    const roots = team === 'a'
+      ? [{ ...leaf('a'), children: sibs.map(leaf) }, { ...leaf('b'), children: other.map(leaf) }]
+      : [{ ...leaf('a'), children: other.map(leaf) }, { ...leaf('b'), children: sibs.map(leaf) }]
+    configs.push({ name: `team ${team} of ${size}`, tree: { roots } as unknown as T, parent: team, sibs })
+  }
+  let cases = 0
+  for (const mode of ['row', 'circular'] as const) {
+    for (const c of configs) {
+      const t = layout(withDraftTree(c.tree, null), new Map(), mode)
+      for (const anchor of c.sibs) {
+        for (const side of ['left', 'right'] as const) {
+          const pin = ringInsertSide(side, anchor, c.sibs, t, mode === 'circular')
+          const draft = layout(withDraftTree(c.tree, { parent: c.parent, tier: 't', beside: { anchor, side: pin } }), new Map(), mode)
+          const dx = centre(draft.get(DRAFT)!).x - centre(draft.get(anchor)!).x
+          assert.ok(side === 'left' ? dx < 0 : dx > 0, `${mode} ${c.name} ${anchor} ${side}: the new card is drawn ${side} of its anchor (dx ${dx.toFixed(0)})`)
+          // the hire then pins the same order (reorderNode before/after the anchor)
+          const kids = withDraftTree(c.tree, { parent: c.parent, tier: 't', beside: { anchor, side: pin } })
+          const group = (c.parent === null ? kids : kids.children.find(k => k.id === c.parent)!).children.map(k => k.id)
+          const at = group.indexOf(DRAFT)
+          assert.equal(group[pin === 'left' ? at + 1 : at - 1], anchor, 'and sits right next to the anchor, no card skipped')
+          cases++
+        }
+      }
+    }
+  }
+  assert.ok(cases >= 100, `covered ${cases} cases`)
 })
 
 test('the HireSheet coworker pin is taken before the hire op, not after the tree refreshes', () => {

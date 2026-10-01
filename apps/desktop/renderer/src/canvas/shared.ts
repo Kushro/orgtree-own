@@ -1608,25 +1608,34 @@ export function peerOrder(ids: string[], target: Map<string, Pt>, circular: bool
 
 // Ring view hire-coworker rule (coordinator ruling 2026-09-30): a button means
 // "put the new agent in the gap between this agent and its ring neighbour on the
-// side the arrow points to", judged on screen BEFORE the hire, the seam
-// wrapping. `sibs` are the anchor's visible siblings in ring order. Of the two
-// ring neighbours, the one whose on-screen direction from the anchor is
+// side the arrow points to", judged on screen BEFORE the hire. `sibs` are the
+// anchor's visible siblings in ring order. Each of the two gaps (before / after
+// the anchor) points from the anchor toward the sibling on that side; the
+// first and last sibling have an OPEN end instead (an arc's end, or the edge of
+// a team's wedge, where the other end of the list is NOT the screen
+// neighbour), which points along the ring past the anchor. The gap pointing
 // closest to the arrow wins (so at the extremes, where both sit on one side or
 // straight above and below, the nearer-pointing one is used); a tie keeps the
-// button's own order. Returns the order the hire pins (left = before = the
-// previous neighbour, right = after). Row layout returns the side unchanged.
+// button's own order. Returns the order the hire pins (left = before, right =
+// after). Row layout returns the side unchanged.
 export function ringInsertSide(side: 'left' | 'right', anchorId: string, sibs: string[],
   target: Map<string, Pt>, circular: boolean): 'left' | 'right' {
-  const i = sibs.indexOf(anchorId), n = sibs.length, a = target.get(anchorId)
-  if (!circular || i < 0 || n < 3 || !a) return side
-  const fit = (id: string): number => {
-    const p = target.get(id)
-    if (!p) return -Infinity
-    const dx = p.x - a.x, dy = p.y - a.y, len = Math.hypot(dx, dy)
-    return len < 1e-9 ? -Infinity : (side === 'left' ? -dx : dx) / len
+  const i = sibs.indexOf(anchorId), a = target.get(anchorId), eye = target.get(USER)
+  if (!circular || i < 0 || !a || !eye) return side
+  const want = side === 'left' ? -1 : 1
+  // x part of the unit direction from the anchor into the gap, signed toward the arrow
+  const fit = (id: string | undefined, step: 1 | -1): number => {
+    const p = id === undefined ? undefined : target.get(id)
+    if (p) {
+      const dx = p.x - a.x, dy = p.y - a.y, len = Math.hypot(dx, dy)
+      if (len > 1e-9) return want * dx / len
+    }
+    // the ring runs counter-clockwise on screen, so "after" heads along (uy, -ux)
+    const ux = a.x - eye.x, uy = a.y - eye.y, len = Math.hypot(ux, uy)
+    return len < 1e-9 ? 0 : want * step * uy / len
   }
-  const before = fit(sibs[(i + n - 1) % n]!), after = fit(sibs[(i + 1) % n]!)
-  if (before === after) return side
+  const before = fit(sibs[i - 1], -1), after = fit(sibs[i + 1], 1)
+  if (Math.abs(before - after) < 1e-9) return side
   return before > after ? 'left' : 'right'
 }
 
@@ -1680,13 +1689,17 @@ export function layoutCircular(root: CanvasNode, hidden: Map<string, string> = n
     const need = r.length > 1 ? RING_PITCH / (2 * Math.sin(Math.min(gap, Math.PI) / 2)) : 0
     radius[d] = Math.max(need, base)
   }
+  // Drawn MIRRORED (x = cx − r·cos): the ring runs counter-clockwise from the
+  // top on screen, so the arc and the bottom of a full ring read left to right
+  // in sibling order, like the row layout (user 2026-10-01: switching between
+  // circle and row must not mirror the agents).
   const out = new Map<string, Pt>()
   const cx = EYE_ANCHOR_X + NODE_W / 2
   const seen: number[] = []
   for (const p of placed) {
     const r = radius[p.depth]!
     const angle = p.depth > 0 && arc[p.depth] ? arc[p.depth]![(seen[p.depth] = (seen[p.depth] ?? -1) + 1)]! : p.angle
-    out.set(p.id, { x: cx + r * Math.cos(angle) - NODE_W / 2, y: r * Math.sin(angle) - NODE_H / 2 })
+    out.set(p.id, { x: cx - r * Math.cos(angle) - NODE_W / 2, y: r * Math.sin(angle) - NODE_H / 2 })
   }
   return out
 }
