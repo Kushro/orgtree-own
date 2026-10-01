@@ -30,7 +30,7 @@ import { OpenRouterHarnessSetting, OpenRouterSection } from './openrouter'
 import { ModalOverlapSettings, PinFrame } from './modalpin'
 import { CanvasAnchorSettings } from './canvasanchor'
 import {
-  setAgentShortcutsOn, useAgentShortcuts, setPinSnapOn, usePinSnap, setCrowdPilesOn, setDeskDpi, setHideRetiredOn, setOpenRouterTiers, setShowLegacyModelsOn, setStartView, setStartZoomOn,
+  setAgentShortcutsOn, useAgentShortcuts, setPinSnapOn, usePinSnap, setJumpFoldOn, useJumpFold, setCrowdPilesOn, setDeskDpi, setHideRetiredOn, setOpenRouterTiers, setShowLegacyModelsOn, setStartView, setStartZoomOn,
   legacyMark, optInLegacyHidden, TIER_LETTER,
   setChartLayout, useChartLayout, useCrowdPiles, useDeskDpi, useHideRetired, useShowLegacyModels, useStartView, useStartZoom,
 } from './shared'
@@ -337,6 +337,14 @@ function ShowLegacyModelsToggle() {
 /* user 2026-09-30: "make pinned window snapping an optional toggle in
    display". On by default; off, dragging and resizing a pinned panel never
    snaps (pins.tsx and modalpin.tsx read it at each gesture). */
+function JumpFoldToggle() {
+  const on = useJumpFold()
+  return <SetToggle label="Collapse many jump cards on desks" checked={on}
+    onChange={setJumpFoldOn}
+    hint={'a desk with more than 16 jump cards (reports and watchdogs) shows '
+      + 'them behind one counted button; off, every card is always shown'} />
+}
+
 function PinSnapToggle() {
   const on = usePinSnap()
   return <SetToggle label="snap pinned panels to edges" checked={on}
@@ -801,7 +809,7 @@ export function AccountsPanel({ toast, close, initialTab }: {
     </SettingsTabPanel>
     <SettingsTabPanel id="display" idBase="app-settings" active={tab === 'display'}>
       <ThemeSetting />
-      <SetGroup title="Desk"><ChartLayoutSetting /><DeskTextSize /><CrowdStackToggle /><HideRetiredToggle /><AgentShortcutsToggle /><ModalOverlapSettings /><PinSnapToggle /><CanvasAnchorSettings /></SetGroup>
+      <SetGroup title="Desk"><ChartLayoutSetting /><DeskTextSize /><CrowdStackToggle /><HideRetiredToggle /><AgentShortcutsToggle /><ModalOverlapSettings /><PinSnapToggle /><JumpFoldToggle /><CanvasAnchorSettings /></SetGroup>
       <SetGroup title="Startup"><StartupWindowsSetting /><StartupView /></SetGroup>
     </SettingsTabPanel>
     <SettingsTabPanel id="defaults" idBase="app-settings" active={tab === 'defaults'}>

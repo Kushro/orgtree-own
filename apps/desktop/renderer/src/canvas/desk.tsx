@@ -55,7 +55,7 @@ import {
   isChatActive, isNoticeArmed, registerChat, setActiveChatKey, setNoticeArmed,
   toggleNoticeArmed, unregisterChat, useNoticeArmed,
 } from '../noticestore'
-import { ago, ALL_PRESENT, ALL_TIERS, anyTierSeat, CODEX_TIERS, conditionalTierHidden, CopyIcon, EXTERN, fmtCredits, freezeKind, FREEZE_LABEL, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, md, openrouterTierIds, procHaloClass, PROVIDER_LABEL, providerOf, queuedSwitchTitle, reportedLabel, stateLabel, TIER_LETTER, tierCapabilityNotes, optInLegacyHidden, tierLabel, tierShown, USER, useHideRetired, usePolled, useShowLegacyModels, useOfferedConditionalTiers } from './shared'
+import { ago, ALL_PRESENT, ALL_TIERS, anyTierSeat, CODEX_TIERS, conditionalTierHidden, CopyIcon, EXTERN, fmtCredits, freezeKind, FREEZE_LABEL, ANTIGRAVITY_TIERS, isOpenRouterTier, legacyMark, md, openrouterTierIds, procHaloClass, PROVIDER_LABEL, providerOf, queuedSwitchTitle, reportedLabel, stateLabel, TIER_LETTER, tierCapabilityNotes, optInLegacyHidden, tierLabel, tierShown, USER, DESK_JUMP_FOLD_LIMIT, useHideRetired, useJumpFold, usePolled, useShowLegacyModels, useOfferedConditionalTiers } from './shared'
 import { closeIfCentred, ModalOverPins, PinFrame } from './modalpin'
 import type { ProviderPresence } from './shared'
 import {
@@ -69,7 +69,7 @@ import type {
   ActivityInfo, CanvasNode, LiveRow, MailLinkFn, OpFn, WorkLinkFn,
 } from './shared'
 import { ConfirmModal, PilePicker } from './modals'
-import { AUDIENCE_FOLD_LIMIT, AudienceFold, InboxView, RetiredFold } from './mail'
+import { AudienceFold, InboxView, RetiredFold } from './mail'
 import { AskCard } from './asks'
 import { useWorkItems } from './useworkitems'
 import { AgentDocketView, actionableAssignedCount, agentItems } from './docket'
@@ -2161,6 +2161,7 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
   // F-01 footer: retired reports collapsed behind one chip (user ruling)
   const [showRetired, setShowRetired] = useState(false)
   const hideRetired = useHideRetired()
+  const jumpFold = useJumpFold()
   const [retiredMenuOpen, setRetiredMenuOpen] = useState(false)
   // this agent's own watchdogs, as cards in the bottom jump row (deskdogs.tsx)
   const deskDogs = useDeskDogs(node.id)
@@ -3854,7 +3855,7 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
         if (!reports.length && !deskDogs) return null
         const dogs = deskDogs?.dogs ?? []
         const cardIds = [...alive.map((c) => 'n:' + c.id), ...dogs.map((w) => 'd:' + w.id)]
-        const folded = cardIds.length >= AUDIENCE_FOLD_LIMIT
+        const folded = jumpFold && cardIds.length > DESK_JUMP_FOLD_LIMIT
         const renderCard = (k: string) => {
           if (k.startsWith('n:')) {
             return <NavChip key={k} n={alive.find((x) => x.id === k.slice(2))!} dir="down" onJump={jump} />
@@ -3863,7 +3864,7 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
         }
         return (
           <div className="desk-nav">
-            {folded ? <AudienceFold label="jump cards" ids={cardIds} render={renderCard} />
+            {folded ? <AudienceFold label="jump cards" ids={cardIds} render={renderCard} limit={DESK_JUMP_FOLD_LIMIT + 1} />
               : alive.map((c) => <NavChip key={c.id} n={c} dir="down" onJump={jump} />)}
             {hideRetired && retired.length > 0 && <>
               <button className="desk-nav-chip desk-retired-token" onClick={() => setRetiredMenuOpen(true)}>

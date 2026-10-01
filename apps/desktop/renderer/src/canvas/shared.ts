@@ -1327,6 +1327,29 @@ const subscribePinSnap = (fn: () => void): (() => void) => {
 export const usePinSnap = (): boolean =>
   useSyncExternalStore(subscribePinSnap, pinSnapOn)
 
+// Desk jump-card collapse (user 2026-10-01): with MORE than DESK_JUMP_FOLD_LIMIT
+// cards the desk footer folds them behind one counted button. On unless
+// explicitly turned off, same contract as the pin-snap toggle above.
+export const DESK_JUMP_FOLD_LIMIT = 16
+export const JUMP_FOLD_KEY = 'orgtree-jump-fold'
+export const jumpFoldOn = (): boolean => {
+  try { return localStorage.getItem(JUMP_FOLD_KEY) !== '0' } catch { return true }
+}
+const jumpFoldSubs = new Set<() => void>()
+export const setJumpFoldOn = (on: boolean): void => {
+  try {
+    localStorage.setItem(JUMP_FOLD_KEY, on ? '1' : '0')
+  } catch { /* private mode */ }
+  for (const fn of [...jumpFoldSubs]) fn()    // copy: a listener may detach
+}
+const subscribeJumpFold = (fn: () => void): (() => void) => {
+  jumpFoldSubs.add(fn)
+  window.addEventListener('storage', fn)
+  return () => { jumpFoldSubs.delete(fn); window.removeEventListener('storage', fn) }
+}
+export const useJumpFold = (): boolean =>
+  useSyncExternalStore(subscribeJumpFold, jumpFoldOn)
+
 /* ------------------------------------------- the startup view (D-228)
    What the canvas shows the moment an org OPENS, and whether it glides there.
    Two settings, because they answer two different questions:

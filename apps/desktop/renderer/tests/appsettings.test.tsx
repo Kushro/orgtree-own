@@ -362,6 +362,37 @@ test('§3b Display: "snap pinned panels to edges" is on by default and stays '
   }
 })
 
+test('§3c Display: "Collapse many jump cards on desks" is on by default and stays '
+  + 'off across a reload once turned off', async () => {
+  localStorage.clear()
+  stubFetch([])
+  const open = async () => {
+    const view = await mountSettings()
+    const displayTab = [...view.el.querySelectorAll<HTMLButtonElement>('[role="tab"]')]
+      .find((b) => b.textContent?.includes('Display'))!
+    await inAct(async () => { displayTab.click() })
+    const panel = view.el.querySelector<HTMLElement>('#app-settings-panel-display')!
+    const sw = panel.querySelector<HTMLInputElement>(
+      'input[aria-label="Collapse many jump cards on desks"]')!
+    return { view, sw }
+  }
+  let v = await open()
+  try {
+    assert.ok(v.sw, 'the toggle is a Display row')
+    assert.ok(v.sw.closest('.set-row'))
+    assert.equal(v.sw.checked, true, 'unset means on')
+    await inAct(async () => { v.sw.click() })
+    assert.equal(v.sw.checked, false)
+    assert.equal(localStorage.getItem('orgtree-jump-fold'), '0')
+  } finally { await v.view.unmount() }
+  v = await open()
+  try {
+    assert.equal(v.sw.checked, false, 'off survives a reload')
+  } finally {
+    await v.view.unmount(); delete g.fetch; localStorage.clear()
+  }
+})
+
 test('§4 Runtime reads and writes both machine-wide lifecycle controls', async () => {
   const seen: Seen[] = []
   stubFetch(seen)

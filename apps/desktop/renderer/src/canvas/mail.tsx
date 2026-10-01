@@ -1048,17 +1048,19 @@ export function RetiredFold({ ids, render }: {
 // expanding is an inspection, not a browser-wide change of how audiences work.
 export const AUDIENCE_FOLD_LIMIT = 8
 
-export function AudienceFold({ ids, label, alert = false, render }: {
+export function AudienceFold({ ids, label, alert = false, render, limit = AUDIENCE_FOLD_LIMIT }: {
   ids: string[]
   /** plural visible noun, e.g. "audience holders" */
   label: string
   /** org inboxes expect one holder: a larger folded count is an anomaly */
   alert?: boolean
   render: (id: string) => ReactNode
+  /** folds from this many ids up; the desk's jump cards pass their own */
+  limit?: number
 }) {
   const [open, setOpen] = useState(false)
   if (!ids.length) return null
-  if (ids.length < AUDIENCE_FOLD_LIMIT) return <>{ids.map(render)}</>
+  if (ids.length < limit) return <>{ids.map(render)}</>
   const summary = `${ids.length} ${label}`
   return (<>
     <button type="button"
