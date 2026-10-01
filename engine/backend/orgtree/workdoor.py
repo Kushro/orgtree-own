@@ -49,7 +49,7 @@ def spec(_snapshot: Any, call: Any, a: dict[str, Any]) -> pgdoor.TxSpec:
 
 
 def body(identity_ready: Callable[[Any, str], Any],
-         mutate: Callable[[Any, str, dict[str, Any]], dict[str, Any]],
+         mutate: Callable[..., dict[str, Any]],
          notify: Callable[[str, str, str], None]
          ) -> Callable[[pgdoor.AgentTx], dict[str, Any]]:
     """The family body. `identity_ready`, `mutate` and `notify` are api's
@@ -60,7 +60,11 @@ def body(identity_ready: Callable[[Any, str], Any],
         t.org._work_defer_archive = True
         try:
             identity_ready(t.org, slug)
-            result = mutate(t.org, t.node, t.args)
+            if t.args.get("action") == "claim":
+                result = mutate(t.org, t.node, t.args,
+                                claim_commit=t.pre.get("claim_commit"))
+            else:
+                result = mutate(t.org, t.node, t.args)
         finally:
             t.org._work_defer_archive = False
         told = [str(x) for x in (result.get("notified_nodes")
@@ -81,7 +85,7 @@ def body(identity_ready: Callable[[Any, str], Any],
 
 
 def declare(identity_ready: Callable[[Any, str], Any],
-            mutate: Callable[[Any, str, dict[str, Any]], dict[str, Any]],
+            mutate: Callable[..., dict[str, Any]],
             notify: Callable[[str, str, str], None]) -> None:
     """Register `orgtree_work` on the door (api calls this once at import)."""
     pgdoor.declare(TOOL, spec, body=body(identity_ready, mutate, notify),

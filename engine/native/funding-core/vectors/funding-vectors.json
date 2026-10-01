@@ -1,6 +1,6 @@
 {
  "schema": "orgtree.funding-core-vectors/v1",
- "oracle": {"python":"3.13.15","anchors":{"engine/backend/orgtree/ledger.py":"dd4126319bcca07278a8749ba15fe0688c94e17cf430e5e962e65c424a1d97f7"}},
+ "oracle": {"python":"3.13.15","anchors":{"engine/backend/orgtree/ledger.py":"286b1a64227921f96eae37f7c8d5d2c8f8028e48530c928fa526baa017a9d6be"}},
  "limits": "Synthetic organizations only. Expected values are current Python behavior, not a new contract. Reads are what the Python code touched, not a lock set.",
  "fmt_g": [
   [0.0,"0"],

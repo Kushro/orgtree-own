@@ -277,8 +277,9 @@ def _r_review_approved_stage(ev: _R) -> str:
               "`approved`, it is still yours, and the next action is the "
               "LANDING — rebase, fast-forward and push that commit."
             + (f"\nReviewer's note: {_note(ev, 'approval')}" if note else "")
-            + f"\nWhen it is on main, record it (orgtree_work claim "
-              f"slug={o['slug']} stage=pushed ref=<sha>, then `verify`) and "
+            + f"\nWhen it is on the integration branch, record it (orgtree_work claim "
+              f"slug={o['slug']} stage=pushed ref=<sha> note=<git ls-remote "
+              "origin refs/heads/<branch> output>) and "
               "complete the item only then. Nobody completes it for you — this "
               "outcome exists precisely so the docket does not read Done for "
               "code that is not in the product."

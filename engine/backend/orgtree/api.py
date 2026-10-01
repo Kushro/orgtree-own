@@ -8785,7 +8785,7 @@ _WORK_ACTION_ARGS: dict[str, frozenset[str]] = {
     "artifact_read": frozenset({"artifact"}),
     "receipt": frozenset({"checkout", "logs", "command", "candidate",
                           "execution", "result", "runner", "note", "base",
-                          "ref", "kind"}),
+                          "ref", "kind", "projection"}),
     "rangediff": frozenset({"checkout", "old_base", "old_tip", "new_base",
                             "new_tip", "note"}),
     # ---- mutations (api._work_mutate_action) ------------------------------
@@ -9100,6 +9100,10 @@ def _work_receipt_call(body: AgentCall, a: dict[str, Any], *, rangediff: bool
     and a receipt can never be appended to an item that changed underneath it.
     """
     wid = _work_ref(a)
+    projection = ("full" if rangediff else
+                  str(a.get("projection") or "summary").strip().lower())
+    if projection not in ("summary", "compact", "full"):
+        raise LedgerError("receipt projection must be summary|compact|full")
     # PG-3w: this phase only READS (the rev the write compare-and-sets
     # against, the read right, the checkout grant), so it is a lock-free
     # `org_read`. The write phase refuses with `stale` if the item moved in
@@ -9171,13 +9175,21 @@ def _work_receipt_call(body: AgentCall, a: dict[str, Any], *, rangediff: bool
                         "measured; nothing was written — read it again "
                         "and repeat the call"}
     tree = rc["tree"]
-    return {**r, "item": item_slug, "ref": refs.item(body.org, item_slug),
+    answer = {**r, "item": item_slug, "ref": refs.item(body.org, item_slug),
             "receipt": rc,
             "disclosed": {"tree_state": tree["state"],
                           "dirty_count": tree["dirty_count"],
                           "in_progress": tree["in_progress"],
                           "detail": tree["detail"]},
             "hint": _work_receipt_hint(rc)}
+    if projection != "full":
+        answer["receipt"] = {k: rc[k] for k in (
+            "candidate", "base", "execution", "result", "fingerprint")}
+        answer["receipt_id"] = rc["fingerprint"]
+        answer["omissions_how"] = (
+            "Full provenance is stored on the evidence row. Read it with "
+            "`receipts`; use `receipt projection=full` for a full write answer.")
+    return answer
 
 
 def _work_receipt_hint(rc: Mapping[str, Any]) -> str:
@@ -9351,7 +9363,8 @@ def _work_read_call(body: AgentCall, a: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(422, str(e))
 
 
-def _work_mutate(org: Org, nid: str, a: dict[str, Any]) -> dict[str, Any]:
+def _work_mutate(org: Org, nid: str, a: dict[str, Any], *,
+                 claim_commit: tuple[str, str] | None = None) -> dict[str, Any]:
     """`orgtree_work` mutating actions, under the caller's DOC_LOCK.
 
     Every successful mutation carries `item`: the name of the item it acted
@@ -9363,7 +9376,7 @@ def _work_mutate(org: Org, nid: str, a: dict[str, Any]) -> dict[str, Any]:
     structured identity, never text)."""
     act = str(a.get("action") or "")
     wid = _work_ref(a)
-    r = _work_mutate_action(org, nid, a, act, wid)
+    r = _work_mutate_action(org, nid, a, act, wid, claim_commit=claim_commit)
     if isinstance(r, dict) and "item" not in r:
         # `create` mints the name; every other action was GIVEN one, and since
         # only an exact name resolves, the reference the caller passed IS the
@@ -9380,7 +9393,8 @@ def _work_mutate(org: Org, nid: str, a: dict[str, Any]) -> dict[str, Any]:
 
 
 def _work_mutate_action(org: Org, nid: str, a: dict[str, Any],
-                        act: str, wid: str) -> dict[str, Any]:
+                        act: str, wid: str, *,
+                        claim_commit: tuple[str, str] | None = None) -> dict[str, Any]:
 
     def _s(key: str) -> str | None:
         v = a.get(key)
@@ -9579,7 +9593,7 @@ def _work_mutate_action(org: Org, nid: str, a: dict[str, Any],
     if act == "claim":
         try:
             return org.work_claim(nid, wid, str(a.get("stage") or ""),
-                                  _s("ref"), _s("note"))
+                                  _s("ref"), _s("note"), _commit=claim_commit)
         except workitems.ShaError as e:
             raise LedgerError(str(e))
     if act == "check":
@@ -13629,6 +13643,14 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
     # the RESIDENT write cycle (rearchitecture Phase B): same DOC_LOCK, same
     # save fanout, same discard-on-failure — without re-parsing 11 MB of
     # document per tool call.
+    _claim_commit = None
+    if body.tool == "orgtree_work" and a.get("action") == "claim":
+        try:
+            _work_refuse_unused(a, "claim")
+            _claim_commit = workitems.claim_commit(
+                str(a.get("stage") or ""), str(a.get("ref") or "").strip() or None)
+        except (workitems.ShaError, LedgerError) as e:
+            raise HTTPException(422, str(e)) from e
     if pgdoor.routed(body.tool, a):
         # PYPG: a family has converted this tool off DOC_LOCK (it declared
         # its rows and body with pgdoor.declare). It runs as ONE row
@@ -13637,7 +13659,8 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
         return _agent_door(body, a, {"harness": _hire_harness,
                                      "archive_warnings": _archive_warnings,
                                      "renamed_to": _renamed_to,
-                                     "rename_warnings": _rename_warnings})
+                                     "rename_warnings": _rename_warnings,
+                                     "claim_commit": _claim_commit})
     if pgdoor.enabled():
         # S9 (plan decision 44 (2)): with the door on every agent verb is
         # routed (tests/test_write_org_door_tripwire.py), so a call that
@@ -13965,7 +13988,7 @@ def agent_call(body: AgentCall, request: Request) -> dict[str, Any]:
                 # write — and a failure in either half leaves the stored
                 # document untouched, because neither has been saved.
                 _work_identity_ready(org, body.org)
-                result = _work_mutate(org, body.node, a)
+                result = _work_mutate(org, body.node, a, claim_commit=_claim_commit)
                 # AN ASSIGNMENT NOW MAILS THE AGENT THAT ACQUIRED THE ITEM, so
                 # this branch has a post-commit effect it never had: the
                 # notification is posted inside the transaction and the

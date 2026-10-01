@@ -18370,7 +18370,7 @@ class Org:
         self._work_expect_rev(it, expected_rev)
         fs.append(rec)
         self._work_hist(it, actor, "finding", {"finding": rec["id"]})
-        return dict(rec)
+        return {"finding": dict(rec), "rev": it["rev"]}
 
     def work_finding_dispose(self, actor: str, wid: str, fid: str,
                              disposition: str, *, note: str | None = None,
@@ -18423,10 +18423,14 @@ class Org:
                 "open": open_ids}
 
     def work_claim(self, actor: str, wid: str, stage: str,
-                   ref: str | None = None, note: str | None = None
+                   ref: str | None = None, note: str | None = None, *,
+                   _commit: tuple[str, str] | None = None
                    ) -> dict[str, Any]:
-        """A delivery CLAIM. Verification fields are never caller-writable:
-        a verifiable stage is recorded `unverified` until `verify` runs."""
+        """A delivery claim, with SHA existence checked but delivery unverified.
+
+        `_commit` is backend-only preflight evidence, captured before locks;
+        direct ledger callers resolve their reference here instead.
+        """
         from . import workitems       # noqa: PLC0415
         self._work_require_live_agent_or_user(actor)
         self._work_sweep()
@@ -18439,22 +18443,30 @@ class Org:
             raise LedgerError("non-code item: delivery stages do not apply")
         if stage not in workitems.STAGES:
             raise LedgerError(f"stage must be one of {'|'.join(workitems.STAGES)}")
+        if _commit is None or _commit[0] != str(ref or "").strip():
+            _commit = workitems.claim_commit(stage, ref)
         st: WorkStage = {"claimed_at": now(),
                          "claimed_by": self._work_actor(actor),
                          "ref": None, "note": (_prose(note) if note else None),
                          "verified": None, "method": "self-report", "detail": "",
-                         "resolved_oid": None, "target": "", "ref_as_of": "",
+                         "resolved_oid": _commit[1] if _commit else None,
+                         "target": "", "ref_as_of": "",
                          "fetched_at": None, "observed_at": ""}
         if stage in workitems.VERIFIABLE:
             st["ref"] = workitems.validate_sha(ref)   # raises ShaError (ValueError)
             st["method"] = "unverified"
-            st["detail"] = "claimed; run `verify` to check it against git"
+            st["detail"] = ("commit exists; delivery is self-reported. Put "
+                            "`git ls-remote origin refs/heads/<branch>` output "
+                            "for the integration branch in the claim note")
         elif ref:
             st["ref"] = _bounded("ref", ref)
         cast("dict[str, Any]", it["delivery"])[stage] = st
         self._work_hist(it, actor, "claim", {"stage": stage})
-        return {"claimed": stage, "rev": it["rev"],
-                "verifiable": stage in workitems.VERIFIABLE}
+        return {"claimed": stage, "rev": it["rev"], "verified": None,
+                "resolved_oid": st["resolved_oid"],
+                "hint": ("Put `git ls-remote origin refs/heads/<branch>` "
+                         "output for the integration branch in the claim "
+                         "note; a claim does not verify delivery.")}
 
     def work_verify_capture(self, actor: str, wid: str, stage: str
                             ) -> dict[str, Any]:

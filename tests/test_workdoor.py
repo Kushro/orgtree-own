@@ -109,6 +109,65 @@ class WorkDoor(unittest.TestCase):
         self.assertEqual(int(it['rev']), r0 + 1)
         self.assertIn('boss', self.locked[-1], 'the caller row must be held')
 
+    def test_claim_resolves_commit_before_door_locks_and_keeps_delivery_unverified(self):
+        from orgtree import workitems
+        import subprocess
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                       cwd=Path(__file__).resolve().parents[1],
+                                       text=True).strip()
+        real = workitems.claim_commit
+        def before_locks(stage, ref):
+            self.assertEqual(self.locked, [], 'git ran under transaction locks')
+            return real(stage, ref)
+        with patch.object(workitems, 'claim_commit', side_effect=before_locks) as resolve:
+            out = self.call('boss', action='claim', slug=self.wid,
+                            stage='pushed', ref=head[:12], note='remote output')
+        self.assertEqual(resolve.call_count, 1,
+                         'resolution must not repeat inside the locked ledger')
+        self.assertEqual(out['resolved_oid'], head)
+        self.assertIsNone(out['verified'])
+        self.assertNotIn('verifiable', out)
+        self.assertIn('git ls-remote', out['hint'])
+        self.assertNotIn('`verify`', out['hint'])
+        row = self.item()[0]['delivery']['pushed']
+        self.assertEqual(row['ref'], head[:12])
+        self.assertEqual(row['note'], 'remote output')
+        self.assertNotIn('`verify`', row['detail'])
+
+    def test_nonexistent_claim_ref_changes_nothing(self):
+        from fastapi import HTTPException
+        before = self.item()[0]
+        with self.assertRaises(HTTPException) as caught:
+            self.call('boss', action='claim', slug=self.wid,
+                      stage='committed', ref='b' * 40)
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertIn('claim ref', str(caught.exception.detail))
+        self.assertIn('does not resolve', str(caught.exception.detail))
+        self.assertEqual(self.item()[0], before)
+        self.assertEqual(self.locked, [], 'a refused SHA must take no write locks')
+
+    def test_missing_claim_ref_names_the_invalid_field(self):
+        from fastapi import HTTPException
+        with self.assertRaises(HTTPException) as caught:
+            self.call('boss', action='claim', slug=self.wid, stage='pushed')
+        self.assertIn('ref', str(caught.exception.detail))
+
+    def test_deployment_sha_with_whitespace_is_also_resolved_before_locks(self):
+        from orgtree import workitems
+        import subprocess
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                       cwd=Path(__file__).resolve().parents[1],
+                                       text=True).strip()
+        real = workitems.claim_commit
+        def before_locks(stage, ref):
+            self.assertEqual(self.locked, [], 'git ran under transaction locks')
+            return real(stage, ref)
+        with patch.object(workitems, 'claim_commit', side_effect=before_locks) as resolve:
+            out = self.call('boss', action='claim', slug=self.wid,
+                            stage='deployed', ref='  ' + head + '  ')
+        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual(out['resolved_oid'], head)
+
     def test_assign_mails_notifies_and_drives_the_new_owner_once(self):
         self.call('boss', action='assign', slug=self.wid, owner='sub')
         self.assertEqual(self.item()[0]['owner']['node'], 'sub')

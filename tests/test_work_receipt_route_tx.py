@@ -79,12 +79,41 @@ class ReceiptRouteTx(unittest.TestCase):
         return next(i for i in store.load_org(self.slug).d['work_items']
                     if i['slug'] == self.wid)
 
-    def call(self):
+    def call(self, **args):
         body = SimpleNamespace(org=self.slug, node='own', tool='orgtree_work', op_key='')
         return api._work_read_call(body, {
             'action': 'receipt', 'slug': self.wid, 'checkout': '.',
             'candidate': 'abc1234', 'command': ['pytest', '-k', 'x'],
-            'execution': 'independent', 'result': 'passed'})
+            'execution': 'independent', 'result': 'passed', **args})
+
+    def test_default_answer_is_short_but_full_receipt_is_stored(self):
+        out = self.call(note='long provenance ' * 2000)
+        receipt = self.item()['evidence'][-1]['receipt']
+        self.assertEqual(out['receipt_id'], receipt['fingerprint'])
+        self.assertEqual(out['receipt']['candidate'], receipt['candidate'])
+        self.assertEqual(out['receipt']['result'], 'passed')
+        self.assertEqual(out['disclosed']['tree_state'], we.TREE_CLEAN)
+        self.assertNotIn('logs', out['receipt'])
+        self.assertNotIn('note', out['receipt'])
+        self.assertLess(len(str(out)), 1800)
+        self.assertGreater(len(receipt['note']), 20000)
+
+    def test_full_answer_is_opt_in(self):
+        out = self.call(projection='full', note='full provenance')
+        self.assertEqual(out['receipt'], self.item()['evidence'][-1]['receipt'])
+        self.assertIn('logs', out['receipt'])
+        self.assertEqual(out['receipt']['note'], 'full provenance')
+
+    def test_invalid_projection_refuses_before_measurement_or_write(self):
+        from fastapi import HTTPException
+        before = self.item()['rev']
+        with mock.patch.object(we, 'receipt', side_effect=AssertionError('measured')):
+            with self.assertRaises(HTTPException) as caught:
+                self.call(projection='ful')
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertIn('projection', str(caught.exception.detail))
+        self.assertEqual(self.item()['rev'], before)
+        self.assertFalse(self.item().get('evidence'))
 
     def test_unchanged_item_takes_the_receipt_once(self):
         r0 = int(self.item()['rev'])

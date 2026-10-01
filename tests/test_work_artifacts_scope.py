@@ -18,9 +18,12 @@ allow is proved before its matching refusal is believed:
 from __future__ import annotations
 
 import os
+import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -324,7 +327,7 @@ class ReceiptActionTests(W08Base):
                                checkout=str(self.repo_dir),
                                command=['python', '-m', 'unittest', 'tests.x'],
                                execution='independent', result='passed',
-                               note='the suite passed')
+                               note='the suite passed', projection='full')
         self.assertEqual(code, 200, body)
         rc = body['receipt']
         self.assertEqual(rc['candidate'], self.head[:12])
@@ -394,6 +397,7 @@ class ReceiptActionTests(W08Base):
                                checkout=str(self.repo_dir),
                                command=['pytest'], execution='independent',
                                result='passed',
+                               projection='full',
                                logs=[str(d / 'utf8.log'), str(d / 'utf16.log'),
                                      str(d / 'missing.log')])
         self.assertEqual(code, 200, body)
@@ -523,9 +527,22 @@ class FindingTests(W08Base):
                                detail='repro: type in the composer',
                                severity='blocking')
         self.assertEqual(code, 200, body)
-        self.assertEqual(body['id'], 'f1')
-        self.assertEqual(body['disposition'], 'open')
-        self.assertEqual(body['severity'], 'blocking')
+        self.assertEqual(body['finding']['id'], 'f1')
+        self.assertEqual(body['finding']['disposition'], 'open')
+        self.assertEqual(body['finding']['severity'], 'blocking')
+        self.assertIsInstance(body['rev'], int)
+        # Drive the actual MCP wrapper: a saved detail must not become an error.
+        from orgtree import mcptool
+        request = {'id': 1, 'method': 'tools/call', 'params': {
+            'name': 'orgtree_work', 'arguments': {}}}
+        output = io.StringIO()
+        with mock.patch.object(mcptool, 'tool_call', return_value=json.dumps(body)), \
+                mock.patch('sys.stdin', io.StringIO(json.dumps(request) + '\n')), \
+                mock.patch('sys.stdout', output):
+            mcptool.main()
+        result = json.loads(output.getvalue())['result']
+        self.assertFalse(result['isError'], result)
+        self.assertEqual(json.loads(result['content'][0]['text']), body)
         code, seen = self.call('author', action='get')
         self.assertEqual(seen['item']['findings_summary']['open'], ['f1'])
         self.assertEqual(seen['item']['findings_summary']['total'], 1)

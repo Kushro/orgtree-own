@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 # ORGTREE_DATA must be set, in system Temp, OUTSIDE both live roots, BEFORE
 # anything that imports `store` — `store.DATA_ROOT` binds at import time.
@@ -234,7 +235,9 @@ class LandingThenCompletionTests(unittest.TestCase):
         self.assertEqual(item(org, slug)['status'], 'approved',
                          'an update that names no status leaves it alone')
         # the landing is recorded on the item
-        org.work_claim('owner-a', slug, 'pushed', ref=SHA)
+        from orgtree import workitems
+        with patch.object(workitems, '_runner', return_value=(0, SHA)):
+            org.work_claim('owner-a', slug, 'pushed', ref=SHA)
         row = item(org, slug)
         self.assertEqual(row['delivery']['pushed']['ref'], SHA)
         self.assertEqual(row['status'], 'approved',
@@ -376,6 +379,9 @@ class SurfaceTests(unittest.TestCase):
         body = events.render_agent(ev)
         self.assertIn(SHA, body)
         self.assertIn('NOT done', body)
+        self.assertIn('git ls-remote', body)
+        self.assertIn('integration branch', body)
+        self.assertNotIn('then `verify`', body)
 
 
 if __name__ == '__main__':

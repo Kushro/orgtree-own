@@ -146,6 +146,26 @@ def _is_ancestor(sha: str, target: str) -> tuple[bool | None, str]:
     return None, f"git merge-base exited {code}"
 
 
+def claim_commit(stage: str, ref: Any) -> tuple[str, str] | None:
+    """Resolve a claimed SHA without caching; callers run this before locking.
+
+    Non-git stages may also carry a release label or other non-SHA reference.
+    The pair binds the original spelling to the measured commit object.
+    """
+    if stage not in STAGES:
+        return None                     # the ledger names the invalid stage
+    if isinstance(ref, str):
+        ref = ref.strip()
+    if stage not in VERIFIABLE and not (
+            isinstance(ref, str) and re.fullmatch(r"[0-9a-fA-F]{7,40}", ref)):
+        return None
+    sha = validate_sha(ref)
+    oid, why = _resolve_commit(sha)
+    if oid is None:
+        raise ShaError(f"claim ref {sha!r}: {why}; nothing was recorded")
+    return sha, oid
+
+
 def _tracking_ref_oid() -> tuple[str | None, str]:
     """(current OID of REMOTE_REF, error). No fetch time is derived."""
     code, oid, err = _run(["rev-parse", "--verify", "--quiet", REMOTE_REF])

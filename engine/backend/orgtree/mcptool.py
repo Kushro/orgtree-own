@@ -367,17 +367,21 @@ TOOLS: list[dict[str, Any]] = [
             "update. `evidence` (kind note|link|file|commit|log, ref, note; "
             "`items` for a batch; max 50, refused not truncated). `claim` — a "
             "delivery stage implemented|committed|pushed|deployed|in_build, "
-            "with a sha where git-checkable. "
+            "with an existing commit sha where git-checkable; put "
+            "`git ls-remote origin refs/heads/<branch>` output for the "
+            "integration branch in the claim note. "
             + _WORK_VERIFY_SENTENCE
             + "`receipt` — a check with backend-captured provenance (candidate, "
             "checkout, command, execution, result) bound to the commit and a "
             "tree fingerprint, so dirty trees, half-applied rebases and stale "
-            "logs are disclosed. `rangediff` — records all four endpoints of a "
+            "logs are disclosed. Returns key fields and a receipt id by "
+            "default; `projection=full` returns full detail. `rangediff` — records all four endpoints of a "
             "rebase comparison. `receipts` — read them back with a staleness "
             "note computed now. `artifact` — record a file as immutable "
             "evidence; scope `named` limits it to you plus agents you `grant` "
             "it to (one file each; `revoke` ends it); `artifact_read` reads "
-            "one. `finding` — raise a defect with a citable id; `dispose` "
+            "one. `finding` — raise a defect with a REQUIRED title and a "
+            "citable id; returns {finding, rev}. `dispose` "
             "records the decision (fixed|rejected|deferred|duplicate + reason), "
             "keeping earlier ones. `check` — mark acceptance condition `index` "
             "met with evidence_ref (`checks` = atomic batch). `accept`, or "
@@ -457,14 +461,16 @@ TOOLS: list[dict[str, Any]] = [
                                                                  "list default), `compact` (adds "
                                                                  "description and acceptance) or `full` "
                                                                  "(everything; get default). What is left "
-                                                                 "out is declared in `omissions_how`")},
+                                                                 "out is declared in `omissions_how`. "
+                                                                 "receipt: summary by default; full "
+                                                                 "returns complete provenance")},
                 "fields": {"type": "array", "items": {"type": "string"}, "description": ("list/get: return ONLY these fields per "
                                                                                          "item (list or comma-separated); `slug` "
                                                                                          "is always included. Unknown names are "
                                                                                          "refused with the valid list")},
                 "compact": {"type": "boolean", "description": ("list/get: shorthand for "
                                                                "projection=compact")},
-                "title": {"type": "string", "description": "create/update: short concrete title." + _cap("title")},
+                "title": {"type": "string", "description": "create/update: short concrete title. finding: REQUIRED defect title." + _cap("title")},
                 "objective": {"type": "string", "description": "create (REQUIRED) / update: the item's description and authoritative "
                               "standalone scope — first paragraph the PROBLEM then the "
                               "solution; later paragraphs every other requirement and "
