@@ -8,6 +8,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { DeskChat } from '../src/canvas/desk'
 import { DeskDogsProvider } from '../src/canvas/deskdogs'
+import { AUDIENCE_FOLD_LIMIT } from '../src/canvas/mail'
 import { resetConvos } from '../src/convo'
 import type { CanvasNode } from '../src/canvas/shared'
 import type { OpResult, Watchdog } from '../src/types'
@@ -74,4 +75,40 @@ test('an agent with dogs but no reports still gets the row; one with neither get
   await inAct(async () => { await flush(4) })
   assert.equal(view.el.querySelector('.desk-nav'), null, 'no dogs and no reports: no row at all')
   await view.unmount()
+})
+
+test('many jump cards fold behind one counted button; opening it lists every card and they still work', async (t) => {
+  useFakeClock()
+  installFetch(new FakeServer())
+  t.after(() => { resetConvos(); realClock() })
+  const kids = Array.from({ length: AUDIENCE_FOLD_LIMIT - 2 }, (_, i) => node('kid' + i))
+  const me = node('lead', kids)
+  const opened: string[] = []
+  const jumped: string[] = []
+  const view = await desk(me, [dog('w1', 'lead', 'a'), dog('w2', 'lead', 'b')], opened, (id) => jumped.push(id))
+  t.after(() => view.unmount())
+  await inAct(async () => { await flush(4) })
+  const row = view.el.querySelector('.desk-nav')!
+  const fold = row.querySelector<HTMLElement>('[data-audience-fold]')
+  assert.ok(fold, 'the fold button shows at the threshold')
+  assert.match(fold!.textContent ?? '', new RegExp(`${AUDIENCE_FOLD_LIMIT} jump cards`))
+  assert.equal(row.querySelectorAll('.desk-nav-chip').length, 0, 'no card is visible while folded')
+  await inAct(async () => { fold!.click() })
+  assert.equal(row.querySelectorAll('.desk-nav-chip').length, AUDIENCE_FOLD_LIMIT, 'every card is listed')
+  await inAct(async () => { row.querySelectorAll<HTMLElement>('.desk-nav-chip')[0]!.click() })
+  assert.deepEqual(jumped, ['kid0'])
+  await inAct(async () => { row.querySelector<HTMLElement>('.desk-dog-chip')!.click() })
+  assert.deepEqual(opened, ['w1'])
+})
+
+test('below the threshold the jump cards show unfolded', async (t) => {
+  useFakeClock()
+  installFetch(new FakeServer())
+  t.after(() => { resetConvos(); realClock() })
+  const me = node('lead', [node('kid')])
+  const view = await desk(me, [dog('w1', 'lead', 'a')], [], () => {})
+  t.after(() => view.unmount())
+  await inAct(async () => { await flush(4) })
+  assert.equal(view.el.querySelector('[data-audience-fold]'), null)
+  assert.equal(view.el.querySelectorAll('.desk-nav .desk-nav-chip').length, 2)
 })

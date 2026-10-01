@@ -69,7 +69,7 @@ import type {
   ActivityInfo, CanvasNode, LiveRow, MailLinkFn, OpFn, WorkLinkFn,
 } from './shared'
 import { ConfirmModal, PilePicker } from './modals'
-import { InboxView, RetiredFold } from './mail'
+import { AudienceFold, InboxView, RetiredFold } from './mail'
 import { AskCard } from './asks'
 import { useWorkItems } from './useworkitems'
 import { AgentDocketView, actionableAssignedCount, agentItems } from './docket'
@@ -3854,7 +3854,16 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
         if (!reports.length && !deskDogs) return null
         return (
           <div className="desk-nav">
-            {alive.map((c) => <NavChip key={c.id} n={c} dir="down" onJump={jump} />)}
+            <AudienceFold label="jump cards"
+              ids={[...alive.map((c) => 'n:' + c.id), ...(deskDogs?.dogs ?? []).map((w) => 'd:' + w.id)]}
+              render={(k) => {
+                if (k.startsWith('n:')) {
+                  const c = alive.find((x) => x.id === k.slice(2))!
+                  return <NavChip key={k} n={c} dir="down" onJump={jump} />
+                }
+                const w = deskDogs!.dogs.find((x) => x.id === k.slice(2))!
+                return <DogChip key={k} dog={w} onOpen={deskDogs!.open} />
+              }} />
             {hideRetired && retired.length > 0 && <>
               <button className="desk-nav-chip desk-retired-token" onClick={() => setRetiredMenuOpen(true)}>
                 {retired.length} retired
@@ -3875,7 +3884,6 @@ function DeskChatInner({ node: baseNode, map, op, slug, toast, onLineage: lineag
             )}
             {!hideRetired && showRetired && retired.map((c) =>
                 <NavChip key={c.id} n={c} dir="down" onJump={jump} />)}
-            {deskDogs?.dogs.map((w) => <DogChip key={'dog:' + w.id} dog={w} onOpen={deskDogs.open} />)}
           </div>
         )
       })()}
