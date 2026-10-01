@@ -223,7 +223,7 @@ test('a newly arrived entry never replaces the reader\'s selected entry', async 
   } finally { await v.unmount() }
 })
 
-test('when a selected entry resolves the top remaining entry opens, and later arrivals fill an empty queue', async () => {
+test('when a selected entry resolves the entry below it opens (above if it was last), and later arrivals fill an empty queue', async () => {
   localStorage.clear()
   installServer({ items: [flagged, { ...flagged, slug: 'middle', title: 'Middle' },
     { ...flagged, slug: 'last', title: 'Last' }] })
@@ -234,7 +234,10 @@ test('when a selected entry resolves the top remaining entry opens, and later ar
     await inAct(() => rowEl(v.el, initial[1]!)!.click())
     server.items = server.items.filter(i => 'ticket:' + i.slug !== initial[1])
     await repoll()
-    assert.equal(selectedKey(v.el), initial[0], 'select top, not the removed row\'s following neighbour')
+    assert.equal(selectedKey(v.el), initial[2], 'the entry that was below the removed one')
+    server.items = server.items.filter(i => 'ticket:' + i.slug !== initial[2])
+    await repoll()
+    assert.equal(selectedKey(v.el), initial[0], 'it was the last, so the one above')
     server.items = []
     await repoll()
     assert.equal(selectedKey(v.el), null)
@@ -245,6 +248,24 @@ test('when a selected entry resolves the top remaining entry opens, and later ar
     server.items = [flagged]
     await repoll()
     assert.equal(selectedKey(v.el), 'ticket:cutover', 'answered question releases selection too')
+  } finally { await v.unmount() }
+})
+
+test('removing an unselected entry leaves the selection where it is', async () => {
+  localStorage.clear()
+  installServer({ items: [flagged, { ...flagged, slug: 'middle', title: 'Middle' },
+    { ...flagged, slug: 'last', title: 'Last' }] })
+  const v = await mountView(panel(), titles)
+  try {
+    await settle()
+    const keys = [...v.el.querySelectorAll('[data-attn-row]')].map(e => e.getAttribute('data-attn-row')!)
+    await inAct(() => rowEl(v.el, keys[1])!.click())
+    server.items = server.items.filter(i => 'ticket:' + i.slug !== keys[0])
+    await repoll()
+    assert.equal(selectedKey(v.el), keys[1])
+    server.items = server.items.filter(i => 'ticket:' + i.slug !== keys[2])
+    await repoll()
+    assert.equal(selectedKey(v.el), keys[1])
   } finally { await v.unmount() }
 })
 

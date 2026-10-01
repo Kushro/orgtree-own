@@ -257,9 +257,28 @@ export function AttentionQueue({
   }
   // New rows fill an empty reading pane, but never replace a live selection.
   // Use the same read/retention path as a click, without moving focus or scroll.
+  // When the selected row leaves, the next one takes over: the nearest
+  // surviving row below it in the last list that still had it, else the nearest
+  // above (it was last), else the first. `listWithSel` is that last list.
+  const listWithSel = useRef<{ key: string; keys: string[] } | null>(null)
   useEffect(() => {
-    if (selected && rows.some((r) => r.key === selected)) return
-    if (rows[0]) openRow(rows[0])
+    if (selected && rows.some((r) => r.key === selected)) {
+      listWithSel.current = { key: selected, keys: rows.map((r) => r.key) }
+      return
+    }
+    const prev = listWithSel.current
+    listWithSel.current = null
+    let next: AttentionRow | undefined
+    if (selected && prev && prev.key === selected) {
+      const at = prev.keys.indexOf(selected)
+      const live = new Set(rows.map((r) => r.key))
+      const below = prev.keys.slice(at + 1).find((k) => live.has(k))
+      const above = prev.keys.slice(0, at).reverse().find((k) => live.has(k))
+      const key = below ?? above
+      next = rows.find((r) => r.key === key)
+    }
+    next ??= rows[0]
+    if (next) openRow(next)
     else if (selected !== null) setSelected(null)
   })
 
