@@ -27,7 +27,7 @@ import { useDocketWindow } from './docketwindow'
 import { usePendingAttention } from '../pending-attention'
 import { askSubmitted, useSubmittedAsks } from '../asksubmitted'
 import { dismissAttention, flaggedNow, manualNow, useDismissedAttention } from '../attndismiss'
-import type { ComponentProps, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
+import type { ComponentProps, KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject } from 'react'
 import Select from '@mui/material/Select'
 import MenuItem from '@mui/material/MenuItem'
 import type {
@@ -733,6 +733,41 @@ export function makeHaystack(): (it: WorkItem) => string {
  *
  *  Module-level so its identity is stable — handed to `nestRows` on every
  *  searching render, it must not look like a new set each time. */
+/** The search box both dockets share: input, clear button and live match count.
+ *  The count region stays mounted so assistive tech is already watching it; the
+ *  clear is a real button because the native one is not keyboard-reachable. */
+function DocketSearchBox({ searchId, query, setQuery, boxRef, onKeyDown, onClear, count }: {
+  searchId: string
+  query: string
+  setQuery: (q: string) => void
+  boxRef: RefObject<HTMLInputElement | null>
+  onKeyDown: (e: ReactKeyboardEvent<HTMLInputElement>) => void
+  onClear: () => void
+  count: string
+}) {
+  return (
+    <div className="docket-search" role="search">
+      <input ref={boxRef} type="search" className="docket-search-input"
+        id={`${searchId}-q`}
+        placeholder="Search tickets…"
+        aria-label="Search work items by title, name, description or latest progress"
+        aria-describedby={`${searchId}-n`}
+        autoComplete="off" spellCheck={false}
+        value={query} onChange={(e) => setQuery(e.target.value)}
+        onKeyDown={onKeyDown} />
+      {query !== '' && (
+        <button type="button" className="docket-search-clear"
+          aria-label="Clear search" title="Clear search (Esc)"
+          onClick={onClear}>
+          <CloseIcon fontSize="inherit" />
+        </button>
+      )}
+      <span id={`${searchId}-n`} className="dim docket-search-count"
+        role="status" aria-live="polite">{count}</span>
+    </div>
+  )
+}
+
 const NO_FOLD: ReadonlySet<string> = new Set<string>()
 
 /** ⚠ ONLY A MANUAL FLAG MAKES A TICKET AN ATTENTION ROW (user 2026-09-30: a
@@ -1302,39 +1337,9 @@ export function DocketModal({ slug, toast, close, tree, onFocusAgent,
               `aria-label`, because the box has no visible <label>: without one
               it announces as an unlabelled text field, and the placeholder is
               not a label (it disappears the moment anything is typed). */}
-          <div className="docket-search" role="search">
-            <input ref={searchBox} type="search" className="docket-search-input"
-              id={`${searchId}-q`}
-              placeholder="Search tickets…"
-              aria-label="Search work items by title, name, description or latest progress"
-              aria-describedby={`${searchId}-n`}
-              autoComplete="off" spellCheck={false}
-              value={query} onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={onSearchKey} />
-            {/* the CLEAR ACTION. A real button rather than the native ✕ the
-                browser puts inside `type=search`: that one is not in the tab
-                order, carries no accessible name, and is absent outside
-                WebKit-derived engines — so the stylesheet hides it and this
-                takes its place. Rendered only when there is something to
-                clear, so it is never a live-looking control that does
-                nothing. */}
-            {query !== '' && (
-              <button type="button" className="docket-search-clear"
-                aria-label="Clear search" title="Clear search (Esc)"
-                onClick={clearSearch}>
-                <CloseIcon fontSize="inherit" />
-              </button>
-            )}
-            {/* ⚠ THE LIVE REGION IS ALWAYS MOUNTED, and only its TEXT comes and
-                goes. A region created at the same moment its content appears is
-                not reliably announced — the assistive tech has to be watching
-                it already. Empty when idle, so it says nothing until there is a
-                result to say. */}
-            <span id={`${searchId}-n`} className="dim docket-search-count"
-              role="status" aria-live="polite">
-              {searching ? `${rowCount} of ${searchableCount} match` : ''}
-            </span>
-          </div>
+          <DocketSearchBox searchId={searchId} query={query} setQuery={setQuery}
+            boxRef={searchBox} onKeyDown={onSearchKey} onClear={clearSearch}
+            count={searching ? `${rowCount} of ${searchableCount} match` : ''} />
           {/* user 2026-09-11: the words became the sliders glyph, and the ×
               that sat beside them is gone. That × was this modal's alone — no
               other centred surface here carries one — and it duplicated what
@@ -1716,11 +1721,23 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
   const [collapsedCategories, setCollapsedCategories] = useState<ReadonlySet<string>>(
     () => new Set<string>())
   const rows = mine ?? EMPTY_ITEMS
+  const searchId = useId()
+  const [query, setQuery] = useState('')
+  const searchBox = useRef<HTMLInputElement>(null)
+  const clearSearch = useCallback(() => { setQuery(''); searchBox.current?.focus() }, [])
+  const hay = useMemo(makeHaystack, [])
+  const terms = useMemo(() => queryTerms(query), [query])
+  const searching = terms.length > 0
+  const shownRows = useMemo(() => filterItems(rows, terms, hay), [rows, terms, hay])
   const sections = useMemo(() => buildSections(groupMode,
-    sortItems(rows.filter(it => !it.archived && it.status !== 'backlogged'), sortMode),
-    showBacklog ? sortItems(rows.filter(it => !it.archived && it.status === 'backlogged'), sortMode) : [],
-    showArchived ? sortItems(rows.filter(it => it.archived), sortMode) : [],
-    it => it.owner?.node ?? UNASSIGNED), [groupMode, rows, sortMode, showBacklog, showArchived])
+    sortItems(shownRows.filter(it => !it.archived && it.status !== 'backlogged'), sortMode),
+    showBacklog ? sortItems(shownRows.filter(it => !it.archived && it.status === 'backlogged'), sortMode) : [],
+    showArchived ? sortItems(shownRows.filter(it => it.archived), sortMode) : [],
+    it => it.owner?.node ?? UNASSIGNED), [groupMode, shownRows, sortMode, showBacklog, showArchived])
+  const rowCount = sections.reduce((n, s) => n + s.items.length, 0)
+  const searchableCount = rows.filter(it => it.archived ? showArchived
+    : it.status === 'backlogged' ? showBacklog : true).length
+  const firstRow = sections[0] ? nestRows(sections[0].items, searching ? NO_FOLD : new Set<string>())[0]?.item.slug : undefined
   const byName = useMemo(
     () => new Map(rows.map((it) => [it.slug, it])), [rows])
   const refIndex = useMemo(
@@ -1804,13 +1821,25 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
   }, [slug, toast, onChanged])
   const pickRow = (id: string) => setSelId(selId === id ? null : id)
   const windowSections = useMemo(() => sections.map(section => ({ ...section,
-    rows: nestRows(section.items, collapsed),
-    folded: Boolean(section.heading && collapsedCategories.has(section.key)),
-  })), [sections, collapsed, collapsedCategories])
+    rows: nestRows(section.items, searching ? NO_FOLD : collapsed),
+    folded: Boolean(section.heading && !searching && collapsedCategories.has(section.key)),
+  })), [sections, searching, collapsed, collapsedCategories])
   const rowWindow = useDocketWindow(windowSections, selId)
+  const onSearchKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape') {
+      if (!query) return
+      e.preventDefault(); e.stopPropagation(); clearSearch()
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      if (firstRow) setSelId(firstRow)
+    }
+  }
   const ageTick = Math.floor(Date.now() / 60_000)
   return (
     <div className="msgs docket-modal docket-agent">
+      <DocketSearchBox searchId={searchId} query={query} setQuery={setQuery}
+        boxRef={searchBox} onKeyDown={onSearchKey} onClear={clearSearch}
+        count={searching ? `${rowCount} of ${searchableCount} match` : ''} />
       <div className="docket-filterbar">
       <label className="checkline docket-showarchived">
         <input type="checkbox" checked={showArchived}
@@ -1839,7 +1868,9 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
       {mine === null && !cur
         ? <div className="dim pad">loading…</div>
         : sections.length === 0 && !cur
-          ? <div className="dim pad">
+          ? searching
+            ? <div className="dim pad docket-nomatch">no items match “{query}”</div>
+            : <div className="dim pad">
               {emptyText ?? <>
                 no docket items are assigned to {nid} — assignment is ownership,
                 so this is everything it is responsible for
@@ -1850,7 +1881,7 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
               <div className="mailer-list" ref={rowWindow.ref} onScroll={rowWindow.onScroll}>
                 {rowWindow.before > 0 && <div aria-hidden="true" style={{ height: rowWindow.before }} />}
                 {rowWindow.windows.map(section => {
-                  const categoryFolded = Boolean(section.heading && collapsedCategories.has(section.key))
+                  const categoryFolded = Boolean(section.heading && !searching && collapsedCategories.has(section.key))
                   const rowsId = `${controlsId}-${section.key}-rows`
                   const categoryName = `${section.heading}`
                   return (
@@ -1875,7 +1906,8 @@ export function AgentDocketView({ slug, nid, mine, facts, toast, onFocusAgent,
                             org={slug} toast={toast} ageMode={sortMode} ageTick={ageTick}
                             selected={row.item.slug === selId}
                             depth={row.depth} kids={row.kids}
-                            folded={collapsed.has(row.item.slug)}
+                            folded={!searching && collapsed.has(row.item.slug)}
+                            foldLocked={searching}
                             onFold={toggleFold}
                             onClick={pickRow}
                             onDismiss={onDismiss} facts={facts}
