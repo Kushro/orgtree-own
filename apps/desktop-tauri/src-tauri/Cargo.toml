@@ -1,0 +1,25 @@
+[package]
+name = "orgtree-tauri"
+version = "0.0.1"
+description = "Orgtree desktop shell on Tauri 2 (migration spike)"
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Standalone crate: keep it out of any parent workspace.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

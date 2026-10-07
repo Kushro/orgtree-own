@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimal capabilities for the main window. The webview shows agent-written HTML and Markdown, so it gets no shell, fs or process access; native work happens in Rust.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

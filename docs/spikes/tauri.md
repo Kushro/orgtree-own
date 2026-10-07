@@ -28,4 +28,17 @@ Tarea de arranque del sistema, instalación para todos los usuarios, upgrade des
 
 ## Cómo compilar
 
-Lo completa el issue #1.
+El proyecto vive en `apps/desktop-tauri` y no reemplaza a `apps/desktop` (Electron): conviven durante el spike.
+
+Requisitos en Windows: Rust estable (MSVC), Node 22 y WebView2 (viene con Windows 11).
+
+```powershell
+cd apps/desktop-tauri
+npm ci
+npx tauri dev     # ventana de desarrollo
+npx tauri build   # instalador NSIS en src-tauri/target/release/bundle/nsis/
+```
+
+El workflow `.github/workflows/spike-tauri.yml` hace lo mismo en `windows-latest` en cada push a `spike/tauri`: compila, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-tauri-installer`.
+
+La app se instala por usuario con su propio identificador (`com.kushro.orgtree.tauri-spike`), así que no pisa una instalación de Orgtree existente.
