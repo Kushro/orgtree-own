@@ -601,10 +601,24 @@ jobs:
             $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
             $graphics.Dispose(); $bitmap.Dispose()
           }
+          # Como Windows (y el Restart Manager del instalador): WM_QUERYENDSESSION y después
+          # WM_ENDSESSION(TRUE) a TODAS las ventanas de nivel superior del proceso. tao atiende
+          # WM_ENDSESSION en su ventana oculta de eventos, no en las ventanas de la app.
           Add-Type @'
-          using System; using System.Runtime.InteropServices;
+          using System; using System.Collections.Generic; using System.Runtime.InteropServices;
           public static class Session {
-            [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+            public static string End(int pid) {
+              var wins = new List<IntPtr>();
+              EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid) wins.Add(h); return true; }, IntPtr.Zero);
+              var logoff = new IntPtr(0x80000000L); IntPtr r; int agreed = 0;
+              foreach (var h in wins) { SendMessageTimeout(h, 0x11, IntPtr.Zero, logoff, 2, 5000, out r); if (r != IntPtr.Zero) agreed++; }
+              foreach (var h in wins) { SendMessageTimeout(h, 0x16, new IntPtr(1), logoff, 2, 60000, out r); }
+              return wins.Count + " windows, " + agreed + " agreed to end the session";
+            }
           }
           '@
           # Los procesos descendientes de la app (motor, guardián, hub, PostgreSQL).
@@ -760,14 +774,7 @@ jobs:
           $onSession = {
             param($name, $p)
             $script:tree = Get-Tree $p.Id
-            $r = Get-Content $out -Raw | ConvertFrom-Json
-            $hwnd = [IntPtr][long]$r.ready.hwnd
-            $res = [IntPtr]::Zero
-            # ENDSESSION_LOGOFF; WM_QUERYENDSESSION y después WM_ENDSESSION(TRUE).
-            $q = [Session]::SendMessageTimeout($hwnd, 0x11, [IntPtr]::Zero, [IntPtr][long]2147483648, 0, 10000, [ref]$res)
-            Write-Host "WM_QUERYENDSESSION -> $q (result $res)"
-            $e = [Session]::SendMessageTimeout($hwnd, 0x16, [IntPtr]1, [IntPtr][long]2147483648, 0, 60000, [ref]$res)
-            Write-Host "WM_ENDSESSION -> $e"
+            Write-Host "Session end: $([Session]::End($p.Id))"
           }
           $session = Run-Lifecycle 'session' @('session-ready') $onSession
           if ($session) { & $check ($session.ready.page.status.state -eq 'ready' -and $session.ready.hwnd) "session run: $($session.ready | ConvertTo-Json -Compress -Depth 5)" }
@@ -909,10 +916,24 @@ jobs:
           # sesión de Windows; la app apaga su motor (Python embebido, guardián y PostgreSQL) con
           # el presupuesto de la salida antes de terminar. El instalador corre como el mismo
           # usuario que la app, como lo haría una persona que actualiza su instalación.
+          # Como Windows (y el Restart Manager del instalador): WM_QUERYENDSESSION y después
+          # WM_ENDSESSION(TRUE) a TODAS las ventanas de nivel superior del proceso. tao atiende
+          # WM_ENDSESSION en su ventana oculta de eventos, no en las ventanas de la app.
           Add-Type @'
-          using System; using System.Runtime.InteropServices;
+          using System; using System.Collections.Generic; using System.Runtime.InteropServices;
           public static class Session {
-            [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+            public static string End(int pid) {
+              var wins = new List<IntPtr>();
+              EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid) wins.Add(h); return true; }, IntPtr.Zero);
+              var logoff = new IntPtr(0x80000000L); IntPtr r; int agreed = 0;
+              foreach (var h in wins) { SendMessageTimeout(h, 0x11, IntPtr.Zero, logoff, 2, 5000, out r); if (r != IntPtr.Zero) agreed++; }
+              foreach (var h in wins) { SendMessageTimeout(h, 0x16, new IntPtr(1), logoff, 2, 60000, out r); }
+              return wins.Count + " windows, " + agreed + " agreed to end the session";
+            }
           }
           '@
           $fromDir = { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$dir\*" } | Select-Object ProcessId, Name, ExecutablePath) }
@@ -966,15 +987,11 @@ jobs:
             Start-Sleep -Seconds 2
             try { Save-Screen 'installed-after-upgrade' } catch { Write-Host "screenshot: $_" }
             $before = & $fromDir
-            $p.Refresh()
-            $hwnd = $p.MainWindowHandle
-            $res = [IntPtr]::Zero
-            $q = [Session]::SendMessageTimeout($hwnd, 0x11, [IntPtr]::Zero, [IntPtr][long]2147483648, 0, 10000, [ref]$res)
-            $e = [Session]::SendMessageTimeout($hwnd, 0x16, [IntPtr]1, [IntPtr][long]2147483648, 0, 60000, [ref]$res)
+            $sent = [Session]::End($p.Id)
             $p.WaitForExit(40000) | Out-Null
             $alive = & $waitGone $before 30
             $endExit = @(& $exitLines)[-1]
-            "- relaunched after the upgrade in $againSeconds s; session end (hwnd $hwnd, query $q): exited $($p.HasExited), exit $($endExit | ConvertTo-Json -Compress), processes before $($before.Count), left $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "- relaunched after the upgrade in $againSeconds s; session end ($sent): exited $($p.HasExited), exit $($endExit | ConvertTo-Json -Compress), processes before $($before.Count), left $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
             if (-not $p.HasExited) { $failures += 'the installed app did not exit at the end of the session' }
             if ($alive.Count) { $failures += "processes left after the session end: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')" }
             if ($endExit.path -ne 'session-end' -or $endExit.outcome -ne 'stopped' -or $endExit.enginePid -eq $upExit.enginePid) { $failures += "the installed app's session-end exit: $($endExit | ConvertTo-Json -Compress)" }
