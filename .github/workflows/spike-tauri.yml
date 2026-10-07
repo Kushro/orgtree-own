@@ -184,6 +184,7 @@ jobs:
           ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-smoke
           # Prueba de autenticación por cookie en WebView2 (src-tauri/src/probe.rs).
           ORGTREE_TAURI_PROBE: ${{ runner.temp }}\orgtree-tauri-probe.json
+          EXPECTED_APP_VERSION: ${{ steps.updater.outputs.version }}
         run: |
           $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
           if (-not $exe) { throw "orgtree-tauri.exe not found" }
@@ -246,7 +247,7 @@ jobs:
           foreach ($check in 'bridge', 'rendered', 'orgListed', 'agentShown') {
             if ($sh.$check -ne $true) { $failures += "shell.$check was $($sh.$check)" }
           }
-          if ($sh.version -ne '${{ steps.updater.outputs.version }}') { $failures += "getAppVersion via invoke: $($sh.version)" }
+          if ($sh.version -ne $env:EXPECTED_APP_VERSION) { $failures += "getAppVersion via invoke: $($sh.version)" }
           if ($sh.status -ne 'ready') { $failures += "getStatus via invoke: $($sh.status)" }
           if ($sh.preferences -ne 'string') { $failures += "getPreferences via invoke: $($sh.preferences)" }
           # #23: el .exe de target/ no es una copia instalada, así que no tiene updater.
