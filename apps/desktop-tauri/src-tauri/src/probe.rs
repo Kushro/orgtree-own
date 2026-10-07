@@ -21,6 +21,14 @@
 //!   cuadros de un scroll de punta a punta; después abre el desk en una ventana
 //!   aparte con su botón real y verifica tipografía y borrador.
 //!
+//! - #21, integraciones (en la etapa de reconexión): harnesses, login de
+//!   proveedores con un CLI falso, notificaciones por tipo y por foco,
+//!   `syncNotifications`, el clic, el parpadeo de la barra de tareas y las
+//!   validaciones de `revealFile`. Al final, cuando el CI lo pide con el archivo
+//!   `<salida>.late-go`, `probe_late.js` abre de verdad el Explorador
+//!   (`revealFile`, `openCharterFolder`) y el navegador (`openHarnessLink`):
+//!   va último porque esas ventanas taparían la prueba de arrastre.
+//!
 //! El script devuelve el resultado en `document.title`, sin IPC. Después Rust
 //! pide cerrar la ventana dueña y anota qué pasó con el popout (etapa
 //! `owner_close`), y luego mata el motor como si se cayera: el shell lo
@@ -37,6 +45,8 @@ pub const PAGE_PREFIX: &str = "orgtree-probe:";
 pub const CLOSE_PREFIX: &str = "orgtree-probe-closed:";
 pub const RECONNECT_PREFIX: &str = "orgtree-probe-reconnected:";
 pub const PAUSE_PREFIX: &str = "orgtree-probe-pause:";
+pub const CLICK_PREFIX: &str = "orgtree-probe-click:";
+pub const LATE_PREFIX: &str = "orgtree-probe-late:";
 
 pub struct Probe {
     out: PathBuf,
@@ -95,7 +105,10 @@ impl Probe {
     /// la primera vez, la de reconexión después de la caída del motor.
     pub fn script_for_load(&self) -> String {
         if self.reconnecting.load(std::sync::atomic::Ordering::SeqCst) {
-            include_str!("probe_reconnect.js").replace("__PREFIX__", RECONNECT_PREFIX)
+            include_str!("probe_reconnect.js")
+                .replace("__PREFIX__", RECONNECT_PREFIX)
+                .replace("__CLICK__", CLICK_PREFIX)
+                .replace("__MISSING__", &json_path(&self.sibling("no-such-file.txt")))
         } else {
             self.script()
         }
@@ -183,6 +196,13 @@ impl Probe {
         true
     }
 
+    /// `<salida>.<nombre>`: los archivos auxiliares de la prueba.
+    pub fn sibling(&self, name: &str) -> PathBuf {
+        let mut path = self.out.clone().into_os_string();
+        path.push(format!(".{name}"));
+        PathBuf::from(path)
+    }
+
     /// Un evento fuera de la página (segunda instancia): queda en
     /// `<salida>.<nombre>` como JSON.
     pub fn record_marker(&self, name: &str, value: serde_json::Value) {
@@ -198,4 +218,34 @@ impl Probe {
         let crashed = *self.crashed_pid.lock().unwrap();
         self.write(Some(serde_json::json!({ "shell": shell, "crashed_pid": crashed, "page": page_side })));
     }
+}
+
+fn json_path(path: &std::path::Path) -> String {
+    serde_json::to_string(&path.to_string_lossy()).unwrap_or_default()
+}
+
+/// Etapa final (#21), cuando el CI crea `<salida>.late-go`: `probe_late.js`
+/// selecciona en el Explorador un `.cmd` que, si se ejecutara, dejaría
+/// `<salida>.reveal-ran`; abre la carpeta de charters y el enlace de un harness.
+pub fn watch_late(app: tauri::AppHandle) {
+    use tauri::Manager;
+    let Some((go, target, ran)) = app.state::<crate::Shell>().probe.lock().unwrap().as_ref().map(|probe| {
+        (probe.sibling("late-go"), probe.sibling("reveal-target.cmd"), probe.sibling("reveal-ran"))
+    }) else {
+        return;
+    };
+    let script = format!("@echo off\r\necho ran> \"{}\"\r\n", ran.display());
+    let _ = std::fs::write(&target, script);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if std::fs::remove_file(&go).is_err() {
+            continue;
+        }
+        if let Some(window) = crate::main_window(&app) {
+            let _ = window.eval(
+                include_str!("probe_late.js").replace("__PREFIX__", LATE_PREFIX).replace("__TARGET__", &json_path(&target)),
+            );
+        }
+        return;
+    });
 }

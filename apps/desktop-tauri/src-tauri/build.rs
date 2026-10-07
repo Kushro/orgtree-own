@@ -14,6 +14,15 @@ const COMMANDS: &[&str] = &[
     "desktop_window_close",
     "desktop_harnesses",
     "desktop_notify",
+    "desktop_sync_notifications",
+    "desktop_pending_attention",
+    "desktop_open_harness",
+    "desktop_reveal_file",
+    "desktop_open_charter_folder",
+    "desktop_provider_login_start",
+    "desktop_provider_login_status",
+    "desktop_provider_login_code",
+    "desktop_provider_login_cancel",
 ];
 
 fn main() {

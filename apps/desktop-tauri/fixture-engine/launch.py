@@ -14,6 +14,12 @@ no existen. Sigue la receta de ``tests/test_engine_http.py``.
 para probar el desk en vivo sin un proveedor real, y
 ``ORGTREE_FIXTURE_MESSAGES=N`` agrega N mensajes al historial para medir el
 scroll de una conversación larga.
+
+``PUT /api/fixture/notices`` (solo en este fixture) reemplaza una lista de
+avisos sintéticos que ``/api/desktop/notifications`` suma a los reales: la
+prueba de integraciones (#21) los usa para que el renderer real pida
+notificaciones nativas y el parpadeo de la barra de tareas, como haría con una
+pregunta de un agente.
 """
 
 from __future__ import annotations
@@ -117,12 +123,41 @@ def _live_frames() -> None:
         time.sleep(1.5)
 
 
+_FIXTURE_NOTICES: list[dict] = []
+_NOTICE_KINDS = {"question", "terminal-failure", "urgent-mail", "work-attention", "routine", "document", "agent-frozen"}
+
+
+def _install_fixture_notices() -> None:
+    from fastapi import HTTPException
+    from orgtree import api, desktop_notifications
+    original = desktop_notifications._all_rows
+    desktop_notifications._all_rows = lambda: original() + [dict(row) for row in _FIXTURE_NOTICES]
+
+    def put_notices(body: dict) -> dict:
+        rows = body.get("notices")
+        if not isinstance(rows, list) or len(rows) > 50:
+            raise HTTPException(422, "notices must be a short list")
+        clean = []
+        for row in rows:
+            if (not isinstance(row, dict) or row.get("org") != ORG or row.get("kind") not in _NOTICE_KINDS
+                    or not all(isinstance(row.get(k), str) and row.get(k) for k in ("id", "title", "body"))):
+                raise HTTPException(422, "invalid notice")
+            clean.append({k: row[k] for k in ("id", "org", "kind", "title", "body", "agent", "source_id") if k in row})
+        _FIXTURE_NOTICES[:] = clean
+        return {"count": len(clean)}
+
+    api.app.add_api_route("/api/fixture/notices", put_notices, methods=["PUT"])
+    # Antes que cualquier ruta comodín de la app.
+    api.app.router.routes.insert(0, api.app.router.routes.pop())
+
+
 original_load_app = launch.load_app
 
 
 def seeded_load_app():
     result = original_load_app()
     _stub_providers()
+    _install_fixture_notices()
     _seed()
     if os.environ.get("ORGTREE_FIXTURE_LIVE") == "1":
         threading.Thread(target=_live_frames, name="fixture-live", daemon=True).start()

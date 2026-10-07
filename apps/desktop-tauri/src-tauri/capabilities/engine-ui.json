@@ -23,6 +23,15 @@
     "allow-desktop-window-toggle-maximize",
     "allow-desktop-window-close",
     "allow-desktop-harnesses",
-    "allow-desktop-notify"
+    "allow-desktop-notify",
+    "allow-desktop-sync-notifications",
+    "allow-desktop-pending-attention",
+    "allow-desktop-open-harness",
+    "allow-desktop-reveal-file",
+    "allow-desktop-open-charter-folder",
+    "allow-desktop-provider-login-start",
+    "allow-desktop-provider-login-status",
+    "allow-desktop-provider-login-code",
+    "allow-desktop-provider-login-cancel"
   ]
 }

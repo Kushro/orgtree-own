@@ -2,6 +2,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod desktop;
+mod files;
+mod harnesses;
+mod login;
+mod notifications;
 mod probe;
 
 use orgtree_engine_host::packaged::PackagedRuntime;
@@ -27,8 +31,15 @@ struct Shell {
     options: Mutex<Option<EngineOptions>>,
     restarts: AtomicU32,
     quitting: AtomicBool,
-    /// Notificaciones ya mostradas (`org` + `id`), como `NotificationGate`.
-    notified: Mutex<std::collections::HashSet<String>>,
+    /// Notificaciones nativas (#21): el filtro, la deduplicación y los toasts pendientes.
+    notifications: notifications::Notifications,
+    /// El parpadeo de la barra de tareas (`setPendingAttention`).
+    attention: Mutex<notifications::Attention>,
+    /// Los logins de proveedores en curso.
+    logins: login::Logins,
+    /// Para la prueba: lo que decidió el shell en cada `notify`,
+    /// `syncNotifications` y `setPendingAttention` (`<salida>.<nombre>`).
+    probe_logs: Mutex<std::collections::HashMap<&'static str, Vec<serde_json::Value>>>,
     /// Cómo se lanzó el motor (`packaged` o `development`) y con qué raíz.
     launch: Mutex<serde_json::Value>,
     /// Prueba chica del instalador (`ORGTREE_TAURI_INSTALL_PROBE`).
@@ -46,7 +57,10 @@ impl Default for Shell {
             options: Mutex::new(None),
             restarts: AtomicU32::new(0),
             quitting: AtomicBool::new(false),
-            notified: Mutex::new(Default::default()),
+            notifications: Default::default(),
+            attention: Mutex::new(Default::default()),
+            logins: Default::default(),
+            probe_logs: Mutex::new(Default::default()),
             launch: Mutex::new(serde_json::Value::Null),
             install_probe: std::env::var_os("ORGTREE_TAURI_INSTALL_PROBE").filter(|v| !v.is_empty()).map(PathBuf::from),
         }
@@ -485,7 +499,7 @@ fn exit_on_close(app: &tauri::AppHandle) -> bool {
     app.state::<Shell>().preferences.lock().unwrap().get("exitOnClose") == Some(&serde_json::Value::Bool(true))
 }
 
-fn show_main(app: &tauri::AppHandle) {
+pub(crate) fn show_main(app: &tauri::AppHandle) {
     if let Some(window) = main_window(app) {
         let _ = window.show();
         let _ = window.unminimize();
@@ -493,14 +507,26 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
-/// Ícono en la bandeja (#7) con el menú mínimo: abrir y salir. Un clic en el
-/// ícono también abre la ventana.
+/// Ícono en la bandeja (#7) con el menú: abrir, los harnesses (#21) y salir.
+/// Un clic en el ícono también abre la ventana.
+///
+/// "Harness setup" es el submenú de Electron: cada harness con su estado
+/// (detectado o no) y su enlace oficial de instalación.
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem};
+    use tauri::menu::{Menu, MenuItem, Submenu};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     let open = MenuItem::with_id(app, "open", "Abrir Orgtree", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let harness_items = harnesses::detect()
+        .iter()
+        .map(|h| {
+            let state = if h.detected() { "detected" } else { "not detected" };
+            MenuItem::with_id(app, format!("harness:{}", h.id), format!("{}: {state} - official setup", h.id), true, None::<&str>)
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let harness_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = harness_items.iter().map(|i| i as _).collect();
+    let setup = Submenu::with_items(app, "Harness setup", true, &harness_refs)?;
+    let menu = Menu::with_items(app, &[&open, &setup, &quit])?;
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("Orgtree (Tauri spike)")
         .menu(&menu)
@@ -508,7 +534,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main(app),
             "quit" => app.exit(0),
-            _ => {}
+            id => {
+                if let Some(url) = id.strip_prefix("harness:").and_then(harnesses::link) {
+                    let _ = harnesses::open_external(url);
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
@@ -578,7 +608,16 @@ fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
     let state = app.state::<Shell>();
     let probe = state.probe.lock().unwrap();
     let Some(probe) = probe.as_ref() else { return };
-    if title.starts_with(probe::PAUSE_PREFIX) {
+    if let Some(json) = title.strip_prefix(probe::CLICK_PREFIX) {
+        // #21: el clic en un toast, simulado por la misma función que llama su
+        // handler `Activated` (el CI no puede hacer clic en el centro de notificaciones).
+        let target: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+        let tag = state.notifications.tag_of(target["org"].as_str().unwrap_or(""), target["id"].as_str().unwrap_or(""));
+        let clicked = tag.is_some_and(|tag| desktop::notification_activated(app, &tag));
+        probe.record_marker("click", serde_json::json!({ "clicked": clicked, "target": target }));
+    } else if let Some(json) = title.strip_prefix(probe::LATE_PREFIX) {
+        probe.record_marker("late", serde_json::from_str(json).unwrap_or_default());
+    } else if title.starts_with(probe::PAUSE_PREFIX) {
         probe.record_pause(title);
     } else if probe.record_page(title, serde_json::json!({ "popouts": popout_labels(app, None).len(), "windows": popout_report(app) })) {
         probe_owner_close(app.clone());
@@ -613,6 +652,13 @@ fn probe_engine_crash(app: tauri::AppHandle) {
         }
         if let Some(window) = main_window(&app) {
             let _ = window.show();
+        }
+        // El popout de la primitiva ya cumplió (etapa de cierre). Se cierra para
+        // que no se lleve el foco en la prueba de notificaciones (#21).
+        for label in popout_labels(&app, None) {
+            if let Some(popout) = app.get_webview_window(&label) {
+                let _ = popout.destroy();
+            }
         }
         let old_pid = state.engine.lock().unwrap().as_mut().and_then(|engine| {
             let pid = engine.pid();
@@ -652,6 +698,19 @@ fn native_report(app: &tauri::AppHandle, window: &WebviewWindow) -> serde_json::
     })
 }
 
+/// Para la prueba: agrega una entrada al registro `<salida>.<nombre>` (solo
+/// con `ORGTREE_TAURI_PROBE`). Así el CI ve lo que hizo el renderer real con
+/// el puente: qué notificaciones pidió, cuáles se mostraron y por qué no.
+pub(crate) fn record_log(app: &tauri::AppHandle, name: &'static str, entry: serde_json::Value) {
+    let state = app.state::<Shell>();
+    let probe = state.probe.lock().unwrap();
+    let Some(probe) = probe.as_ref() else { return };
+    let mut logs = state.probe_logs.lock().unwrap();
+    let log = logs.entry(name).or_default();
+    log.push(entry);
+    probe.record_marker(name, serde_json::Value::Array(log.clone()));
+}
+
 fn main() {
     let app = tauri::Builder::default()
         // Primero: una segunda ejecución termina acá, antes de crear ventanas o motor.
@@ -672,6 +731,15 @@ fn main() {
             desktop::desktop_window_close,
             desktop::desktop_harnesses,
             desktop::desktop_notify,
+            desktop::desktop_sync_notifications,
+            desktop::desktop_pending_attention,
+            desktop::desktop_open_harness,
+            desktop::desktop_reveal_file,
+            desktop::desktop_open_charter_folder,
+            desktop::desktop_provider_login_start,
+            desktop::desktop_provider_login_status,
+            desktop::desktop_provider_login_code,
+            desktop::desktop_provider_login_cancel,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -694,6 +762,7 @@ fn main() {
                 .build()?;
             build_tray(&handle)?;
             reap_closed_popouts(handle.clone());
+            probe::watch_late(handle.clone());
             start_engine(handle);
             Ok(())
         })
@@ -702,6 +771,8 @@ fn main() {
     app.run(|app, event| {
         if let RunEvent::Exit = event {
             app.state::<Shell>().quitting.store(true, Ordering::SeqCst);
+            // Ningún login de proveedor queda vivo después de la app (como el `quit` de Electron).
+            app.state::<Shell>().logins.cancel_all();
             if let Some(engine) = app.state::<Shell>().engine.lock().unwrap().take() {
                 let _ = engine.stop();
             }

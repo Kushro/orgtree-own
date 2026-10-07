@@ -44,7 +44,7 @@
       try { out.version = await bridge.getAppVersion() } catch (e) { out.version = 'error:' + e }
       try { out.status = (await bridge.getStatus()).state } catch (e) { out.status = 'error:' + e }
       try { out.preferences = typeof (await bridge.getPreferences()).visualTheme } catch (e) { out.preferences = 'error:' + e }
-      out.outside = await bridge.openHarnessLink('claude').then(() => 'resolved', e => String(e && e.message || e));
+      out.outside = await bridge.installUpdate().then(() => 'resolved', e => String(e && e.message || e));
       out.requestOrg = typeof bridge.requestOrg; // omitido a propósito: el renderer abre en la misma ventana
     }
     out.iframeBridge = await new Promise(done => {

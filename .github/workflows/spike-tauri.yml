@@ -117,7 +117,7 @@ jobs:
         id: build
         run: npx tauri build --ci --config src-tauri/tauri.bundle.conf.json
 
-      - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery, native window)
+      - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery, native window, integrations)
         shell: pwsh
         env:
           ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -133,6 +133,15 @@ jobs:
         run: |
           $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
           if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          # #21: un `codex` falso en el PATH de la app (el runner no trae harnesses). Repite
+          # sus argumentos, avisa si recibió el token o la variable de la prueba (el shell
+          # las quita) y tarda 30 s: si el login cancelado no mata el árbol, deja finished.txt.
+          $fake = Join-Path $env:RUNNER_TEMP 'fake-harness'
+          New-Item -ItemType Directory -Force $fake | Out-Null
+          Set-Content -Path (Join-Path $fake 'codex.cmd') -Encoding ascii -Value @(
+            '@echo off', 'echo fake-codex %*', 'if defined ORGTREE_V2_TOKEN echo token-leak',
+            'if defined ORGTREE_TAURI_PROBE echo probe-leak', 'ping -n 30 127.0.0.1 >nul', 'echo done> "%~dp0finished.txt"')
+          $env:PATH = "$fake;$env:PATH"
           $p = Start-Process -FilePath $exe.FullName -PassThru
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           function Save-Screen($name) {
@@ -145,13 +154,16 @@ jobs:
             $graphics.Dispose(); $bitmap.Dispose()
           }
           $deadline = (Get-Date).AddSeconds(300)
-          $shot = $false
+          $shot = $false; $taskbarShot = $false
           # El reporte final incluye la reconexión tras la caída del motor (#5).
           while (-not ((Test-Path $env:ORGTREE_TAURI_PROBE) -and (Select-String -Path $env:ORGTREE_TAURI_PROBE -Pattern '"reconnect"' -Quiet)) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
             # captura del desk con la conversación larga: la prueba deja un marcador y espera 3 s
             if (-not $shot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).desk")) { try { Save-Screen 'desk' } catch { Write-Host "screenshot: $_" }; $shot = $true }
+            # #21: la ventana minimizada con el botón de la barra de tareas parpadeando y el toast
+            if (-not $taskbarShot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).taskbar")) { Start-Sleep -Milliseconds 700; try { Save-Screen 'taskbar-attention' } catch { Write-Host "screenshot: $_" }; $taskbarShot = $true }
             Start-Sleep -Milliseconds 500; $p.Refresh()
           }
+          $reported = Get-Date
           try { Save-Screen 'after-reconnect' } catch { Write-Host "screenshot: $_" }
           if ($p.HasExited) {
             if (Test-Path $env:ORGTREE_TAURI_PROBE) { Write-Host "Partial probe: $(Get-Content $env:ORGTREE_TAURI_PROBE -Raw)" }
@@ -235,8 +247,51 @@ jobs:
           foreach ($check in 'maximized', 'maximizedIcon', 'restored') {
             if ($nat.$check -ne $true) { $failures += "native.$check was $($nat.$check)" }
           }
-          if ($nat.notify -ne $true) { $failures += "notify via invoke: $($nat.notify)" }
-          if ($nat.notifyAgain -ne $false) { $failures += "the same notification was shown twice: $($nat.notifyAgain)" }
+          # #21: harnesses, login, notificaciones, barra de tareas y validaciones de archivos
+          $it = $rc.page.integrations
+          $read = { param($name) $f = "$($env:ORGTREE_TAURI_PROBE).$name"; if (Test-Path $f) { Get-Content $f -Raw | ConvertFrom-Json } else { $null } }
+          $h = @($it.harnesses)
+          if ($h.Count -ne 3 -or @($h | Where-Object { $_.id -notin 'claude', 'codex', 'antigravity' -or $_.url -notlike 'https://*' -or $_.detected -isnot [bool] }).Count) { $failures += "getHarnesses shape: $($it.harnesses | ConvertTo-Json -Compress)" }
+          if (-not @($h | Where-Object { $_.id -eq 'codex' -and $_.detected }).Count) { $failures += 'the fake codex on PATH was not detected' }
+          if ($it.harnessBadId -notlike '*Unknown harness*') { $failures += "openHarnessLink accepted a URL: $($it.harnessBadId)" }
+          if ($it.revealRelative.ok -ne $false -or $it.revealRelative.error -notlike 'Not an absolute path*') { $failures += "revealFile relative: $($it.revealRelative | ConvertTo-Json -Compress)" }
+          if ($it.revealMissing.ok -ne $false -or $it.revealMissing.error -notlike 'No such file*') { $failures += "revealFile missing: $($it.revealMissing | ConvertTo-Json -Compress)" }
+          if ($it.revealDotted.ok -ne $false -or $it.revealDotted.error -notlike 'Not a normalized path*') { $failures += "revealFile with ..: $($it.revealDotted | ConvertTo-Json -Compress)" }
+          $lg = $it.login
+          if (-not $lg.missingId) { $failures += 'no undetected harness to test the login refusal' }
+          elseif ($lg.missing.phase -ne 'error' -or $lg.missing.error -ne 'not-installed' -or $lg.missing.started -ne $false) { $failures += "login of an undetected $($lg.missingId): $($lg.missing | ConvertTo-Json -Compress)" }
+          if ($lg.badProvider -notlike '*Unknown login provider*') { $failures += "login with a made-up provider: $($lg.badProvider)" }
+          if ($lg.idle.phase -ne 'idle') { $failures += "login status before starting: $($lg.idle | ConvertTo-Json -Compress)" }
+          if ($lg.start.started -ne $true -or $lg.start.phase -ne 'starting') { $failures += "codex login did not start: $($lg.start | ConvertTo-Json -Compress)" }
+          if ($lg.again.started -ne $false) { $failures += "a second codex login started: $($lg.again | ConvertTo-Json -Compress)" }
+          if ($lg.running.output -notlike '*fake-codex login*') { $failures += "the codex CLI did not run with its fixed arguments: $($lg.running | ConvertTo-Json -Compress)" }
+          if ($lg.running.output -like '*token-leak*' -or $lg.running.output -like '*probe-leak*') { $failures += "the login child inherited scrubbed variables: $($lg.running.output)" }
+          if ($lg.code -notlike '*does not use a pasted code*') { $failures += "codex accepted a pasted code: $($lg.code)" }
+          if ($lg.cancel.phase -ne 'idle' -or $lg.after.phase -ne 'idle') { $failures += "login cancel: $($lg.cancel | ConvertTo-Json -Compress) then $($lg.after | ConvertTo-Json -Compress)" }
+          $nt = $it.notify
+          if ((@($nt.prefKeys) -join ',') -ne 'boolean,boolean,boolean') { $failures += "notification preferences: $($nt.prefKeys -join ',')" }
+          foreach ($k in 'publish1', 'publish2', 'publish3', 'publish4') { if ($nt.$k -ne 200) { $failures += "fixture notices ${k}: $($nt.$k)" } }
+          $nlog = @(& $read 'notify'); $slog = @(& $read 'sync'); $alog = @(& $read 'attention'); $click = & $read 'click'
+          $decisions = { param($id) @($nlog | Where-Object { $_.id -eq $id } | ForEach-Object { $_.decision }) }
+          $q1 = & $decisions 'fixture-q1'; $r1 = & $decisions 'fixture-r1'; $q2 = & $decisions 'fixture-q2'
+          if ($q1[0] -ne 'shown') { $failures += "the renderer's question was not shown without focus: $($q1 -join ',')" }
+          if ($q1 -notcontains 'duplicate') { $failures += "a repeated notification was not deduplicated: $($q1 -join ',')" }
+          if ($r1[0] -ne 'kind' -or $r1 -notcontains 'shown') { $failures += "routine mail by preference (off, then on): $($r1 -join ',')" }
+          if ($nt.directRoutine -ne $false -or $nt.directDuplicate -ne $false -or $nt.directInactive -ne $false) { $failures += "direct notify results: routine $($nt.directRoutine), duplicate $($nt.directDuplicate), inactive $($nt.directInactive)" }
+          if ((& $decisions 'fixture-zz') -notcontains 'inactive') { $failures += 'a notification outside the synced set was not filtered' }
+          if ($nt.shownFocus -ne $true) { $failures += 'the main window did not get the focus back for the focus filter' }
+          elseif ($q2.Count -lt 2 -or $q2[0] -ne 'focused' -or $q2 -notcontains 'shown') { $failures += "focus filter (notifyWhileFocused off, then on): $($q2 -join ',')" }
+          if ($nt.invalidKind -notlike '*Unknown notification kind*' -or $nt.unknownField -notlike '*Unknown notification field*') { $failures += "notification validation: $($nt.invalidKind) / $($nt.unknownField)" }
+          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q1' }).Count) { $failures += "syncNotifications did not withdraw the resolved toast: $($slog | ConvertTo-Json -Compress)" }
+          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q2' }).Count) { $failures += 'the last toast was not withdrawn when nothing was pending' }
+          if ($nt.syncInvalid -notlike '*Invalid notification identity*') { $failures += "syncNotifications validation: $($nt.syncInvalid)" }
+          if ($nt.attentionMismatch -notlike '*Invalid attention identities*') { $failures += "setPendingAttention validation: $($nt.attentionMismatch)" }
+          $starts = @($alog | Where-Object { $_.pulse -eq 'Start' })
+          if (-not $starts.Count -or $starts[0].started -ne $true -or $starts[0].focused -ne $false) { $failures += "the taskbar did not flash for a new arrival: $($alog | ConvertTo-Json -Compress)" }
+          if (@($alog | Where-Object { $_.pulse -eq 'Keep' -and $_.started }).Count) { $failures += 'an unchanged attention list restarted the flash' }
+          if (-not $alog.Count -or $alog[-1].pulse -ne 'Stop') { $failures += "the flash did not stop when nothing was pending: $($alog | ConvertTo-Json -Compress)" }
+          if ($click.clicked -ne $true -or $nt.click.id -ne 'fixture-q2' -or $nt.clickFocus -ne $true) { $failures += "notification click: shell $($click | ConvertTo-Json -Compress), page $($nt.click | ConvertTo-Json -Compress), focus $($nt.clickFocus)" }
+          "### Integraciones (#21)`n- harnesses: $($it.harnesses | ConvertTo-Json -Compress)`n- login: $($lg.start.phase) -> output '$(($lg.running.output -replace '\s+', ' ').Trim())' -> $($lg.cancel.phase)`n- notify: $($nlog | ConvertTo-Json -Compress)`n- sync: $($slog | ConvertTo-Json -Compress)`n- attention: $($alog | ConvertTo-Json -Compress)`n- click: $($click | ConvertTo-Json -Compress), path after click $($nt.clickPath)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           Add-Type @'
           using System; using System.Runtime.InteropServices;
           public static class Win {
@@ -284,9 +339,46 @@ jobs:
             if (($after.L - $before.L) -lt 60 -or ($after.T - $before.T) -lt 30) { $failures += "dragging the header did not move the window: $moved" }
           }
           try { Save-Screen 'native' } catch { Write-Host "screenshot: $_" }
+          # #21, etapa final: abre de verdad el Explorador (revealFile, openCharterFolder) y el
+          # navegador (openHarnessLink). Va al final porque esas ventanas taparían el arrastre.
+          New-Item -ItemType File -Force "$($env:ORGTREE_TAURI_PROBE).late-go" | Out-Null
+          $lateDeadline = (Get-Date).AddSeconds(20)
+          while (-not (Test-Path "$($env:ORGTREE_TAURI_PROBE).late") -and (Get-Date) -lt $lateDeadline) { Start-Sleep -Milliseconds 300 }
+          $late = & $read 'late'
+          if (-not $late) { $failures += 'the late integration stage did not report' }
+          else {
+            Write-Host "Late stage: $($late | ConvertTo-Json -Compress)"
+            $target = $late.target
+            $charters = $late.charters.path
+            $browser = $null; $selected = @(); $folders = @()
+            $until = (Get-Date).AddSeconds(15)
+            do {
+              Start-Sleep -Milliseconds 700
+              $folders = @(); $selected = @()
+              foreach ($w in @((New-Object -ComObject Shell.Application).Windows())) {
+                try { $folders += $w.Document.Folder.Self.Path; foreach ($item in @($w.Document.SelectedItems())) { $selected += $item.Path } } catch {}
+              }
+              $browser = Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'msedge.exe', 'chrome.exe', 'firefox.exe' -and $_.CommandLine -like '*developers.openai.com/codex/cli*' } | Select-Object -First 1
+            } while ((Get-Date) -lt $until -and -not ($browser -and $selected -contains $target -and $folders -contains $charters))
+            try { Save-Screen 'integrations' } catch { Write-Host "screenshot: $_" }
+            Write-Host "Explorer folders: $($folders -join ' | '); selected: $($selected -join ' | '); browser: $($browser.Name)"
+            if ($late.reveal.ok -ne $true) { $failures += "revealFile of an existing file: $($late.reveal | ConvertTo-Json -Compress)" }
+            elseif ($selected -notcontains $target) { $failures += "Explorer does not show $target selected (selected: $($selected -join ', '))" }
+            if ($late.charters.ok -ne $true -or $charters -notlike '*\.orgtree\charters') { $failures += "openCharterFolder: $($late.charters | ConvertTo-Json -Compress)" }
+            elseif ($folders -notcontains $charters) { $failures += "no Explorer window on $charters (open: $($folders -join ', '))" }
+            if ($late.harnessLink -ne 'resolved' -or -not $browser) { $failures += "openHarnessLink did not open the browser on the official link: $($late.harnessLink)" }
+            Start-Sleep -Seconds 2
+            # El .cmd revelado no se tiene que haber ejecutado.
+            if (Test-Path "$($env:ORGTREE_TAURI_PROBE).reveal-ran") { $failures += 'revealFile ran the file instead of selecting it' }
+            "- Explorer: selected $($selected -join ', '); folders $($folders -join ', '); browser $($browser.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          # El login cancelado tiene que haber matado el árbol del CLI falso (30 s de espera).
+          $wait = 40 - ((Get-Date) - $reported).TotalSeconds
+          if ($wait -gt 0) { Start-Sleep -Seconds ([int]$wait) }
+          if (Test-Path (Join-Path $fake 'finished.txt')) { $failures += 'the cancelled login left the CLI running' }
           Stop-Process -Id $p.Id -Force
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Cookie auth, bridge, home, live desk, popouts, engine recovery and native window verified in WebView2"
+          Write-Host "Cookie auth, bridge, home, live desk, popouts, engine recovery, native window and integrations verified in WebView2"
 
       # #18: el instalador en una carpeta descartable, arrancado desde ahí con su
       # motor empaquetado (sin ORGTREE_TAURI_PYTHON) sobre una raíz descartable.
@@ -439,6 +531,12 @@ jobs:
           Write-Host 'Installed app verified: packaged engine on the embedded Python and PostgreSQL, own data root, renderer loaded'
           # taskkill devuelve 128 si el guardián ya cerró el árbol; el resultado es el de arriba.
           exit 0
+
+      # Pruebas unitarias del shell (#21): validaciones de rutas, notificaciones y login en Windows.
+      - name: Shell unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: apps/desktop-tauri/src-tauri
+        run: cargo test
 
       - name: Report sizes
         if: always()

@@ -24,7 +24,7 @@
   r.rendered = !!(root && await waitFor(() => root.children.length, 15000));
   r.agentShown = !!(await waitFor(() => document.body.innerText.includes('worker'), 20000));
 
-  // #7: ventana sin marco, controles propios y notificación nativa.
+  // #7: ventana sin marco y controles propios (las notificaciones, en #21 más abajo).
   const native = r.native = {};
   const bridge = window.orgtreeDesktop;
   native.controls = !!(await waitFor(() => document.querySelector('.window-controls'), 10000));
@@ -40,13 +40,113 @@
       native.restored = !!(await waitFor(() => states.length && states[states.length - 1] === false, 5000));
     } catch (e) { native.maximizeError = String(e) }
     off();
-    try {
-      // Un id por carga: si el script corre en dos cargas (la página puede recargarse
-      // también contra el motor caído), la deduplicación no debe esconder la primera.
-      const n = { id: 'probe-' + Date.now(), title: 'Orgtree', body: 'Notificación nativa del spike de Tauri', org: 'spike-fixture', kind: 'question' };
-      native.notify = await bridge.notify(n);
-      native.notifyAgain = await bridge.notify(n);
-    } catch (e) { native.notify = String(e) }
+  }
+  // #21: integraciones. Lo que abre el Explorador y el navegador va en la etapa
+  // final (probe_late.js), para no tapar la ventana antes de la prueba de arrastre.
+  const integ = r.integrations = {};
+  // Una sola vez por pestaña y con el motor vivo: la página puede cargar también
+  // contra el motor caído, y una segunda pasada ensuciaría los registros del shell.
+  let firstPass = false;
+  try { firstPass = !sessionStorage.getItem('orgtree-probe-integrations') } catch (e) { firstPass = true }
+  if (bridge && r.agentShown && r.http === 200 && firstPass) {
+    try { sessionStorage.setItem('orgtree-probe-integrations', '1') } catch (e) {}
+    const org = 'spike-fixture';
+    const attempt = async fn => { try { return await fn() } catch (e) { return 'error:' + (e && e.message || e) } };
+    // Harnesses: la forma del contrato; el CI pone un `codex` falso en el PATH.
+    integ.harnesses = await attempt(() => bridge.getHarnesses());
+    integ.harnessBadId = await attempt(() => bridge.openHarnessLink('https://example.com'));
+    // Archivos: solo las validaciones (la apertura real va al final).
+    integ.revealRelative = await attempt(() => bridge.revealFile('relativo\\archivo.txt'));
+    integ.revealMissing = await attempt(() => bridge.revealFile(__MISSING__));
+    integ.revealDotted = await attempt(() => bridge.revealFile('C:\\Windows\\..\\Windows\\win.ini'));
+
+    // Login: un proveedor no detectado se niega; el ciclo de estado con el CLI falso.
+    const login = integ.login = {};
+    const harnesses = Array.isArray(integ.harnesses) ? integ.harnesses : [];
+    const missing = harnesses.find(h => !h.detected && h.id !== 'antigravity') || harnesses.find(h => !h.detected);
+    login.missingId = missing && missing.id;
+    if (missing) login.missing = await attempt(() => bridge.startProviderLogin(missing.id));
+    login.badProvider = await attempt(() => bridge.startProviderLogin('codex --help'));
+    login.idle = await attempt(() => bridge.getProviderLoginStatus('codex'));
+    if (harnesses.some(h => h.id === 'codex' && h.detected)) {
+      login.start = await attempt(() => bridge.startProviderLogin('codex'));
+      login.again = await attempt(() => bridge.startProviderLogin('codex'));
+      const end = Date.now() + 15000;
+      let status = null;
+      while (Date.now() < end) {
+        status = await attempt(() => bridge.getProviderLoginStatus('codex'));
+        if (status && typeof status.output === 'string' && status.output.includes('fake-codex')) break;
+        await timeout(300);
+      }
+      login.running = status;
+      login.code = await attempt(() => bridge.submitProviderLoginCode('codex', '123'));
+      login.cancel = await attempt(() => bridge.cancelProviderLogin('codex'));
+      login.after = await attempt(() => bridge.getProviderLoginStatus('codex'));
+    }
+
+    // Notificaciones de punta a punta: el motor de fixture publica avisos
+    // (`PUT /api/fixture/notices`) y el renderer real los pide al puente. El
+    // shell anota cada decisión en `<salida>.notify`, `.sync` y `.attention`.
+    // Un cambio de preferencias (aunque sea vacío) hace releer al renderer.
+    const notes = integ.notify = {};
+    const row = (id, kind, title) => ({ id, org, kind, title, body: `Aviso de prueba ${id}`, agent: 'worker', source_id: id });
+    const Q1 = row('fixture-q1', 'question', 'Pregunta 1'), R1 = row('fixture-r1', 'routine', 'Correo 1'), Q2 = row('fixture-q2', 'question', 'Pregunta 2');
+    const publish = async rows => {
+      const status = await attempt(async () => (await fetch('/api/fixture/notices', {
+        method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ notices: rows }),
+      })).status);
+      await attempt(() => bridge.setPreferences({}));
+      await timeout(2500);
+      return status;
+    };
+    const prefs = await attempt(() => bridge.getPreferences());
+    notes.prefKeys = prefs && typeof prefs === 'object' ? ['notifyQuestions', 'notifyAllMail', 'notifyWhileFocused'].map(k => typeof prefs[k]) : prefs;
+    // 1. Sin foco (ventana minimizada): la pregunta se muestra y la barra de tareas parpadea;
+    //    el correo de rutina no (tipo apagado por defecto).
+    await attempt(() => bridge.minimizeWindow());
+    await timeout(800);
+    notes.minimizedFocus = document.hasFocus();
+    notes.publish1 = await publish([Q1, R1]);
+    document.title = 'orgtree-probe-pause:taskbar';
+    await timeout(3000);
+    // Llamadas directas: el filtro del shell, no el del renderer.
+    notes.directRoutine = await attempt(() => bridge.notify(R1));
+    notes.directDuplicate = await attempt(() => bridge.notify(Q1));
+    notes.directInactive = await attempt(() => bridge.notify(row('fixture-zz', 'question', 'No publicada')));
+    notes.invalidKind = await attempt(() => bridge.notify({ ...Q1, kind: 'nope' }));
+    notes.unknownField = await attempt(() => bridge.notify({ ...Q1, url: 'https://example.com' }));
+    // 2. Prender "todo el correo": el renderer pide la de rutina y se muestra.
+    await attempt(() => bridge.setPreferences({ notifyAllMail: true }));
+    await timeout(2500);
+    await attempt(() => bridge.setPreferences({ notifyAllMail: false }));
+    await timeout(1500);
+    // 3. Con la ventana al frente: una pregunta nueva no se muestra hasta
+    //    prender "notificar con Orgtree enfocado".
+    await attempt(() => bridge.showMainWindow());
+    notes.shownFocus = !!(await waitFor(() => document.hasFocus(), 5000));
+    notes.publish2 = await publish([Q1, Q2]);
+    await attempt(() => bridge.setPreferences({ notifyWhileFocused: true }));
+    await timeout(2500);
+    await attempt(() => bridge.setPreferences({ notifyWhileFocused: false }));
+    // 4. Q1 se resuelve: el renderer sincroniza y el shell retira su toast.
+    notes.publish3 = await publish([Q2]);
+    notes.syncInvalid = await attempt(() => bridge.syncNotifications([{ org, id: Q2.id, extra: 1 }]));
+    notes.attentionMismatch = await attempt(() => bridge.setPendingAttention(['a'], [{ org, id: 'a' }, { org, id: 'b' }]));
+    // 5. El clic en el toast de Q2 (minimizada): la ventana vuelve y el renderer
+    //    recibe notification-click.
+    await attempt(() => bridge.minimizeWindow());
+    await timeout(800);
+    const clicks = [];
+    const offClick = bridge.onEvent(event => { if (event.type === 'notification-click') clicks.push(event.data) });
+    document.title = '__CLICK__' + JSON.stringify({ org, id: Q2.id });
+    await waitFor(() => clicks.length, 5000);
+    offClick();
+    notes.click = clicks[0] ? { id: clicks[0].id, org: clicks[0].org, kind: clicks[0].kind } : null;
+    notes.clickFocus = !!(await waitFor(() => document.hasFocus(), 5000));
+    await timeout(1000);
+    notes.clickPath = location.pathname + location.search;
+    // 6. Nada pendiente: para el parpadeo y se retira el último toast.
+    notes.publish4 = await publish([]);
   }
   // Una zona de arrastre del renderer (`-webkit-app-region: drag`) que esté a la
   // vista y no tapada: el CI la arrastra con el mouse real.
