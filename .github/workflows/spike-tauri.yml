@@ -825,11 +825,13 @@ jobs:
           # app) sobrevive con razón a la salida. Se excluye con todo su árbol; el motor,
           # PostgreSQL y WebView2 siguen contando, así que un huérfano de esos sigue fallando.
           function Get-Tree($rootPid) {
-            $all = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'msedge.exe' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+            $all = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'msedge.exe' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
             $tree = @(); $queue = @($rootPid)
             while ($queue.Count) {
               $next = @()
-              foreach ($id in $queue) { $kids = @($all | Where-Object { $_.ParentProcessId -eq $id -and $_.ProcessId -ne $id }); $tree += $kids; $next += @($kids | ForEach-Object { $_.ProcessId }) }
+              # Un PID reusado deja procesos viejos (p. ej. vctip.exe del build) con un
+              # ParentProcessId que hoy es de la app: un hijo nace después que su padre.
+              foreach ($id in $queue) { $born = @($all | Where-Object { $_.ProcessId -eq $id })[0].CreationDate; $kids = @($all | Where-Object { $_.ParentProcessId -eq $id -and $_.ProcessId -ne $id -and (-not $born -or $_.CreationDate -ge $born) }); $tree += $kids; $next += @($kids | ForEach-Object { $_.ProcessId }) }
               $queue = $next
             }
             return ,$tree
