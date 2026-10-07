@@ -67,6 +67,22 @@ window.__pprobe = window.__pprobe || (() => {
     return child && test(child) && { entry: S.opens[S.opens.length - 1], child };
   }, ms);
   const controls = child => [...child.document.querySelectorAll('.popout-window-controls button')].map(b => b.getAttribute('aria-label'));
+  // Fuera de la vista de desk: la tarjeta solo tiene menú si no es el desk enfocado.
+  // (Los íconos de MUI no llevan data-testid en producción: se buscan por título.)
+  const fitCard = async r => {
+    const fit = document.querySelector('#root button[title="fit the whole org"]');
+    r.fit = !!fit;
+    if (fit) { fit.click(); await pause(1500) }
+    let card = await waitFor(() => leaf('worker'), 5000);
+    for (let i = 0; !card && i < 3; i++) {
+      const out = document.querySelector('#root button[title="zoom out"]');
+      if (out) { out.click(); await pause(800) }
+      card = leaf('worker');
+    }
+    if (!card) r.candidates = [...document.querySelectorAll('#root *')].filter(el => el.children.length < 3 && /worker/.test(el.textContent))
+      .slice(0, 8).map(el => el.tagName + '.' + String(el.className).slice(0, 40) + ':' + el.textContent.trim().slice(0, 30));
+    return card;
+  };
   const shot = async name => { document.title = 'orgtree-pprobe-pause:' + name; await pause(2500) };
 
   const steps = {
@@ -169,34 +185,32 @@ window.__pprobe = window.__pprobe || (() => {
       if (show) { show.click(); await pause(800); return { via: 'Show desk' } }
       return { via: 'focusPopout', result: await attempt(() => bridge().focusPopout(S.deskName)) };
     },
-    // El menú de la tarjeta → "Open desk": el modal toma prestado el desk del
-    // popout (MovableSurface.borrow), que se cierra con window.close().
+    // "Open desk" desde la fila de worker en la lista de agentes: el modal toma
+    // prestado el desk del popout (MovableSurface.borrow), que se cierra con
+    // window.close(). La lista no mueve la cámara, así que el lugar del desk en el
+    // lienzo (el marcador "Show desk") sigue montado y Desks.endBorrow puede
+    // devolver la ventana (restore). Por la tarjeta habría que encuadrar la org, eso
+    // desmonta ese lugar y el renderer suelta la ventana en lugar de devolverla.
     async tempDesk() {
       const r = {};
-      // Fuera de la vista de desk: la tarjeta solo tiene menú si no es el desk enfocado.
-      // (Los íconos de MUI no llevan data-testid en producción: se buscan por título.)
-      const fit = document.querySelector('#root button[title="fit the whole org"]');
-      r.fit = !!fit;
-      if (fit) { fit.click(); await pause(1500) }
-      let card = await waitFor(() => leaf('worker'), 5000);
-      for (let i = 0; !card && i < 3; i++) {
-        const out = document.querySelector('#root button[title="zoom out"]');
-        if (out) { out.click(); await pause(800) }
-        card = leaf('worker');
-      }
-      if (!card) {
-        r.candidates = [...document.querySelectorAll('#root *')].filter(el => el.children.length < 3 && /worker/.test(el.textContent))
-          .slice(0, 8).map(el => el.tagName + '.' + String(el.className).slice(0, 40) + ':' + el.textContent.trim().slice(0, 30));
-        return { ...r, error: 'sin tarjeta del agente' };
-      }
-      const c = card.getBoundingClientRect();
-      card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, buttons: 2,
+      r.slotMounted = [...document.querySelectorAll('#root button')].some(b => b.textContent.trim() === 'Show desk');
+      const toggle = document.querySelector('button.tray-toggle');
+      r.tray = !!toggle;
+      if (!toggle) return { ...r, error: 'sin el botón de la lista de agentes' };
+      if (!document.querySelector('.tray-row')) toggle.click();
+      const row = await waitFor(() => [...document.querySelectorAll('.tray-row')]
+        .find(el => (el.querySelector('.tray-name') || {}).textContent === 'worker'), 5000);
+      if (!row) return { ...r, error: 'sin la fila de worker en la lista de agentes' };
+      const c = row.getBoundingClientRect();
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, buttons: 2,
         clientX: c.x + c.width / 2, clientY: c.y + c.height / 2, view: window }));
       const item = await waitFor(() => [...document.querySelectorAll('.ctxmenu [role="menuitem"]')].find(b => b.textContent.trim() === 'Open desk'), 5000);
       r.menu = [...document.querySelectorAll('.ctxmenu [role="menuitem"]')].map(b => b.textContent.trim());
       if (!item) return { ...r, error: 'sin la entrada Open desk' };
       item.click();
       r.modal = !!(await waitFor(() => document.querySelector('.tempdesk-panel'), 10000));
+      // La lista se cierra (su botón alterna); no forma parte de lo que se mide.
+      if (document.querySelector('.tray-row')) { toggle.click(); await pause(300) }
       r.deskInModal = !!(await waitFor(() => document.querySelector('.tempdesk-panel .msgs .msg'), 15000));
       r.popoutClosed = !!(await waitFor(() => S.desk.closed, 5000));
       r.opensDuring = S.opens.length;
@@ -221,13 +235,15 @@ window.__pprobe = window.__pprobe || (() => {
       r.child = metrics(S.desk);
       return r;
     },
-    // El modal de Usage, anclado a la ventana: queda encima y en su lugar.
-    // El inbox de worker (PinFrame `node-inbox`), desde el menú de su tarjeta:
-    // el botón de Usage no apareció en el fixture (runs 36 y 37).
+    // El inbox de worker (PinFrame `node-inbox`) como modal anclado a la ventana:
+    // queda encima y en su lugar. Se abre desde el menú de su tarjeta (el botón
+    // de Usage no aparece en el fixture, runs 36 y 37).
+    // Después de devolver el desk a la ventana principal (deskClose), la vista es
+    // la del desk de worker y su tarjeta no tiene menú: se encuadra la org primero.
     async modalPin() {
       const r = {};
-      const card = leaf('worker');
-      if (!card) return { error: 'sin tarjeta del agente' };
+      const card = await fitCard(r);
+      if (!card) return { ...r, error: 'sin tarjeta del agente' };
       const c = card.getBoundingClientRect();
       card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, buttons: 2,
         clientX: c.x + c.width / 2, clientY: c.y + c.height / 2, view: window }));

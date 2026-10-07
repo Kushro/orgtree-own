@@ -12,13 +12,13 @@
 //!    entera.
 //! 2. El desk real de `worker` en un popout: el estado, maximizar, restaurar,
 //!    minimizar y enfocar desde los botones del renderer.
-//! 3. Un desk temporal que toma prestado el desk del popout y lo devuelve a
-//!    una ventana con el mismo rectángulo.
-//! 4. El inbox de `worker` como modal anclado (queda encima y en su lugar) y su pop-out con
+//! 3. Un desk temporal (desde la lista de agentes) que toma prestado el desk
+//!    del popout y lo devuelve a una ventana con el mismo rectángulo.
+//! 4. Devolver el desk a la ventana principal (`window.close()`).
+//! 5. El inbox de `worker` como modal anclado (queda encima y en su lugar) y su pop-out con
 //!    el rectángulo del panel, sin cerrar el modal antes de que la ventana lo
-//!    adopte; el cierre desde su botón de ventana.
-//! 5. Devolver el desk a la ventana principal (`window.close()`): no queda
-//!    ninguna ventana de popout, en blanco o no.
+//!    adopte; el cierre desde su botón de ventana. Al final no queda ninguna
+//!    ventana de popout, en blanco o no.
 //!
 //! El reporte (`<archivo>`) se reescribe en cada paso, así que un paso que no
 //! llega deja la evidencia de los anteriores. `<archivo>.<nombre>` son los
@@ -239,7 +239,15 @@ fn run(app: &tauri::AppHandle, probe: &PopoutProbe) {
     probe.put("afterTempNative", native(app));
     probe.shot(app, "tempdesk-restored");
 
-    // 4. El inbox de worker como modal: anclado, y su pop-out con el rectángulo del panel.
+    // 4. El desk vuelve a la ventana principal: el renderer cierra el popout
+    //    con `window.close()`. Va antes del modal, porque el modal se abre desde
+    //    la tarjeta y para llegar a su menú hay que encuadrar la org, lo que
+    //    desmonta el lugar del desk en el lienzo.
+    probe.record(app, "deskClose", json!({}));
+    std::thread::sleep(SETTLE);
+    probe.put("deskClosedNative", native(app));
+
+    // 5. El inbox de worker como modal: anclado, y su pop-out con el rectángulo del panel.
     probe.record(app, "modalPin", json!({}));
     probe.put("modalPinNative", native(app));
     probe.shot(app, "modal-pinned");
@@ -250,11 +258,6 @@ fn run(app: &tauri::AppHandle, probe: &PopoutProbe) {
     probe.record(app, "modalClose", json!({}));
     std::thread::sleep(Duration::from_millis(800));
     probe.put("modalClosedNative", native(app));
-
-    // 5. El desk vuelve a la ventana principal: el renderer cierra el popout
-    //    con `window.close()`.
-    probe.record(app, "deskClose", json!({}));
-    std::thread::sleep(SETTLE);
     probe.put("finalNative", native(app));
     probe.shot(app, "popouts-closed");
 }

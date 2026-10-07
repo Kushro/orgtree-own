@@ -113,6 +113,42 @@ En Tauri 2.12 eso se resuelve con `on_new_window` → `NewWindowResponse::Create
 
 En Linux (WebKitGTK), `window.open` sin un gesto del usuario queda bloqueado y Tauri no expone el ajuste. Linux no es destino, así que no se trabajó.
 
+### Popouts, pins y desks temporales (#22)
+
+Completa la primitiva de #6 con lo que `windows.ts` le da a los popouts en Electron (`popoutRegistry`, `setExactPopoutBounds`), sobre el renderer sin cambios. Está en `src-tauri/src/popouts.rs`.
+
+**Controles de ventana.** `getPopoutState`, `minimizePopout`, `toggleMaximizePopout`, `closePopout` y `focusPopout`, con el evento `popout-state`:
+
+- el renderer los llama desde el puente de la ventana **dueña**, porque el popout es un `about:blank` adoptado y sus handlers de React corren en el contexto de JS de la dueña. Nombra la ventana con el nombre de marco del `window.open`;
+- wry no pasa ese nombre a `on_new_window`. El shell suma su propio handler de `NewWindowRequested` en cada dueña y lo lee de `ICoreWebView2NewWindowRequestedEventArgs2::Name` (`webview2-com` 0.39, la versión que usa wry). wry agenda `on_new_window` en el bucle de mensajes, así que los nombres llegan en orden, uno por `window.open`;
+- cada dueña tiene sus nombres: el comando de una org nunca alcanza la ventana de otra, y un nombre vacío no es de nadie, como en Electron;
+- `popout-state` va a la dueña cuando el popout se maximiza, se restaura o se minimiza, también con un doble clic en la zona de arrastre;
+- `focusPopout` primero restaura una ventana minimizada: el `child.focus()` del renderer no la levanta (el mismo motivo que en Electron).
+
+**Rectángulo exacto.** El renderer pide la posición y el tamaño del **área cliente** (`popupFeatures`) y, al restaurar o devolver un desk prestado, reusa lo que midió. tao conserva `WS_CAPTION` en las ventanas sin marco (#7), así que ni el tamaño ni la posición de la ventana coinciden con el área cliente. `exact_bounds` corrige el tamaño con `mainwin::exact_size` (#20) y mueve el marco lo que le falta al área cliente. Corre al crear el popout y otra vez a los 200 y 800 ms, porque WebView2 adopta el webview después de `SetNewWindow` y el primer cuadro puede mover el marco. El runner tiene escala 1,0, así que la escala fraccionaria de `AGENTS.md` no se pudo ver; el cálculo multiplica por `scale_factor` y redondea una sola vez.
+
+**`window.close()`.** En #6 el popout quedaba en blanco: wry atiende `WindowCloseRequested` destruyendo solo su contenedor (`WRY_WEBVIEW`). Ahora el shell suma su propio handler del mismo evento, que destruye la ventana de Tauri entera desde el bucle de eventos (`run_on_main_thread`: destruirla dentro de su propio evento dejaría el webview a mitad de la llamada). El vigilante de #6 (`reap_closed_popouts`) queda como red de seguridad y anota cuándo actúa: en el CI nunca actuó. El comportamiento de wry no se reportó upstream; queda anotado acá.
+
+**Desk temporal.** "Open desk" toma prestado el desk canónico (`Desks.borrow`): si estaba en un popout, la ventana se cierra con `window.close()` y, al cerrar el modal, `Desks.endBorrow` la vuelve a abrir con el mismo nombre y el rectángulo que tenía. Eso solo pasa si el lugar del desk en el lienzo sigue montado; si no, la regla del renderer (igual en Electron) es soltar la ventana. Desde la tarjeta hay que encuadrar la org para llegar a su menú, y eso desmonta ese lugar, así que la prueba lo abre desde la lista de agentes, que no mueve la cámara.
+
+**Verificado en WebView2 y el CI** (paso "Popouts, pins and temporary desks"). Un director (`pprobe.rs` y `pprobe.js`, activo solo con `ORGTREE_TAURI_POPOUT_PROBE`) maneja el renderer real sobre el motor de fixture con clics en sus botones, y el shell mide lo nativo. En el run 37617102790 (`7c3e6c1`), con 2 px de tolerancia:
+
+- la primitiva pidió 168,101 de 420x320 y el área cliente quedó exactamente ahí (el marco exterior es 436x329: los 8 px por lado de tao). `window.close()` la cerró entera;
+- el desk de `worker` en un popout de 900x760, con los tres botones de ventana del renderer. `getPopoutState` da el desk y `present: false` para un nombre desconocido o vacío, y rechaza un tipo equivocado. Maximizar llega como evento y el botón cambia a "Restore window" (área cliente 1024x720); restaurar vuelve al mismo rectángulo; minimizar lo minimiza; "Show desk" lo trae de vuelta (capturas `popouts-popout-desk` y `popouts-popout-maximized`);
+- el desk temporal toma el desk del popout, cuya ventana se cierra con `window.close()` (captura `popouts-tempdesk-open`);
+- el inbox de `worker` como modal anclado queda encima y en su lugar después de un clic en el lienzo. Su pop-out abre con el rectángulo del panel (57,52 de 906x598, exacto) mientras el modal todavía está en la dueña, y su botón de cerrar (`closePopout`) lo devuelve anclado (captura `popouts-modal-popout`);
+- al final no queda ninguna ventana de popout.
+
+En ese run quedaron dos verificaciones como pendientes: la vuelta del desk prestado a su ventana y "Return to main window", porque la prueba abría el desk temporal desde la tarjeta. El commit siguiente lo abre desde la lista de agentes, devuelve el desk a la ventana principal antes de abrir el modal y vuelve estrictas las dos verificaciones (también la del modal, que tenía una salida como pendiente); falta su run.
+
+El mismo run falló en el paso del ciclo de vida (#19) con todas sus verificaciones en verde: el `taskkill /T` que termina el motor externo salió con 1 (un hijo del árbol ya había terminado) y el runner de `pwsh` usa el último `$LASTEXITCODE` como resultado del paso. Ahora se descarta ese código y el paso termina con `exit 0` después de sus verificaciones. El falso huérfano de `msedge.exe` (run 37608067302) ya estaba resuelto desde `61c2ff5`: el árbol no cuenta el Edge que abre `openHarnessLink` (los procesos de WebView2 son `msedgewebview2.exe` y siguen contando), y en el run 37617102790 los tres arranques terminaron sin huérfanos.
+
+**Fuera del recorte:**
+
+- escalas fraccionarias y varios monitores: el runner tiene un solo monitor de 1024x768 al 100 %;
+- `parent-teardown` en `popout-state`: una dueña que se cierra destruye sus popouts sin pasar por esos eventos (`mainwin::perform_close`);
+- el arrastre y el redimensionado a mano de un popout (los mide `popout-state`, pero la prueba no los hace).
+
 ### Ventana de inicio y `window.orgtreeDesktop` (#4)
 
 El renderer React se usa **sin modificar**: `npx vite build apps/desktop/renderer --base / --outDir ../../../dist/renderer`, igual que `tools/build.mjs`, y lo sirve el motor (`ORGTREE_TAURI_UI_DIR` → `ORGTREE_V2_UI_DIR`).

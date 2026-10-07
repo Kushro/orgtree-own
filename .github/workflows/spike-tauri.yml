@@ -573,7 +573,8 @@ jobs:
       # #22: popouts, pins y desks temporales sobre el renderer real y el motor de fixture.
       # Un director (pprobe.rs/pprobe.js) maneja la app: la primitiva de window.open con
       # su rectángulo, el desk de worker en un popout con sus botones de ventana, un desk
-      # temporal que lo toma prestado y lo devuelve, el modal de Usage anclado y su
+      # temporal (abierto desde la lista de agentes) que lo toma prestado y lo devuelve,
+      # la vuelta del desk a la ventana principal, el inbox como modal anclado y su
       # pop-out, y el cierre por window.close(). El shell mide lo nativo (área cliente,
       # maximizado, minimizado, cómo se cerró cada popout) y acá se compara, con 2 px de
       # tolerancia en los rectángulos.
@@ -673,27 +674,17 @@ jobs:
           $before = Popout $r.beforeTempNative $name
           $after = Popout $r.afterTempNative $name
           & $check ($tc.modalGone -eq $true) "closing the temporary desk left the modal: $($tc | ConvertTo-Json -Compress)"
-          if ($after) {
-            & $check ($tc.sameName -eq $true -and $before -and (Same-Rect $after.client $before.client)) "the desk came back at $(Rect $after.client), it was at $(Rect $before.client)"
-            "- temporary desk: before $(Rect $before.client), after $(Rect $after.client), features $($tc.features)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-          } else {
-            # PENDIENTE (#22): la vuelta del desk prestado a su ventana con el mismo rectángulo.
-            # Para llegar al menú de la tarjeta ("Open desk") la prueba encuadra la org, y eso
-            # desmonta el lugar del desk en el lienzo del que salió. Desks.endBorrow solo
-            # devuelve la ventana si ese lugar sigue montado; si no, la suelta (handle.release),
-            # que es la regla del renderer, igual en Electron. Hace falta otro camino al desk
-            # temporal que no desmonte ese lugar; no es una falla del shell.
-            $msg = "PENDING (#22): the borrowed desk did not return to a window (the probe unmounts its previous canvas slot to reach the card menu; Desks.endBorrow releases instead of restoring): $($tc | ConvertTo-Json -Compress)"
-            Write-Host $msg; "- $msg" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-          }
-          # 4. El modal anclado y su pop-out.
+          # El desk prestado vuelve a una ventana con el mismo nombre y el mismo rectángulo.
+          # Desks.endBorrow solo la devuelve si el lugar del desk en el lienzo sigue montado;
+          # por eso la prueba abre el desk temporal desde la lista de agentes, que no mueve
+          # la cámara (desde la tarjeta habría que encuadrar la org y el renderer la suelta).
+          & $check ($after -and $tc.sameName -eq $true -and $before -and (Same-Rect $after.client $before.client)) "the borrowed desk did not come back to its window: $($tc | ConvertTo-Json -Compress), after $(Rect $after.client), before $(Rect $before.client)"
+          "- temporary desk (from the $(if ($t.tray) { 'agents list' } else { 'card' })): before $(Rect $before.client), after $(Rect $after.client), features $($tc.features)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # 4. El desk vuelve a la ventana principal ("Return to main window", window.close()).
+          & $check ($r.deskClose.closed -eq $true -and $r.deskClose.redocked -eq $true) "desk redock: $($r.deskClose | ConvertTo-Json -Compress)"
+          & $check (-not (Popout $r.deskClosedNative $name) -and (Closed-By $r.deskClosedNative $name) -like '*window.close') "the desk window after 'Return to main window': $($r.deskClosedNative | ConvertTo-Json -Compress -Depth 5)"
+          # 5. El modal anclado y su pop-out.
           $m = $r.modalPin
-          if ($m.error) {
-            # PENDIENTE (#22): la prueba no llegó al modal (no encontró la tarjeta, el menú o el
-            # botón de anclar). No es una medición del shell; se anota y no se da por pasada.
-            $msg = "PENDING (#22): pinned modal and its pop-out not exercised, the probe did not reach the UI: $($m.error) / $($r.modalPopout | ConvertTo-Json -Compress)"
-            Write-Host $msg; "- $msg" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-          } else {
           & $check ($m.pinned -eq $true -and $m.onTop -eq $true -and $m.stillPinned -eq $true -and $m.samePlace -eq $true -and $m.onTopAfter -eq $true) "pinned modal: $($m | ConvertTo-Json -Compress)"
           $mp = $r.modalPopout
           & $check ($mp.atOpen.connected -eq $true -and $mp.atOpen.inOwner -eq $true -and $mp.atOpen.stillModal -eq $true) "the modal was gone before its window opened: $($mp.atOpen | ConvertTo-Json -Compress)"
@@ -712,24 +703,14 @@ jobs:
             "- modal: pinned panel on screen $(Rect $panel), features $($mp.features), popout client $(Rect $mn.client); page sees owner $($mp.owner | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           } else { $failures += "no native popout for the modal $($mp.name)" }
           & $check ($r.modalClose.closed -eq $true -and $r.modalClose.back -eq $true -and (Closed-By $r.modalClosedNative $mp.name) -eq 'closePopout') "modal close: $($r.modalClose | ConvertTo-Json -Compress), by $(Closed-By $r.modalClosedNative $mp.name)"
-          }
-          # 5. Ninguna ventana queda, en blanco o no, y el vigilante nunca actuó.
+          # 6. Ninguna ventana queda, en blanco o no, y el vigilante nunca actuó.
           $f = $r.finalNative
-          if ($r.deskClose.skipped) {
-            # PENDIENTE (#22): sin el desk de vuelta en un popout (ver el desk temporal) no hay
-            # "Return to main window" que tocar. window.close() del renderer ya se verificó con
-            # el préstamo del desk temporal (MovableSurface.returnHome) y con la primitiva.
-            $msg = "PENDING (#22): 'Return to main window' not exercised: $($r.deskClose.skipped)"
-            Write-Host $msg; "- $msg" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-          } else {
-            & $check ($r.deskClose.closed -eq $true -and $r.deskClose.redocked -eq $true) "desk redock: $($r.deskClose | ConvertTo-Json -Compress)"
-          }
           & $check (@($f.popouts).Count -eq 0) "windows left after closing every popout: $($f.popouts | ConvertTo-Json -Compress)"
           & $check (@($f.closed | Where-Object { $_.by -eq 'reaper' }).Count -eq 0) "the container reaper had to close: $($f.closed | ConvertTo-Json -Compress)"
           "- closed: $(($f.closed | ForEach-Object { "$($_.name) by $($_.by)" }) -join '; ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           & $check ($r.done -eq $true) 'the probe did not finish its steps'
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host 'Popouts verified: window controls and events, exact bounds, temporary desk round trip, pinned modal pop-out and window.close()'
+          Write-Host 'Popouts verified: window controls and events, exact bounds, temporary desk round trip, return to the main window, pinned modal pop-out and window.close()'
 
       # #19: ciclo de vida del motor, sobre el motor de fixture y raíces descartables.
       # 1. "full": otro motor (lanzado acá) tiene la raíz, así que la app muestra el
@@ -884,7 +865,11 @@ jobs:
             param($name, $p)
             if ($name -eq 'refused') {
               # Se libera la raíz: el motor externo termina y su guardián suelta el candado.
+              # taskkill /T puede salir con 1 si el guardián ya terminó a un hijo del árbol
+              # (run 37617102790): ese código quedaba en $LASTEXITCODE y el runner lo usa
+              # como resultado del paso aunque todo pasara. Lo que importa es el candado.
               taskkill /PID $ext.Id /T /F 2>&1 | Out-Null
+              $global:LASTEXITCODE = 0
               $until = (Get-Date).AddSeconds(30)
               while (-not (Lock-Free $root) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
               New-Item -ItemType File -Force "$out.retry-go" | Out-Null
@@ -948,6 +933,7 @@ jobs:
           "- exits: $((& $exits | ForEach-Object { "$($_.path)/$($_.trigger): $($_.outcome) in $($_.ms) ms" }) -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           if ($failures) { throw ($failures -join '; ') }
           Write-Host 'Engine lifecycle verified: refusal and retry, conversion phases, crash notice and load recovery, maintenance, and three orderly exits without orphans'
+          exit 0
 
       # #18: el instalador en una carpeta descartable, arrancado desde ahí con su
       # motor empaquetado (sin ORGTREE_TAURI_PYTHON) sobre una raíz descartable.
