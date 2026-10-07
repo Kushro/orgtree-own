@@ -14,9 +14,15 @@
 //! El token nunca se escribe en logs: `Token` no expone su valor en `Debug` y
 //! stderr del motor se descarta, como en Electron.
 //!
+//! En modo empaquetado (`packaged`), además pasa las rutas de PostgreSQL y
+//! `ORGTREE_PG_BOOTSTRAP=1`, como `apps/desktop/main/postgres-runtime.ts`.
+//!
 //! No incluye la conexión a un motor del arranque del sistema (attach) ni el
 //! vigilante de cuelgues: quedan fuera del recorte del spike.
 
+pub mod packaged;
+
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
@@ -79,6 +85,14 @@ pub struct EngineOptions {
     pub ui_dir: Option<PathBuf>,
     /// Plazo de silencio entre checkpoints; `STARTUP_SILENCE` por defecto.
     pub silence_timeout: Duration,
+    /// `ORGTREE_PG_BOOTSTRAP=1`: una raíz nueva nace en PostgreSQL. Solo la app
+    /// empaquetada lo pide; nunca se hereda del entorno.
+    pub bootstrap_postgres: bool,
+    /// Variables extra para el motor (rutas de PostgreSQL del paquete).
+    pub env: Vec<(String, OsString)>,
+    /// Raíces que el motor nunca debe servir (la de Orgtree instalado): la
+    /// raíz de datos no puede estar dentro de ninguna ni contener a ninguna.
+    pub forbidden_roots: Vec<PathBuf>,
 }
 
 impl EngineOptions {
@@ -89,6 +103,9 @@ impl EngineOptions {
             data_root: data_root.into(),
             ui_dir: None,
             silence_timeout: STARTUP_SILENCE,
+            bootstrap_postgres: false,
+            env: Vec::new(),
+            forbidden_roots: Vec::new(),
         }
     }
 }
@@ -149,6 +166,55 @@ enum Line {
     Refused(String),
     ConversionFailed(String),
     Ignored,
+}
+
+/// ¿`a` es `b` o está dentro de `b`? Por componentes, sin mayúsculas en Windows.
+fn within(a: &Path, b: &Path) -> bool {
+    let a = canonical_text(a);
+    let b = canonical_text(b);
+    let sep = if cfg!(windows) { '\\' } else { '/' };
+    let a = if cfg!(windows) { a.replace('/', "\\") } else { a };
+    let b = if cfg!(windows) { b.replace('/', "\\") } else { b };
+    !b.is_empty() && (a == b || a.starts_with(&format!("{b}{sep}")))
+}
+
+/// La ruta canónica si existe; si no, la de su ancestro existente más cercano
+/// con el resto agregado (una raíz nueva todavía no existe).
+fn resolve_lexically(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&current) {
+            let mut out = PathBuf::from(canonical_display(&real));
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (current.file_name().map(|n| n.to_os_string()), current.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                current = parent.to_path_buf();
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Rechaza una raíz de datos que se superpone con una raíz prohibida.
+pub fn check_forbidden(root: &Path, forbidden: &[PathBuf]) -> Result<(), EngineError> {
+    let root = resolve_lexically(root);
+    for other in forbidden.iter().filter(|p| p.is_absolute()) {
+        let other = resolve_lexically(other);
+        if within(&root, &other) || within(&other, &root) {
+            return Err(EngineError::Config(format!(
+                "la raíz de datos {} se superpone con {}, que no es de esta app",
+                root.display(),
+                other.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Raíz canónica para comparar con `dataRootId`. En Windows quita el prefijo
@@ -295,6 +361,7 @@ impl Engine {
         if !options.data_root.is_absolute() {
             return Err(EngineError::Config("la raíz de datos debe ser absoluta".into()));
         }
+        check_forbidden(&options.data_root, &options.forbidden_roots)?;
         std::fs::create_dir_all(&options.data_root)
             .map_err(|e| EngineError::Config(format!("no se pudo crear la raíz de datos: {e}")))?;
         let data_root = std::fs::canonicalize(&options.data_root)
@@ -309,6 +376,8 @@ impl Engine {
             // Nunca heredar un puerto v1 ni el bootstrap de PostgreSQL del instalado.
             .env_remove("ORGTREE_PORT")
             .env_remove("ORGTREE_PG_BOOTSTRAP")
+            .env_remove("ORGTREE_PG_CUSTODIAN")
+            .env_remove("ORGTREE_P03_PG_BIN")
             .env("ORGTREE_DATA", &data_root)
             .env("ORGTREE_V2_TOKEN", token.expose())
             .env("ORGTREE_V2_PARENT_PID", std::process::id().to_string())
@@ -319,6 +388,12 @@ impl Engine {
             .stderr(Stdio::null());
         if let Some(ui) = &options.ui_dir {
             command.env("ORGTREE_V2_UI_DIR", ui);
+        }
+        for (key, value) in &options.env {
+            command.env(key, value);
+        }
+        if options.bootstrap_postgres {
+            command.env("ORGTREE_PG_BOOTSTRAP", "1");
         }
         hide_console(&mut command);
         notify("starting");
@@ -615,6 +690,24 @@ mod tests {
         assert_eq!(token.expose().len(), 64);
         assert!(!format!("{token:?}").contains(token.expose()));
         assert_ne!(token, Token::generate().unwrap());
+    }
+
+    #[test]
+    fn raices_prohibidas_en_ambos_sentidos() {
+        let base = std::env::temp_dir().join(format!("orgtree-forbidden-{}", std::process::id()));
+        let real = base.join("Orgtree v2").join("data");
+        let forbidden = vec![base.join("Orgtree v2")];
+        assert!(check_forbidden(&real, &forbidden).is_err(), "dentro de la raíz real");
+        assert!(check_forbidden(&base, &forbidden).is_err(), "contiene la raíz real");
+        assert!(check_forbidden(&base.join("Orgtree v2 spike"), &forbidden).is_ok(), "solo comparte el prefijo");
+        assert!(check_forbidden(&base.join("spike").join("data"), &forbidden).is_ok());
+        assert!(check_forbidden(&real, &[PathBuf::from("relativa")]).is_ok(), "una ruta relativa no cuenta");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn raiz_prohibida_sin_mayusculas() {
+        assert!(within(Path::new(r"C:\Users\X\AppData\Roaming\orgtree V2\data"), Path::new(r"c:\users\x\appdata\roaming\Orgtree v2")));
     }
 
     #[cfg(windows)]

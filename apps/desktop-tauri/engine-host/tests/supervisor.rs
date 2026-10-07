@@ -140,6 +140,47 @@ fn configuracion_invalida() {
     assert!(matches!(Engine::start(&options).unwrap_err(), EngineError::Config(_)));
 }
 
+/// El modo empaquetado pasa `ORGTREE_PG_BOOTSTRAP=1` y las rutas de PostgreSQL;
+/// sin pedirlo, nunca se heredan del entorno del shell.
+#[test]
+fn bootstrap_y_rutas_de_postgres_solo_si_se_piden() {
+    with_mode("ready", || {
+        let reported = |options: &EngineOptions| -> serde_json::Value {
+            let engine = Engine::start(options).expect("ready");
+            let text = std::fs::read_to_string(engine.data_root().join("fake-env.json")).unwrap();
+            assert_eq!(engine.stop(), StopOutcome::Graceful);
+            serde_json::from_str(&text).unwrap()
+        };
+        std::env::set_var("ORGTREE_PG_BOOTSTRAP", "1");
+        std::env::set_var("ORGTREE_PG_CUSTODIAN", "heredado");
+        let plain = reported(&fake_options("env-plain"));
+        assert!(plain["ORGTREE_PG_BOOTSTRAP"].is_null(), "{plain}");
+        assert!(plain["ORGTREE_PG_CUSTODIAN"].is_null(), "{plain}");
+
+        let mut options = fake_options("env-packaged");
+        options.bootstrap_postgres = true;
+        options.ui_dir = Some(PathBuf::from("ui-empaquetada"));
+        options.env = vec![("ORGTREE_PG_CUSTODIAN".into(), "custodio".into()), ("ORGTREE_P03_PG_BIN".into(), "bin".into())];
+        let packaged = reported(&options);
+        std::env::remove_var("ORGTREE_PG_BOOTSTRAP");
+        std::env::remove_var("ORGTREE_PG_CUSTODIAN");
+        assert_eq!(packaged["ORGTREE_PG_BOOTSTRAP"], "1");
+        assert_eq!(packaged["ORGTREE_PG_CUSTODIAN"], "custodio");
+        assert_eq!(packaged["ORGTREE_P03_PG_BIN"], "bin");
+        assert_eq!(packaged["ORGTREE_V2_UI_DIR"], "ui-empaquetada");
+    });
+}
+
+/// Una raíz dentro de una prohibida (la de Orgtree instalado) no llega a lanzar el motor.
+#[test]
+fn raiz_prohibida_no_lanza_el_motor() {
+    let mut options = fake_options("prohibida");
+    options.forbidden_roots = vec![options.data_root.clone()];
+    options.data_root = options.data_root.join("data");
+    assert!(matches!(Engine::start(&options).unwrap_err(), EngineError::Config(_)));
+    assert!(!options.data_root.exists(), "no se creó la raíz");
+}
+
 /// El motor real (`engine/launch.py`) en Windows, con una raíz descartable.
 #[test]
 #[ignore = "necesita ORGTREE_TEST_ENGINE_PYTHON con las dependencias del motor"]

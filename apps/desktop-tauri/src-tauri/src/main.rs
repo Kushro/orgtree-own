@@ -4,6 +4,7 @@
 mod desktop;
 mod probe;
 
+use orgtree_engine_host::packaged::PackagedRuntime;
 use orgtree_engine_host::{Engine, EngineOptions};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -28,6 +29,10 @@ struct Shell {
     quitting: AtomicBool,
     /// Notificaciones ya mostradas (`org` + `id`), como `NotificationGate`.
     notified: Mutex<std::collections::HashSet<String>>,
+    /// Cómo se lanzó el motor (`packaged` o `development`) y con qué raíz.
+    launch: Mutex<serde_json::Value>,
+    /// Prueba chica del instalador (`ORGTREE_TAURI_INSTALL_PROBE`).
+    install_probe: Option<PathBuf>,
 }
 
 impl Default for Shell {
@@ -42,28 +47,86 @@ impl Default for Shell {
             restarts: AtomicU32::new(0),
             quitting: AtomicBool::new(false),
             notified: Mutex::new(Default::default()),
+            launch: Mutex::new(serde_json::Value::Null),
+            install_probe: std::env::var_os("ORGTREE_TAURI_INSTALL_PROBE").filter(|v| !v.is_empty()).map(PathBuf::from),
         }
     }
 }
 
-/// Configuración del spike. El empaquetado del runtime de Python queda fuera
-/// del recorte, así que el intérprete se indica por entorno.
-fn engine_options(app: &tauri::AppHandle) -> Result<EngineOptions, String> {
-    let python = std::env::var_os("ORGTREE_TAURI_PYTHON")
-        .map(PathBuf::from)
-        .ok_or("Falta ORGTREE_TAURI_PYTHON: la ruta absoluta de un Python con las dependencias del motor.")?;
-    let engine_dir = std::env::var_os("ORGTREE_TAURI_ENGINE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../engine")));
+/// Cómo arranca el motor.
+///
+/// - **Desarrollo**: con `ORGTREE_TAURI_PYTHON`, un Python absoluto con las
+///   dependencias del motor y el `engine/` del checkout (o
+///   `ORGTREE_TAURI_ENGINE_DIR`), como hasta ahora.
+/// - **Empaquetado**: sin esa variable y con el runtime embebido en los
+///   recursos de la app (`<recursos>/engine/runtime/python.exe`), como
+///   `apps/desktop/main/index.ts` con `app.isPackaged`: el Python, el motor,
+///   PostgreSQL y el renderer del paquete, `ORGTREE_PG_BOOTSTRAP=1` y el
+///   descriptor `engine-paths.json`.
+///
+/// La raíz de datos es siempre propia de la app (`ORGTREE_TAURI_DATA` o
+/// `app_local_data_dir()/data`) y nunca la de Orgtree instalado.
+fn engine_options(app: &tauri::AppHandle) -> Result<(EngineOptions, &'static str), String> {
     // Nunca la raíz real de Orgtree: por defecto, una carpeta del identificador del spike.
-    let data_root = match std::env::var_os("ORGTREE_TAURI_DATA") {
+    let profile = app.path().app_local_data_dir().map_err(|e| e.to_string())?;
+    let data_root = match std::env::var_os("ORGTREE_TAURI_DATA").filter(|v| !v.is_empty()) {
         Some(root) => PathBuf::from(root),
-        None => app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("data"),
+        None => profile.join("data"),
     };
-    let mut options = EngineOptions::new(python, engine_dir, data_root);
-    // Build del renderer que sirve el motor (`dist/renderer`); sin él, `/` da 404.
-    options.ui_dir = std::env::var_os("ORGTREE_TAURI_UI_DIR").map(PathBuf::from);
-    Ok(options)
+    let (mut options, mode) = match std::env::var_os("ORGTREE_TAURI_PYTHON").filter(|v| !v.is_empty()) {
+        Some(python) => {
+            let engine_dir = std::env::var_os("ORGTREE_TAURI_ENGINE_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../engine")));
+            let mut options = EngineOptions::new(PathBuf::from(python), engine_dir, &data_root);
+            // Build del renderer que sirve el motor (`dist/renderer`); sin él, `/` da 404.
+            options.ui_dir = std::env::var_os("ORGTREE_TAURI_UI_DIR").map(PathBuf::from);
+            (options, "development")
+        }
+        None => {
+            let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+            let runtime = match PackagedRuntime::locate(&resources) {
+                Some(runtime) => runtime.map_err(|e| e.to_string())?,
+                None => {
+                    return Err("Falta el motor empaquetado y no se definió ORGTREE_TAURI_PYTHON (la ruta \
+                                absoluta de un Python con las dependencias del motor)."
+                        .into())
+                }
+            };
+            // El mismo descriptor que Electron escribe en su carpeta de perfil.
+            runtime
+                .write_engine_paths(&profile.join("engine-paths.json"), &absolute(&data_root))
+                .map_err(|e| e.to_string())?;
+            (runtime.options(&data_root), "packaged")
+        }
+    };
+    options.forbidden_roots = real_orgtree_roots();
+    Ok((options, mode))
+}
+
+fn absolute(path: &std::path::Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Las raíces de Orgtree instalado, que esta app nunca sirve (como
+/// `forbiddenRoot` en Electron y la lista `live-locations.json` del motor).
+fn real_orgtree_roots() -> Vec<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let mut roots = Vec::new();
+    if let Some(appdata) = var("APPDATA") {
+        roots.push(appdata.join("Orgtree v2"));
+    }
+    if let Some(local) = var("LOCALAPPDATA") {
+        roots.push(local.join("Programs").join("Orgtree"));
+    }
+    if let Some(home) = var("USERPROFILE").or_else(|| var("HOME")) {
+        roots.push(home.join("AppData").join("Roaming").join("Orgtree v2"));
+        roots.push(home.join("orgtree"));
+    }
+    if let Some(data) = var("ORGTREE_DATA") {
+        roots.push(data);
+    }
+    roots
 }
 
 /// La ventana de la app sobre el origen del motor (existe desde que el motor está listo).
@@ -81,6 +144,17 @@ fn show_status(app: &tauri::AppHandle, text: &str) {
     if let Some(window) = splash_window(app) {
         let literal = serde_json::to_string(text).unwrap_or_default();
         let _ = window.eval(format!("window.orgtreeEngineStatus && window.orgtreeEngineStatus({literal})"));
+    }
+}
+
+/// La raíz de datos en uso y el modo, en la ventana de arranque.
+fn show_launch(app: &tauri::AppHandle) {
+    let launch = app.state::<Shell>().launch.lock().unwrap().clone();
+    if launch.is_null() {
+        return;
+    }
+    if let Some(window) = splash_window(app) {
+        let _ = window.eval(format!("window.orgtreeLaunch && window.orgtreeLaunch({launch})"));
     }
 }
 
@@ -145,6 +219,9 @@ fn open_engine(app: &tauri::AppHandle, engine: &Engine) -> Result<(), String> {
             if let Some(probe) = app.state::<Shell>().probe.lock().unwrap().as_ref() {
                 let _ = window.eval(probe.script_for_load());
             }
+            if app.state::<Shell>().install_probe.is_some() {
+                let _ = window.eval(include_str!("install_probe.js").replace("__PREFIX__", INSTALL_PROBE_PREFIX));
+            }
         })
         .on_document_title_changed(move |window, title| on_title(&titles, &window, &title))
         .build()
@@ -156,7 +233,19 @@ fn open_engine(app: &tauri::AppHandle, engine: &Engine) -> Result<(), String> {
 
 fn start_engine(app: tauri::AppHandle) {
     let options = match engine_options(&app) {
-        Ok(options) => options,
+        Ok((options, mode)) => {
+            *app.state::<Shell>().launch.lock().unwrap() = serde_json::json!({
+                "mode": mode,
+                "dataRoot": absolute(&options.data_root),
+                "engineDir": options.engine_dir,
+            });
+            show_launch(&app);
+            // También en la bandeja, que queda cuando la ventana de arranque se cierra.
+            if let Some(tray) = app.tray_by_id("main") {
+                let _ = tray.set_tooltip(Some(format!("Orgtree (Tauri spike)\nDatos: {}", absolute(&options.data_root).display())));
+            }
+            options
+        }
         Err(message) => return show_status(&app, &message),
     };
     std::thread::Builder::new()
@@ -443,8 +532,33 @@ fn on_second_instance(app: &tauri::AppHandle, args: Vec<String>) {
     }
 }
 
+/// Prefijo del título con el que `install_probe.js` devuelve su resultado.
+const INSTALL_PROBE_PREFIX: &str = "orgtree-install-probe:";
+
+/// La prueba del instalador (#18): la página del motor empaquetado cargó, se
+/// autentica y el renderer se dibuja. Se escribe junto con el modo de
+/// arranque y la raíz de datos que usa el shell.
+fn record_install_probe(app: &tauri::AppHandle, title: &str) {
+    let state = app.state::<Shell>();
+    let (Some(out), Some(json)) = (state.install_probe.as_ref(), title.strip_prefix(INSTALL_PROBE_PREFIX)) else { return };
+    let page: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+    let engine = state.engine.lock().unwrap().as_ref().map(|engine| {
+        serde_json::json!({ "pid": engine.pid(), "origin": engine.origin(), "dataRoot": engine.data_root() })
+    });
+    let report = serde_json::json!({
+        "launch": *state.launch.lock().unwrap(),
+        "engine": engine,
+        "resources": app.path().resource_dir().ok(),
+        "page": page,
+    });
+    let _ = std::fs::write(out, serde_json::to_vec_pretty(&report).unwrap_or_default());
+}
+
 /// La prueba de `ORGTREE_TAURI_PROBE` devuelve sus resultados por el título.
 fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
+    if title.starts_with(INSTALL_PROBE_PREFIX) {
+        return record_install_probe(app, title);
+    }
     let state = app.state::<Shell>();
     let probe = state.probe.lock().unwrap();
     let Some(probe) = probe.as_ref() else { return };
@@ -558,6 +672,7 @@ fn main() {
                         if !status.is_empty() {
                             show_status(app, &status);
                         }
+                        show_launch(app);
                     }
                 })
                 .build()?;

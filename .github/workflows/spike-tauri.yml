@@ -8,7 +8,16 @@ on:
       - engine/launch.py
       - apps/desktop/renderer/**
       - .github/workflows/spike-tauri.yml
+      - tools/provision-runtime.py
+      - tools/provision-postgres.py
+      - tools/postgres-runtime-pin.json
+      - tools/runtime-requirements.in
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Publicar el instalador probado como pre-release (tauri-preview-<run>)
+        type: boolean
+        default: false
 
 concurrency:
   group: spike-tauri-${{ github.ref }}
@@ -17,12 +26,15 @@ concurrency:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: apps/desktop-tauri
     steps:
+      # El submódulo engine/mailhub va en el paquete (lo exige provision-runtime.py).
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: actions/setup-node@v4
         with:
@@ -39,9 +51,10 @@ jobs:
           workspaces: |
             apps/desktop-tauri/src-tauri
             apps/desktop-tauri/engine-host
+            engine/native/pg-custodian -> ../../../artifacts/postgres-provision/cargo
 
-      # Python para el motor real (sin el submódulo mailhub: el motor arranca igual
-      # y lo informa como caído). Raíz de datos descartable, nunca datos reales.
+      # Python para el motor real en las pruebas y el smoke test de desarrollo.
+      # Raíz de datos descartable, nunca datos reales.
       - uses: actions/setup-python@v5
         id: python
         with:
@@ -73,11 +86,35 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npx vite build apps/desktop/renderer --base / --outDir ../../../dist/renderer --emptyOutDir --logLevel warn
 
+      # Instalador autónomo (#18): el runtime de Python embebido, PostgreSQL 18
+      # con pg-custodian y el motor, como los extraResources de Electron.
+      - name: Cache vendor archives (embedded Python, PostgreSQL)
+        uses: actions/cache@v4
+        with:
+          path: .runtime-cache/*.zip
+          key: orgtree-vendor-${{ hashFiles('tools/postgres-runtime-pin.json', 'tools/provision-runtime.py') }}
+
+      - name: Provision embedded Python runtime
+        working-directory: .
+        run: python tools/provision-runtime.py
+
+      - name: Provision PostgreSQL 18 and pg-custodian
+        working-directory: .
+        run: python tools/provision-postgres.py
+
+      - name: Stage installer resources
+        working-directory: .
+        run: python apps/desktop-tauri/tools/stage-resources.py
+
+      - name: Verify staged resources (runtime layout, PostgreSQL manifest)
+        working-directory: .
+        run: node apps/desktop-tauri/tools/verify-resources.mjs apps/desktop-tauri/bundle-resources
+
       - name: Install Tauri CLI
         run: npm ci
 
       - name: Build installer
-        run: npx tauri build --ci
+        run: npx tauri build --ci --config src-tauri/tauri.bundle.conf.json
 
       - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery, native window)
         shell: pwsh
@@ -250,11 +287,116 @@ jobs:
           if ($failures) { throw ($failures -join '; ') }
           Write-Host "Cookie auth, bridge, home, live desk, popouts, engine recovery and native window verified in WebView2"
 
+      # #18: el instalador en una carpeta descartable, arrancado desde ahí con su
+      # motor empaquetado (sin ORGTREE_TAURI_PYTHON) sobre una raíz descartable.
+      - name: Install and run the standalone installer (packaged engine on PostgreSQL)
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-installed-data
+          ORGTREE_TAURI_INSTALL_PROBE: ${{ runner.temp }}\orgtree-tauri-install-probe.json
+        run: |
+          foreach ($name in 'ORGTREE_TAURI_PYTHON', 'ORGTREE_TAURI_ENGINE_DIR', 'ORGTREE_TAURI_UI_DIR', 'ORGTREE_TAURI_PROBE') {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+          }
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-installed'
+          $data = $env:ORGTREE_TAURI_DATA
+          # NSIS: /D= tiene que ser el último argumento y sin comillas.
+          $setup = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$dir" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "the installer exited with code $($setup.ExitCode)" }
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notlike 'uninstall*' } | Select-Object -First 1
+          if (-not $exe) { throw "no app executable in ${dir}: $((Get-ChildItem $dir).Name -join ', ')" }
+          Write-Host "Installed $($exe.FullName)"
+          Start-Sleep -Seconds 2
+          # Si el instalador dejó la app abierta, cerrarla: la prueba la arranca con su entorno.
+          Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe.FullName } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          node tools/verify-resources.mjs bundle-resources --compare $dir
+          if ($LASTEXITCODE -ne 0) { throw 'the installed resources differ from the staged ones' }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          $started = Get-Date
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          $splash = $false
+          $deadline = $started.AddSeconds(600)
+          while (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            # La ventana de arranque muestra la raíz de datos mientras PostgreSQL arranca.
+            if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) { try { Save-Screen 'installed-splash' } catch { Write-Host "screenshot: $_" }; $splash = $true }
+            Start-Sleep -Milliseconds 500; $p.Refresh()
+          }
+          $ready = ((Get-Date) - $started).TotalSeconds
+          Start-Sleep -Seconds 2
+          try { Save-Screen 'installed-app' } catch { Write-Host "screenshot: $_" }
+          $failures = @()
+          if ($p.HasExited) { $failures += "the installed app exited early with code $($p.ExitCode)" }
+          if (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE)) { $failures += 'the install probe did not report within 600 s' }
+          else {
+            $raw = Get-Content $env:ORGTREE_TAURI_INSTALL_PROBE -Raw
+            Write-Host "Install probe: $raw"
+            "### Installed app (#18)`n- first page ready after $([int]$ready) s (fresh PostgreSQL cluster)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            $probe = $raw | ConvertFrom-Json
+            $strip = { param($path) "$path".Replace('\\?\', '').TrimEnd('\') }
+            if ($probe.launch.mode -ne 'packaged') { $failures += "the app did not use the packaged engine: $($probe.launch.mode)" }
+            if ((& $strip $probe.launch.dataRoot) -ne $data) { $failures += "data root in use: $($probe.launch.dataRoot)" }
+            if ((& $strip $probe.engine.dataRoot) -ne $data) { $failures += "data root confirmed by the engine: $($probe.engine.dataRoot)" }
+            if ((& $strip $probe.launch.engineDir) -ne (Join-Path $dir 'engine')) { $failures += "engine directory: $($probe.launch.engineDir)" }
+            $page = $probe.page
+            if ($page.nav -eq 401 -or $page.http -ne 200) { $failures += "the packaged engine page was not authenticated: nav $($page.nav), http $($page.http)" }
+            if ($page.bridge -ne $true -or $page.status -ne 'ready') { $failures += "window.orgtreeDesktop: bridge $($page.bridge), status $($page.status)" }
+            if ($page.rendered -ne $true) { $failures += "the renderer did not render: $($page.text)" }
+            if ($page.create -ne 200) { $failures += "creating an org returned $($page.create): $($page.createError)" }
+            if (@($page.orgs) -notcontains 'instalado') { $failures += "the new org is not listed: $($page.orgs -join ', ')" }
+          }
+          # El motor empaquetado arrancó sobre PostgreSQL: el registro de la raíz,
+          # el cluster y los procesos, todos desde la carpeta instalada.
+          $backend = Join-Path $data 'store-backend.json'
+          if (-not (Test-Path $backend)) { $failures += 'store-backend.json missing: the root was not bootstrapped on PostgreSQL' }
+          else {
+            $record = Get-Content $backend -Raw | ConvertFrom-Json
+            if ($record.backend -ne 'postgres') { $failures += "store-backend.json chose $($record.backend)" }
+          }
+          if (-not (Test-Path (Join-Path $data 'pg\cluster\PG_VERSION'))) { $failures += 'no PostgreSQL cluster in <data>\pg\cluster' }
+          else { Write-Host "PG_VERSION: $(Get-Content (Join-Path $data 'pg\cluster\PG_VERSION') -Raw)" }
+          $processes = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$dir\*" }
+          $postgres = @($processes | Where-Object { $_.Name -eq 'postgres.exe' })
+          $python = @($processes | Where-Object { $_.ExecutablePath -eq (Join-Path $dir 'engine\runtime\python.exe') })
+          Write-Host "Processes from the install folder: $(($processes | ForEach-Object { $_.Name }) -join ', ')"
+          if (-not $postgres) { $failures += 'no postgres.exe running from the install folder' }
+          if (-not $python) { $failures += 'the engine is not running on the embedded Python' }
+          $paths = Join-Path $env:LOCALAPPDATA 'com.kushro.orgtree.tauri-spike\engine-paths.json'
+          if (-not (Test-Path $paths)) { $failures += "engine-paths.json missing ($paths)" }
+          else {
+            $descriptor = Get-Content $paths -Raw | ConvertFrom-Json
+            Write-Host "engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
+            if ($descriptor.schema -ne 'orgtree.engine-paths/v1' -or (& $strip $descriptor.data) -ne $data -or $descriptor.python -notlike "$dir\*" -or $descriptor.pgBin -notlike "$dir\*") {
+              $failures += "engine-paths.json does not describe the install: $($descriptor | ConvertTo-Json -Compress)"
+            }
+          }
+          $size = (Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum
+          "- installed folder: {0:N1} MB, {1}: {2:N1} MB, {3} postgres processes" -f ($size / 1MB), $exe.Name, ($exe.Length / 1MB), $postgres.Count | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($failures) {
+            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, startup-refusal*.json -ErrorAction SilentlyContinue | Select-Object -First 12) {
+              Write-Host "----- $($log.FullName)"; Get-Content $log.FullName -Tail 40
+            }
+          }
+          taskkill /PID $p.Id /T /F | Out-Null
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Installed app verified: packaged engine on the embedded Python and PostgreSQL, own data root, renderer loaded'
+
       - name: Report sizes
+        if: always()
         shell: pwsh
         run: |
-          Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe, src-tauri/target/release/orgtree-tauri.exe |
-            ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
+          "### Sizes" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe, src-tauri/target/release/orgtree-tauri.exe -ErrorAction SilentlyContinue |
+            ForEach-Object { "- {0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - uses: actions/upload-artifact@v4
@@ -269,3 +411,44 @@ jobs:
           name: orgtree-tauri-installer
           path: apps/desktop-tauri/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
+
+  # Pre-release de la rama (#18), solo a pedido: el instalador que el job de
+  # Windows acaba de probar. No toca main ni los releases normales.
+  prerelease:
+    needs: windows
+    if: github.event_name == 'workflow_dispatch' && inputs.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: orgtree-tauri-installer
+          path: installer
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: tauri-preview-${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          cat > notes.md <<'EOF'
+          Vista previa del shell de escritorio de Orgtree sobre **Tauri 2** (rama `spike/tauri`, issue #18). **No es un release oficial de Orgtree**: es una prueba de la migración desde Electron y no recibe actualizaciones.
+
+          ## Qué incluye
+
+          - La app Tauri con el renderer React de Orgtree sin cambios.
+          - El motor Python de Orgtree con su runtime embebido (Python 3.13 y dependencias) y el mail hub.
+          - PostgreSQL 18 y `pg-custodian`: una raíz nueva arranca directamente sobre PostgreSQL, como el instalador de Electron.
+
+          ## Datos
+
+          La app usa su **propia raíz de datos**, `%LOCALAPPDATA%\com.kushro.orgtree.tauri-spike\data`, que se muestra en la ventana de arranque y en el ícono de la bandeja. Nunca abre ni convierte la de Orgtree instalado (`%APPDATA%\Orgtree v2\data`), y se instala para el usuario actual con su propio identificador, así que no pisa una instalación existente.
+
+          ## Instalación
+
+          Ejecutar el instalador (por usuario, sin permisos de administrador). No arrancarla como administrador: PostgreSQL se niega a correr con esos permisos. Requiere WebView2, que viene con Windows 11.
+          EOF
+          printf '\nCompilado y probado en el CI: %s (commit %s).\n' "$RUN_URL" "$GITHUB_SHA" >> notes.md
+          gh release create "$TAG" installer/*.exe --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --title "Orgtree Tauri, vista previa ${{ github.run_number }}" --notes-file notes.md
