@@ -303,7 +303,8 @@ jobs:
 
           # Un usuario local estándar (no administrador) con su propio perfil.
           $user = 'orgtreespike'
-          $password = 'Ot1!' + [guid]::NewGuid().ToString('N')
+          # 14 caracteres como máximo: con más, net user pide confirmación.
+          $password = 'Ot1!' + [guid]::NewGuid().ToString('N').Substring(0, 10)
           net user $user $password /add | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "could not create the local user $user" }
           $secure = ConvertTo-SecureString $password -AsPlainText -Force
