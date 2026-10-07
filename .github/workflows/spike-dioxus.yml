@@ -100,7 +100,7 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (engine, home, org chart, full desk, desk window and native integration in RSX)
+      - name: Smoke test (engine, home, org chart, inbox and attention, full desk, desk window and native integration in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -111,6 +111,8 @@ jobs:
           # Desk en vivo (#12): frames node_stream simulados y una conversación larga.
           # Desk completo (#27): el fixture siembra mail, avisos, pensamiento y archivos,
           # y simula los estados del turno (POST /api/fixture/turn-state).
+          # Bandeja y atención (#28): POST /api/fixture/attention hace que el agente le
+          # escriba al usuario, le pregunte y levante la bandera en dos tickets.
           ORGTREE_FIXTURE_LIVE: '1'
           ORGTREE_FIXTURE_MESSAGES: '1200'
         run: |
@@ -174,7 +176,9 @@ jobs:
             # la prueba deja un marcador y espera 3 s: capturas del inicio, del organigrama
             # (contratación, menú de agente, agente detenido), del desk (scroll, contenido,
             # en cola por el límite de turnos, detenido) y de las dos ventanas
-            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
+            # #28: la barra de tareas parpadeando (ventana minimizada), la cola tras el clic en
+            # la notificación, el panel de un ticket con bandera y la bandeja
+            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'taskbar', 'notification-click', 'attention', 'inbox', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
               if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
                 try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
               }
@@ -254,6 +258,45 @@ jobs:
           if (-not ($ch.idle.loads -le $ch.idle.frames)) { $failures += "the tree was re-read without a WebSocket frame: $($ch.idle | ConvertTo-Json -Compress)" }
           if (-not ($ch.loads -le $ch.frames + 1)) { $failures += "tree reads ($($ch.loads)) exceed WebSocket frames ($($ch.frames)) plus the first read" }
           "### Org chart (#26, Dioxus)`n- menu: $($ch.menu -join ' / ')`n- orgbar: $($ch.bar) / $($ch.credits)`n- tree reads $($ch.loads), WebSocket frames $($ch.frames), idle: $($ch.idle | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #28: bandeja, preguntas, cola de atención y notificaciones nativas
+          $at = $probe.attention
+          if (-not $at) { $failures += 'the attention stage did not run' }
+          else {
+            $nlog = @($at.notifications)
+            $decided = { param($kind, $decision) @($nlog | Where-Object { $_.type -eq 'notify' -and $_.kind -eq $kind -and $_.decision -eq $decision }).Count }
+            # preferencias por tipo: sin foco se muestran la pregunta, el urgente y las dos banderas; la rutina no
+            if ($at.minimized.minimized -ne $true) { $failures += "the main window did not minimize: $($at.minimized | ConvertTo-Json -Compress)" }
+            if (-not $at.shownMinimized) { $failures += "notifications while minimized: $(($nlog | Where-Object { $_.type -eq 'notify' } | ForEach-Object { "$($_.kind)=$($_.decision)" }) -join ', ')" }
+            if ((& $decided 'routine' 'kind') -lt 1) { $failures += 'routine mail was not filtered by its preference' }
+            if ($at.routineShown -ne $true -or $at.routineRetracted -ne $true) { $failures += "All mail on/off: shown $($at.routineShown), retracted $($at.routineRetracted)" }
+            # con la ventana al frente, un urgente nuevo espera hasta prender notifyWhileFocused
+            if ($at.restored.focused -ne $true -or $at.focusedHeld -ne $true -or $at.focusedShown -ne $true) { $failures += "focus filter: restored $($at.restored | ConvertTo-Json -Compress), held $($at.focusedHeld), shown $($at.focusedShown)" }
+            # deduplicación: cada notificación se muestra una sola vez
+            $twice = @($nlog | Where-Object { $_.type -eq 'notify' -and $_.decision -eq 'shown' } | Group-Object id | Where-Object { $_.Count -gt 1 })
+            if ($twice.Count) { $failures += "notifications shown more than once: $(($twice | ForEach-Object Name) -join ', ')" }
+            if ((& $decided 'urgent-mail' 'duplicate') + (& $decided 'question' 'duplicate') -lt 1) { $failures += 'no repeated pass was deduplicated' }
+            # parpadeo: empieza con una llegada nueva sin foco y para cuando no queda nada
+            $flash = @($nlog | Where-Object { $_.type -eq 'attention' })
+            if (-not @($flash | Where-Object { $_.pulse -eq 'Start' -and $_.started -eq $true -and $_.focused -eq $false }).Count) { $failures += "the taskbar did not flash for a new arrival: $($flash | ConvertTo-Json -Compress)" }
+            if ($at.flashStopped -ne $true) { $failures += 'the taskbar flash did not stop when nothing was pending' }
+            # el clic abre la pregunta en la cola de atención
+            if ($at.click.clicked -ne $true -or $at.clickOpened -notlike 'question:*') { $failures += "notification click: $($at.click | ConvertTo-Json -Compress), opened $($at.clickOpened)" }
+            if ($at.counts.unread -ne 3 -or $at.counts.asks -ne 1 -or $at.counts.attention -ne 5) { $failures += "inbox and attention counts: $($at.counts | ConvertTo-Json -Compress)" }
+            if (@($at.rowKinds | Where-Object { $_ -eq 'ticket' }).Count -ne 2 -or @($at.rowKinds | Where-Object { $_ -eq 'mail' }).Count -ne 2 -or @($at.rowKinds | Where-Object { $_ -eq 'question' }).Count -ne 1) { $failures += "attention rows: $($at.rows -join ', ')" }
+            # preguntas: responder y descartar
+            if (@($at.askOptions).Count -ne 2 -or $at.askText -notlike '*pre-release de Dioxus*') { $failures += "question card: $($at.askText) / $($at.askOptions -join ', ')" }
+            if ($at.answerToast -notlike '*resolved worker*' -or $at.questionGone -ne $true -or $at.questionRetracted -ne $true) { $failures += "answer: $($at.answerToast), gone $($at.questionGone), retracted $($at.questionRetracted)" }
+            if ($at.dismissQuestionToast -notlike '*dismissed worker*' -or $at.question2Gone -ne $true) { $failures += "dismiss question: $($at.dismissQuestionToast), gone $($at.question2Gone)" }
+            # mail urgente: leerlo lo marca leído y sigue a la vista mientras está elegido; responder
+            if ($at.urgentReason -notlike '*CI est*rojo*' -or $at.urgentRead -ne 'retained' -or $at.replyToast -ne 'sent to worker') { $failures += "urgent mail: $($at.urgentReason) / $($at.urgentRead) / $($at.replyToast)" }
+            # bandera: responder la baja sin cambiar el estado; descartar pasa el ticket a blocked
+            if ($at.flagReason -notlike '*certificado de prueba*' -or $at.ticketReplyGone -ne $true -or $at.ticketReplied.status -ne 'in_progress' -or $at.ticketReplied.flagged -ne $false) { $failures += "ticket reply: $($at.flagReason) / $($at.ticketReplied | ConvertTo-Json -Compress)" }
+            if ($at.dismissGoneAtOnce -ne $true -or $at.dismissToast -notlike '*status: blocked' -or $at.ticketDismissed.status -ne 'blocked' -or $at.ticketDismissed.flagged -ne $false) { $failures += "ticket dismiss: $($at.dismissToast) / $($at.ticketDismissed | ConvertTo-Json -Compress)" }
+            # bandeja: leer y archivar al salir, responder y Mark all read
+            if ($at.routineOpened -notlike '*README*' -or $at.routineArchived -ne $true -or $at.inboxReplyToast -ne 'sent to worker' -or $at.urgent2Read -ne $true -or $at.allRead -ne $true -or $at.inboxClosed -ne $true) { $failures += "inbox: opened $($at.routineOpened), archived $($at.routineArchived), reply $($at.inboxReplyToast), read $($at.urgent2Read), all read $($at.allRead)" }
+            if ($at.empty -notlike 'Pending questions*') { $failures += "attention queue not empty at the end: $($at.rowsAfter -join ', ')" }
+          }
+          "### Inbox, questions and attention (#28, Dioxus)`n- notifications: $(($nlog | Where-Object { $_.type -eq 'notify' -and $_.decision -ne 'focused' } | ForEach-Object { "$($_.kind)=$($_.decision)" }) -join ', ')`n- taskbar: $(($flash | ForEach-Object { "$($_.pulse)$(if ($_.started) { ' (flash)' })" }) -join ', ')`n- click: $($at.click | ConvertTo-Json -Compress) -> $($at.clickOpened)`n- rows: $($at.rows -join ', ')`n- tickets: replied $($at.ticketReplied | ConvertTo-Json -Compress), dismissed $($at.ticketDismissed | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           # #12: desk en RSX
           $desk = $probe.desk
           foreach ($check in 'opened', 'toolShown', 'markdownBold', 'markdownList', 'injectionBlocked') {
@@ -348,7 +391,7 @@ jobs:
             try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
           }
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Home window, org chart, full desk, desk window and native integration in RSX verified in WebView2"
+          Write-Host "Home window, org chart, inbox and attention, full desk, desk window and native integration in RSX verified in WebView2"
 
       # #24: el instalador generado, instalado en silencio en una carpeta descartable
       # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y

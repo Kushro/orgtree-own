@@ -9,6 +9,14 @@
 //! - #26, organigrama: crear una org, contratar desde el menú (y una
 //!   contratación por fuera de la UI que llega por el WebSocket), detener y
 //!   reanudar, mover y deshacer, retirar, recontratar y borrar la org;
+//! - #28, bandeja, preguntas y atención: un agente del fixture le escribe al
+//!   usuario, le pregunta y levanta la bandera en dos tickets. Se verifican las
+//!   notificaciones según las preferencias (con la ventana minimizada y al
+//!   frente), la deduplicación, el retiro de las resueltas, el parpadeo de la
+//!   barra de tareas, el clic (simulado con lo mismo que llama `Activated`),
+//!   la cola de atención (responder y descartar preguntas, responder y
+//!   descartar banderas) y la bandeja (leer, archivar, responder y "Mark all
+//!   read");
 //! - #12, desk en RSX: la conversación, la herramienta, el Markdown sanitizado,
 //!   el texto en vivo, la carga de páginas anteriores hasta el primer mensaje y
 //!   los cuadros de un scroll de punta a punta;
@@ -207,6 +215,194 @@ if (fixtureRow) {
   fixtureRow.click();
   home.orgOpened = !!(await waitFor(() => document.querySelector('.dx-org-view'), 10000));
   home.agentShown = !!(await waitFor(() => document.querySelector('.dx-agent[data-node="worker"]'), 15000));
+}
+
+// #28: bandeja, preguntas, cola de atención y notificaciones. El agente
+// `worker` (motor de fixture, ledger real) le escribe al usuario, le pregunta
+// y levanta la bandera en dos tickets; Rust anota cada decisión de las
+// notificaciones (`notify::log_snapshot`).
+const attn = r.attention = {};
+if (home.agentShown) {
+  const call = async message => { dioxus.send(message); return await dioxus.recv() };
+  const notes = async () => (await call({ notifyLog: true })) || [];
+  const waitNotes = async (test, ms) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { const value = test(await notes()); if (value) return value; await timeout(400) }
+    return null;
+  };
+  const decisions = (l, kind) => l.filter(e => e.type === 'notify' && e.kind === kind).map(e => e.decision);
+  const orgView = () => document.querySelector('.dx-org-view');
+  const data = key => Number(orgView() ? orgView().dataset[key] : NaN);
+  const toasts = () => [...document.querySelectorAll('.dx-org-view .toast')].map(t => t.textContent);
+  const toastWith = text => waitFor(() => toasts().find(t => t.includes(text)), 10000);
+  const row = key => document.querySelector(`.dx-attn [data-attn-row="${key}"]`);
+  const rowKeys = () => [...document.querySelectorAll('.dx-attn [data-attn-row]')].map(e => e.getAttribute('data-attn-row'));
+  const selectedKey = () => { const on = document.querySelector('.dx-attn .attn-cell .mailrow.on'); return on ? on.closest('[data-attn-row]').getAttribute('data-attn-row') : null };
+  const pane = () => document.querySelector('.dx-attn .attn-mread');
+  const type = async (area, text) => {
+    setValue(area, text);
+    await timeout(300);
+    area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+  };
+  attn.prefs = await call({ notifyPrefs: { notificationsEnabled: true, notifyQuestions: true, notifyUrgentMail: true,
+    notifyDocketAttention: true, notifyAllMail: false, notifyWhileFocused: false } });
+
+  // 1. Sin foco (ventana minimizada): llegan un mail urgente, uno de rutina,
+  //    una pregunta y dos tickets con bandera. Se muestran la pregunta, el
+  //    urgente y los tickets; el de rutina no (tipo apagado por defecto); la
+  //    barra de tareas parpadea.
+  attn.minimized = await call({ minimize: true });
+  for (const kind of ['urgent', 'routine', 'question', 'tickets']) attn['seed_' + kind] = await call({ attentionSeed: kind });
+  attn.shownMinimized = await waitNotes(l => {
+    const shown = l.filter(e => e.type === 'notify' && e.decision === 'shown').map(e => e.kind);
+    return shown.filter(k => k === 'work-attention').length >= 2 && shown.includes('question') && shown.includes('urgent-mail') && shown;
+  }, 25000);
+  attn.routineMinimized = decisions(await notes(), 'routine');
+  attn.flash = (await notes()).filter(e => e.type === 'attention');
+  dioxus.send({ pause: 'taskbar' });
+  await timeout(3000);
+  // 2. "All mail" prendido: el de rutina se muestra; apagado otra vez: se retira.
+  await call({ notifyPrefs: { notifyAllMail: true } });
+  attn.routineShown = !!(await waitNotes(l => decisions(l, 'routine').includes('shown'), 15000));
+  await call({ notifyPrefs: { notifyAllMail: false } });
+  attn.routineRetracted = !!(await waitNotes(l => l.some(e => e.type === 'configure' && (e.removed || []).some(x => x.kind === 'routine')), 5000));
+  // 3. Con la ventana al frente: un urgente nuevo espera hasta prender "Notify while focused".
+  attn.restored = await call({ restore: true });
+  attn.seed_urgent2 = await call({ attentionSeed: 'urgent2' });
+  attn.focusedHeld = !!(await waitNotes(l => decisions(l, 'urgent-mail').includes('focused'), 15000));
+  await call({ notifyPrefs: { notifyWhileFocused: true } });
+  attn.focusedShown = !!(await waitNotes(l => decisions(l, 'urgent-mail').filter(d => d === 'shown').length >= 2, 15000));
+  await call({ notifyPrefs: { notifyWhileFocused: false } });
+  attn.duplicates = (await notes()).filter(e => e.type === 'notify' && e.decision === 'shown').length;
+  // los conteos de la barra de la org: 3 sin leer y 1 pregunta; 5 en la cola
+  attn.counts = await waitFor(() => data('unread') === 3 && data('asks') === 1 && data('attention') === 5
+    && { unread: data('unread'), asks: data('asks'), attention: data('attention') }, 15000)
+    || { unread: data('unread'), asks: data('asks'), attention: data('attention') };
+  attn.bell = (document.querySelector('.dx-org-view .dx-inbox-bell') || {}).className || null;
+
+  // 4. El clic en la notificación de la pregunta (simulado con lo mismo que
+  //    llama `Activated`): la vista pasa a la cola con la pregunta elegida.
+  attn.click = await call({ clickNotice: 'question' });
+  attn.clickOpened = await waitFor(() => { const k = selectedKey(); return k && k.startsWith('question:') && pane() && pane().querySelector('.askcard') && k }, 10000);
+  if (!attn.clickOpened) {
+    // sin toast (sin clic que simular): la cola se abre a mano y la prueba sigue
+    document.querySelector('.dx-org-view .orgview-tab[data-view="attention"]').click();
+    const q = await waitFor(() => rowKeys().find(k => k.startsWith('question:')), 10000);
+    if (q) row(q).querySelector('.mailrow').click();
+    await waitFor(() => pane() && pane().querySelector('.askcard'), 5000);
+  }
+  attn.rows = rowKeys();
+  attn.rowKinds = [...document.querySelectorAll('.dx-attn [data-attn-row]')].map(e => e.getAttribute('data-attn-kind'));
+  dioxus.send({ pause: 'notification-click' });
+  await timeout(3000);
+
+  // 5a. Responder la pregunta: la tarjeta se va y su notificación se retira.
+  const card = pane() && pane().querySelector('.askcard');
+  attn.askText = card ? (card.querySelector('.ask-q') || {}).textContent : null;
+  attn.askOptions = card ? [...card.querySelectorAll('.ask-option-label')].map(b => b.textContent) : null;
+  if (card) {
+    card.querySelector('.ask-row[data-option="Sí"]').click();
+    await timeout(300);
+    card.querySelector('.ask-submit').click();
+    attn.answerToast = await toastWith("resolved worker's batch");
+    attn.questionGone = !!(await waitFor(() => !rowKeys().some(k => k.startsWith('question:')), 10000));
+    attn.questionRetracted = !!(await waitNotes(l => l.some(e => e.type === 'sync' && (e.removed || []).some(x => x.kind === 'question')), 15000));
+  }
+  // 5b. El mail urgente: abrirlo lo marca leído (queda mientras está elegido) y se responde.
+  const urgentKey = 'mail:' + (attn.seed_urgent || {}).mail;
+  if (row(urgentKey)) {
+    row(urgentKey).querySelector('.mailrow').click();
+    attn.urgentReason = (await waitFor(() => pane() && pane().querySelector('.urgent-why'), 5000) || {}).textContent || null;
+    attn.urgentRead = await waitFor(() => row(urgentKey) && !row(urgentKey).querySelector('.mailrow.unread') && 'retained', 10000);
+    const area = pane().querySelector('.mail-reply textarea');
+    if (area) {
+      await type(area, 'Reintentá una vez más, por favor.');
+      attn.replyToast = await toastWith('sent to worker');
+    }
+  }
+  // 5c. Primer ticket: responder baja la bandera sin cambiar el estado.
+  const [firstTicket, secondTicket] = ((attn.seed_tickets || {}).tickets) || [];
+  if (row('ticket:' + firstTicket)) {
+    row('ticket:' + firstTicket).querySelector('.mailrow').click();
+    attn.flagReason = (await waitFor(() => pane() && pane().querySelector('.docket-attention-body'), 5000) || {}).textContent || null;
+    dioxus.send({ pause: 'attention' });
+    await timeout(3000);
+    const area = pane().querySelector('.mail-reply textarea');
+    if (area) await type(area, 'Usá el certificado de prueba.');
+    attn.ticketReplyToast = await toastWith('sent to worker');
+    attn.ticketReplyGone = !!(await waitFor(() => !row('ticket:' + firstTicket), 15000));
+    attn.ticketReplied = await call({ workItem: firstTicket });
+  }
+  // 5d. Segundo ticket: descartar lo saca en el clic y lo pasa a `blocked`.
+  if (row('ticket:' + secondTicket)) {
+    row('ticket:' + secondTicket).querySelector('.mailrow').click();
+    const dismiss = await waitFor(() => pane() && pane().querySelector('.docket-dismiss'), 5000);
+    if (dismiss) {
+      dismiss.click();
+      attn.dismissGoneAtOnce = !row('ticket:' + secondTicket) || !!(await waitFor(() => !row('ticket:' + secondTicket), 1000));
+      attn.dismissToast = await toastWith('dismissed the attention flag');
+      attn.ticketDismissed = await call({ workItem: secondTicket });
+    }
+  }
+  // 5e. Una pregunta nueva, descartada con la ✕ (salta todas las pestañas).
+  attn.seed_question2 = await call({ attentionSeed: 'question2' });
+  const q2 = await waitFor(() => rowKeys().find(k => k.startsWith('question:')), 15000);
+  if (q2) {
+    row(q2).querySelector('.mailrow').click();
+    const close = await waitFor(() => pane() && pane().querySelector('.askcard .dx-ask-dismiss'), 5000);
+    if (close) close.click();
+    attn.dismissQuestionToast = await toastWith("dismissed worker's question");
+    attn.question2Gone = !!(await waitFor(() => !rowKeys().some(k => k.startsWith('question:')), 10000));
+  }
+  attn.rowsAfter = rowKeys();
+
+  // 6. La bandeja: leer el de rutina, salir de él (queda archivado), responder
+  //    el segundo urgente y "Mark all read".
+  const bell = document.querySelector('.dx-org-view .dx-inbox-bell');
+  if (bell) {
+    bell.click();
+    const inbox = await waitFor(() => document.querySelector('.dx-inbox .mailer-list'), 10000);
+    const mailRow = id => document.querySelector(`.dx-inbox .mailrow[data-mail="${id}"]`);
+    const routineId = (attn.seed_routine || {}).mail, urgent2Id = (attn.seed_urgent2 || {}).mail;
+    attn.inboxRows = inbox ? [...inbox.querySelectorAll('.mailrow')].map(e => e.getAttribute('data-mail') + (e.classList.contains('unread') ? ' (unread)' : '')) : null;
+    attn.inboxUnreadTab = (document.querySelector('.dx-inbox .mail-folders .tab-count') || {}).textContent || null;
+    if (mailRow(routineId)) {
+      mailRow(routineId).click();
+      attn.routineOpened = (await waitFor(() => document.querySelector('.dx-inbox .mailer-read .mailer-body'), 5000) || {}).textContent || null;
+      dioxus.send({ pause: 'inbox' });
+      await timeout(3000);
+    }
+    if (mailRow(urgent2Id)) {
+      mailRow(urgent2Id).click();
+      attn.routineArchived = !!(await waitFor(() => mailRow(routineId) && !mailRow(routineId).classList.contains('unread'), 10000));
+      const area = await waitFor(() => document.querySelector('.dx-inbox .mailer-read .mail-reply textarea'), 5000);
+      if (area) {
+        await type(area, 'Publicalo igual.');
+        attn.inboxReplyToast = await toastWith('sent to worker');
+        attn.urgent2Read = !!(await waitFor(() => mailRow(urgent2Id) && !mailRow(urgent2Id).classList.contains('unread'), 10000));
+      }
+    }
+    // un mail más, archivado con "Mark all read"
+    attn.seed_routine2 = await call({ attentionSeed: 'routine' });
+    const markAll = await waitFor(() => document.querySelector('.dx-inbox .dx-mark-all'), 10000);
+    if (markAll) {
+      markAll.click();
+      attn.allRead = !!(await waitFor(() => data('unread') === 0 && !document.querySelector('.dx-inbox .mailrow.unread:not(.ask)'), 10000));
+    }
+    document.querySelector('.dx-inbox-overlay').click();
+    attn.inboxClosed = !!(await waitFor(() => !document.querySelector('.dx-inbox'), 5000));
+  }
+  // 7. Sin nada pendiente, la barra de tareas deja de parpadear.
+  attn.flashStopped = !!(await waitNotes(l => { const a = l.filter(e => e.type === 'attention'); return a.length && a[a.length - 1].pulse === 'Stop' }, 15000));
+  attn.empty = (await waitFor(() => document.querySelector('.dx-attn .attn-empty'), 5000) || {}).textContent || null;
+  attn.toasts = toasts();
+  attn.notifications = await notes();
+  // las preferencias vuelven a las de fábrica, y la vista al organigrama
+  await call({ notifyPrefs: { notificationsEnabled: true, notifyQuestions: true, notifyUrgentMail: true, notifyTerminalFailures: true,
+    notifyDocketAttention: true, notifyAllMail: false, notifyDocuments: false, notifyFrozen: false, notifyWhileFocused: false } });
+  const chartTab = document.querySelector('.dx-org-view .orgview-tab[data-view="chart"]');
+  if (chartTab) chartTab.click();
+  await waitFor(() => document.querySelector('.dx-agent[data-node="worker"]'), 10000);
 }
 
 // #12: desk
@@ -462,6 +658,53 @@ if (existing) {
 dioxus.send({ done: r });
 "#;
 
+/// Los pedidos de la etapa #28 que la página le hace a Rust. `None` si el
+/// mensaje no es de esta etapa.
+async fn attention_probe(client: &orgtree_engine_client::Client, message: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let window = dioxus::desktop::window();
+    if let Some(patch) = message.get("notifyPrefs").and_then(|v| v.as_object()) {
+        return Some(crate::notify::set_prefs(patch));
+    }
+    if message.get("notifyLog").is_some() {
+        return Some(serde_json::Value::Array(crate::notify::log_snapshot()));
+    }
+    if message.get("minimize").is_some() {
+        window.set_minimized(true);
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        return Some(json!({ "minimized": window.window.is_minimized(), "focused": window.window.is_focused() }));
+    }
+    if message.get("restore").is_some() {
+        crate::native::show_main();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        return Some(json!({ "minimized": window.window.is_minimized(), "focused": window.window.is_focused() }));
+    }
+    if let Some(kind) = message.get("attentionSeed").and_then(|v| v.as_str()) {
+        let body = json!({ "kind": kind });
+        return Some(match client.post::<serde_json::Value>("/api/fixture/attention", &body).await {
+            Ok(value) => value,
+            Err(e) => json!({ "error": e.to_string() }),
+        });
+    }
+    if let Some(kind) = message.get("clickNotice").and_then(|v| v.as_str()) {
+        // el clic en el toast: el CI no puede hacer clic en el centro de
+        // notificaciones, así que se llama a lo mismo que el handler `Activated`
+        let found = client.notifications().await.ok().and_then(|n| n.notices.into_iter().find(|n| n.kind == kind));
+        let tag = found.as_ref().and_then(|n| crate::notify::tag_of(&n.org, &n.id));
+        if let Some(tag) = &tag {
+            crate::notify::click(tag);
+        }
+        return Some(json!({ "clicked": tag.is_some(), "tag": tag, "source_id": found.and_then(|n| n.source_id) }));
+    }
+    if let Some(slug) = message.get("workItem").and_then(|v| v.as_str()) {
+        let work = client.work_items("spike-fixture").await.ok()?;
+        let all = [Some(&work.items), work.attention.as_ref(), work.archived.as_ref(), work.backlogged.as_ref()];
+        let item = all.into_iter().flatten().flatten().find(|i| i.slug == slug)?;
+        return Some(json!({ "status": item.status, "flagged": item.manual_attention.is_some() }));
+    }
+    None
+}
+
 /// La mitad de la etapa #13 que corre en la ventana del desk.
 const POPOUT_SCRIPT: &str = r#"
 const timeout = ms => new Promise(done => setTimeout(done, ms));
@@ -675,6 +918,9 @@ pub fn Probe() -> Element {
                             Err(e) => serde_json::json!({ "error": e.to_string() }),
                         };
                         let _ = eval.send(result);
+                    } else if let Some(reply) = attention_probe(&client, &message).await {
+                        // #28: preferencias, ventana, siembra del fixture, registro y clic
+                        let _ = eval.send(reply);
                     } else if let Some(done) = message.get("done") {
                         break done.clone();
                     }
@@ -683,7 +929,7 @@ pub fn Probe() -> Element {
             }
         };
         // `native` ya quedó guardado con la parte del shell durante la pausa.
-        for key in ["home", "chart", "desk", "deskFull", "multiwindow", "reveal", "error"] {
+        for key in ["home", "chart", "attention", "desk", "deskFull", "multiwindow", "reveal", "error"] {
             if let Some(value) = report.get(key) {
                 record(key, value.clone());
             }

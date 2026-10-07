@@ -214,6 +214,71 @@ def _install_turn_state() -> None:
     api.app.router.routes.insert(0, api.app.router.routes.pop())
 
 
+#: Lo que siembra ``POST /api/fixture/attention`` (#28), con datos reales del ledger.
+ATTENTION = {
+    "urgent": {"body": "El build de Windows falló dos veces seguidas.",
+               "reason": "El CI está rojo: ¿reintento o lo dejo para mañana?"},
+    "urgent2": {"body": "El instalador quedó en 51 MB.",
+                "reason": "Pasó el límite que pusimos: ¿lo publico igual?"},
+    "routine": {"body": "Terminé de leer el README; sigo con el instalador."},
+    "question": {"question": "¿Publico la pre-release de Dioxus?", "header": "Release",
+                 "options": [{"label": "Sí", "description": "publicarla ahora"},
+                             {"label": "Todavía no", "description": "esperar al CI"}]},
+    "question2": {"question": "¿Renombro la rama del spike?", "header": "Rama",
+                  "options": [{"label": "Sí"}, {"label": "No"}]},
+    "tickets": [("Firmar el instalador", "¿Uso el certificado de prueba o espero el real?"),
+                ("Medir el arranque en frío", "¿Mido con el antivirus prendido o apagado?")],
+}
+
+
+def _install_attention() -> None:
+    """`POST /api/fixture/attention` ``{kind}`` (solo en este fixture, #28): el
+    agente ``worker`` le escribe al usuario (mail urgente o de rutina), le
+    pregunta algo, o levanta la bandera de atención en dos tickets. Todo pasa
+    por el ledger real (``post_mail``, ``ask_user``, ``work_create`` y
+    ``work_update``), así que la bandeja, la proyección de notificaciones y el
+    WebSocket ven lo mismo que con un agente de verdad."""
+    from fastapi import HTTPException
+    from orgtree import api, store
+    from orgtree.ledger import USER
+
+    def create(org, kind: str) -> dict:
+        if kind in ("urgent", "urgent2"):
+            mail = org.post_mail(AGENT, USER, ATTENTION[kind]["body"], urgent=True,
+                                 urgent_reason=ATTENTION[kind]["reason"])
+            return {"mail": mail.get("id")}
+        if kind == "routine":
+            return {"mail": org.post_mail(AGENT, USER, ATTENTION["routine"]["body"]).get("id")}
+        if kind in ("question", "question2"):
+            q = ATTENTION[kind]
+            org.ask_user(AGENT, questions=[{"question": q["question"], "header": q["header"],
+                                            "options": q["options"]}])
+            return {"ask": True}
+        if kind == "tickets":
+            slugs = []
+            for title, reason in ATTENTION["tickets"]:
+                item = org.work_create(AGENT, title, objective=(
+                    f"Problema: {title.lower()} bloquea la pre-release. "
+                    "Solución: decidirlo con el usuario y seguir."), owner=AGENT,
+                    status="in_progress")
+                slug = item.get("slug") or item.get("item", {}).get("slug")
+                org.work_update(AGENT, slug, done_so_far=["preparé el entorno"],
+                                working_on_next=["esperar la decisión"],
+                                attention=True, attention_reason=reason)
+                slugs.append(slug)
+            return {"tickets": slugs}
+        raise HTTPException(422, "kind must be urgent, urgent2, routine, question, question2 or tickets")
+
+    def seed(body: dict) -> dict:
+        with store.write_org(ORG) as org:
+            result = create(org, str(body.get("kind") or ""))
+            store.save_org(org)
+        return result
+
+    api.app.add_api_route("/api/fixture/attention", seed, methods=["POST"])
+    api.app.router.routes.insert(0, api.app.router.routes.pop())
+
+
 def _live_frames() -> None:
     from orgtree import supervisor
     time.sleep(8)  # supervisor.stream se conecta al hub del WebSocket al arrancar
@@ -231,6 +296,7 @@ def seeded_load_app():
     result = original_load_app()
     _stub_providers()
     _install_turn_state()
+    _install_attention()
     _seed()
     if os.environ.get("ORGTREE_FIXTURE_LIVE") == "1":
         threading.Thread(target=_live_frames, name="fixture-live", daemon=True).start()

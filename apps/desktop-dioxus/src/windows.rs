@@ -78,6 +78,14 @@ thread_local! {
     static MAIN: RefCell<Option<DesktopContext>> = const { RefCell::new(None) };
     static POPOUTS: Cell<usize> = const { Cell::new(0) };
     static POPOUT_IDS: RefCell<Vec<WindowId>> = const { RefCell::new(Vec::new()) };
+    /// Las ventanas de desk abiertas, para saber si alguna tiene el foco (#28).
+    static POPOUT_WINDOWS: RefCell<Vec<DesktopContext>> = const { RefCell::new(Vec::new()) };
+}
+
+/// ¿Alguna ventana de desk tiene el foco? (las notificaciones se pausan con
+/// Orgtree enfocado, salvo `notifyWhileFocused`).
+pub fn popout_focused() -> bool {
+    POPOUT_WINDOWS.with(|w| w.borrow().iter().any(|d| d.window.is_focused() && !d.window.is_minimized()))
 }
 
 /// La ventana principal se registra al montarse. Cerrarla la oculta.
@@ -128,6 +136,7 @@ pub fn open_desk_window(client: Client, org: String, node: String) {
 fn popout_closed(id: WindowId) {
     POPOUTS.with(|count| count.set(count.get().saturating_sub(1)));
     POPOUT_IDS.with(|ids| ids.borrow_mut().retain(|other| *other != id));
+    POPOUT_WINDOWS.with(|w| w.borrow_mut().retain(|d| d.window.id() != id));
 }
 
 #[derive(Props, Clone)]
@@ -152,6 +161,7 @@ fn DeskWindow(props: DeskWindowProps) -> Element {
     let id = use_hook(|| {
         let id = dioxus::desktop::window().id();
         POPOUT_IDS.with(|ids| ids.borrow_mut().push(id));
+        POPOUT_WINDOWS.with(|w| w.borrow_mut().push(dioxus::desktop::window()));
         id
     });
     use_drop(move || popout_closed(id));

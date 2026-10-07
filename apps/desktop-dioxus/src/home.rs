@@ -4,7 +4,7 @@
 //! la confirmación de `App.tsx`. Fuera del recorte: uso por proveedor, ajustes
 //! de la app y el aviso de actualizaciones.
 
-use crate::icons::{DeleteIcon, GitHubIcon, SettingsIcon};
+use crate::icons::{BellIcon, DeleteIcon, GitHubIcon, SettingsIcon};
 use crate::Route;
 use dioxus::prelude::*;
 use futures_util::StreamExt;
@@ -21,6 +21,7 @@ pub fn Home() -> Element {
     let mut route = use_context::<Signal<Route>>();
     let mut orgs = use_signal(|| None::<Result<Vec<OrgListEntry>, String>>);
     let mut doomed = use_signal(|| None::<OrgListEntry>);
+    let mut notify_settings = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     // `refreshOrgs`: un aviso por el canal adelanta la próxima lectura.
     let refresh = use_coroutine({
@@ -96,12 +97,19 @@ pub fn Home() -> Element {
                 if let Some(message) = error() {
                     div { class: "ask-warn dx-home-error", role: "alert", onclick: move |_| error.set(None), "{message}" }
                 }
+                button { class: "home dx-notify-settings-open", onclick: move |_| notify_settings.set(true),
+                    BellIcon {}
+                    " Notifications"
+                }
                 button { class: "home", disabled: true, title: "fuera del recorte del spike",
                     SettingsIcon {}
                     " Default org settings"
                 }
                 crate::DataRoot {}
             }
+        }
+        if notify_settings() {
+            NotifySettings { onclose: move |_| notify_settings.set(false) }
         }
         if let Some(org) = doomed() {
             // la confirmación de `App.tsx` (`doomedOrg`), sin la línea del kiosk (quitado en v3)
@@ -123,6 +131,53 @@ pub fn Home() -> Element {
                         button { onclick: move |_| doomed.set(None), "cancel" }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// El grupo "Notifications" de los ajustes de escritorio
+/// (`canvas/desktopsettings.tsx`, con `SetGroup` y `SetToggle`): el interruptor
+/// general y uno por tipo de `NOTIFICATION_OPTIONS` (#28).
+#[component]
+fn NotifySettings(onclose: EventHandler<()>) -> Element {
+    let mut prefs = use_signal(crate::notify::prefs);
+    let current = prefs();
+    let master = current.get("notificationsEnabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let mut put = move |key: &'static str, value: bool| {
+        let mut patch = serde_json::Map::new();
+        patch.insert(key.into(), serde_json::Value::Bool(value));
+        prefs.set(crate::notify::set_prefs(&patch));
+    };
+    let mut rows: Vec<(&'static str, &'static str, bool, Option<&'static str>)> =
+        vec![("notificationsEnabled", "Notifications", master, Some("When off, all desktop notifications are suspended."))];
+    for (key, label, _) in crate::notify::OPTIONS {
+        let hint = (key == "notifyWhileFocused").then_some("When off, notifications pause while any Orgtree window has focus.");
+        rows.push((key, label, current.get(key).and_then(|v| v.as_bool()).unwrap_or(false), hint));
+    }
+    rsx! {
+        div { class: "overlay", onclick: move |_| onclose.call(()),
+            div { class: "settings content-height dx-notify-settings", role: "dialog", "aria-modal": "true",
+                onclick: move |e| e.stop_propagation(),
+                h3 { BellIcon {} " Notifications" }
+                div { class: "set-group",
+                    div { class: "set-group-head", "Notifications" }
+                    for (key, label, on, hint) in rows {
+                        label { key: "{key}", class: "set-row", "data-pref": "{key}",
+                            span { class: "set-lead",
+                                input { r#type: "checkbox", role: "switch", "aria-label": "{label}", checked: on,
+                                    disabled: key != "notificationsEnabled" && !master,
+                                    onchange: move |e| put(key, e.checked()) }
+                            }
+                            span { class: "set-label", "{label}" }
+                            span { class: "set-control", span { class: if on { "set-state on" } else { "set-state" }, if on { "on" } else { "off" } } }
+                            if let Some(hint) = hint {
+                                span { class: "set-hint", "{hint}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "row", button { onclick: move |_| onclose.call(()), "close" } }
             }
         }
     }

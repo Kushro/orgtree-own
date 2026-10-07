@@ -102,7 +102,7 @@ impl MailView {
 /// iframes ni URLs `javascript:` (DOMPurify). Un enlace a un archivo local
 /// (`C:\…`) queda inerte, con la ruta en `data-local-path`: un clic lo revela
 /// (`revealFileFromEvent`), nunca navega ni lo abre.
-fn markdown(text: &str) -> String {
+pub(crate) fn markdown(text: &str) -> String {
     use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -193,8 +193,8 @@ fn rows(messages: &[ChatMessage], offset: usize) -> Vec<Row> {
 /// UTC menos hora local) y su nombre corto.
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Tz {
-    offset_min: i64,
-    name: String,
+    pub(crate) offset_min: i64,
+    pub(crate) name: String,
 }
 
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -237,8 +237,27 @@ fn parse_iso(at: &str) -> Option<i64> {
     Some(days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + s - zone)
 }
 
+/// `fmtShort` de `timefmt.ts`: `10-07 09:00`, en hora local (filas de mail, #28).
+pub(crate) fn fmt_short(at: &str, tz: Option<&Tz>) -> String {
+    let (Some(utc), Some(tz)) = (parse_iso(at), tz) else { return String::new() };
+    let local = utc - tz.offset_min * 60;
+    let (_, m, d) = civil_from_days(local.div_euclid(86_400));
+    let secs = local.rem_euclid(86_400);
+    format!("{m:02}-{d:02} {:02}:{:02}", secs / 3600, secs / 60 % 60)
+}
+
+/// La zona horaria del webview (`getTimezoneOffset` y el nombre corto).
+pub(crate) async fn webview_tz() -> Option<Tz> {
+    let mut eval = document::eval(
+        "const name = (Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(new Date()) \
+         .find(p => p.type === 'timeZoneName') || {}).value || ''; \
+         dioxus.send([new Date().getTimezoneOffset(), name]);",
+    );
+    eval.recv::<(i64, String)>().await.ok().map(|(offset_min, name)| Tz { offset_min, name })
+}
+
 /// `fmtFull` de `timefmt.ts`: `2026-10-07 09:00:00 GMT-3`, en hora local.
-fn fmt_local(at: &str, tz: Option<&Tz>) -> String {
+pub(crate) fn fmt_local(at: &str, tz: Option<&Tz>) -> String {
     let (Some(utc), Some(tz)) = (parse_iso(at), tz) else { return String::new() };
     let local = utc - tz.offset_min * 60;
     let (y, m, d) = civil_from_days(local.div_euclid(86_400));

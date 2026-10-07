@@ -5,8 +5,10 @@
 //! HTTP y en el handshake del WebSocket, sin cookies y sin cambios en el
 //! motor. El token nunca llega al webview.
 
+mod attention;
 mod types;
 
+pub use attention::*;
 pub use types::*;
 
 use futures_util::{SinkExt, StreamExt};
@@ -216,6 +218,102 @@ impl Client {
     /// retira un mail que el agente todavía no leyó.
     pub async fn retract_mail(&self, slug: &str, node: &str, mail: &str) -> Result<serde_json::Value, ClientError> {
         self.delete(&format!("/api/orgs/{}/nodes/{}/mail/{}", encode(slug), encode(node), encode(mail))).await
+    }
+
+    // ---- bandeja, preguntas y atención (#28)
+
+    /// `GET /api/orgs/{slug}/inbox` — `getInbox` (api.ts): la bandeja del usuario.
+    pub async fn inbox(&self, slug: &str) -> Result<InboxPayload, ClientError> {
+        self.get(&format!("/api/orgs/{}/inbox", encode(slug))).await
+    }
+
+    /// `POST /api/orgs/{slug}/inbox/read` `{ids}` — `markRead` (api.ts): el
+    /// mail leído pasa del grupo sin leer al archivo de leídos.
+    pub async fn mark_read(&self, slug: &str, ids: &[String]) -> Result<serde_json::Value, ClientError> {
+        self.post(&format!("/api/orgs/{}/inbox/read", encode(slug)), &serde_json::json!({ "ids": ids })).await
+    }
+
+    /// `POST /api/orgs/{slug}/inbox/clear` — `clearInbox` (api.ts): "Mark all
+    /// read", archiva todo lo que queda sin leer.
+    pub async fn clear_inbox(&self, slug: &str) -> Result<serde_json::Value, ClientError> {
+        self.post_empty(&format!("/api/orgs/{}/inbox/clear", encode(slug))).await
+    }
+
+    /// Responder un mail de la bandeja del usuario — `replyMessage` (api.ts):
+    /// `POST …/nodes/{remitente}/message` con `target`, la identidad del mail.
+    pub async fn reply_mail(&self, slug: &str, to: &str, text: &str, mail_id: &str, client_op: Option<String>) -> Result<SendResult, ClientError> {
+        let message = SendMessage {
+            text: text.to_string(),
+            target: Some(serde_json::json!({ "kind": "mail", "org": slug, "box": "user", "id": mail_id })),
+            client_op,
+            ..SendMessage::default()
+        };
+        self.send_message(slug, to, &message).await
+    }
+
+    /// `POST /api/orgs/{slug}/nodes/{nid}/batch` — `resolveBatch` (api.ts): la
+    /// tarjeta compuesta de un agente, resuelta de una vez.
+    pub async fn resolve_batch(&self, slug: &str, node: &str, answer: &BatchAnswer) -> Result<serde_json::Value, ClientError> {
+        let body = serde_json::to_value(answer).expect("BatchAnswer siempre se serializa");
+        self.post(&format!("/api/orgs/{}/nodes/{}/batch", encode(slug), encode(node)), &body).await
+    }
+
+    /// `POST /api/orgs/{slug}/asks/{aid}/answer` — `answerAsk` (api.ts), para
+    /// una pregunta suelta: `{selected?, text?, rev?, dismiss?}`.
+    pub async fn answer_ask(&self, slug: &str, ask: &str, body: &serde_json::Value) -> Result<serde_json::Value, ClientError> {
+        self.post(&format!("/api/orgs/{}/asks/{}/answer", encode(slug), encode(ask)), body).await
+    }
+
+    /// `GET /api/orgs/{slug}/work-items-view` — `getWorkItems` (api.ts) sin
+    /// caché condicional: la respuesta entera.
+    pub async fn work_items(&self, slug: &str) -> Result<WorkItemsPayload, ClientError> {
+        self.get(&format!("/api/orgs/{}/work-items-view", encode(slug))).await
+    }
+
+    /// `POST /api/orgs/{slug}/work-items/{wid}/dismiss-attention` `{set_rev}` —
+    /// `dismissWorkItemAttention` (api.ts). Baja la bandera y pasa el ticket a
+    /// `blocked` (salvo `done` y `review`).
+    pub async fn dismiss_attention(&self, slug: &str, item: &str, set_rev: u64) -> Result<DismissResult, ClientError> {
+        let path = format!("/api/orgs/{}/work-items/{}/dismiss-attention", encode(slug), encode(item));
+        self.post(&path, &serde_json::json!({ "set_rev": set_rev })).await
+    }
+
+    /// `POST /api/orgs/{slug}/work-items/{wid}/reply` `{body}` — `replyWorkItem`
+    /// (api.ts): mail al asignado. Una respuesta del usuario baja la bandera
+    /// sin cambiar el estado del ticket.
+    pub async fn reply_work_item(&self, slug: &str, item: &str, body: &str) -> Result<serde_json::Value, ClientError> {
+        let path = format!("/api/orgs/{}/work-items/{}/reply", encode(slug), encode(item));
+        self.post(&path, &serde_json::json!({ "body": body })).await
+    }
+
+    /// `GET /api/desktop/notifications` con todas sus páginas, como
+    /// `readNotices` (notifications.ts). Con un motor viejo sin contrato de
+    /// páginas que cortó la lista, `active` queda en `None`.
+    pub async fn notifications(&self) -> Result<Notices, ClientError> {
+        let mut out = Notices::default();
+        let mut seen = std::collections::HashSet::new();
+        let mut offset = 0u64;
+        loop {
+            let path = if offset > 0 { format!("/api/desktop/notifications?offset={offset}") } else { "/api/desktop/notifications".to_string() };
+            let page: NoticePage = self.get(&path).await?;
+            for notice in page.notices {
+                if seen.insert(notice.identity()) {
+                    out.notices.push(notice);
+                }
+            }
+            // la pertenencia cubre toda la proyección; vale la de la última página
+            out.active = page.active;
+            if !page.truncated {
+                if out.active.is_none() {
+                    out.active = Some(out.notices.iter().map(DesktopNotice::identity).collect());
+                }
+                return Ok(out);
+            }
+            match page.next_offset {
+                Some(next) if next > offset => offset = next,
+                _ => return Ok(out),
+            }
+        }
     }
 
     /// `GET /api/orgs` — la ventana de inicio.

@@ -3,7 +3,7 @@
 //! mismo cuerpo que el renderer (`apps/desktop/renderer/src/api.ts`), con el
 //! token como header.
 
-use orgtree_engine_client::{Client, ClientError, OpRequest, SendMessage};
+use orgtree_engine_client::{BatchAnswer, Client, ClientError, NoticeIdentity, OpRequest, SendMessage};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -102,6 +102,42 @@ fn ok(method: &str, path: &str) -> (u16, Value) {
         ("POST", p) if p.ends_with("/scope") => (200, json!({
             "scope": { "effort": "low" }, "warnings": [],
             "effort_delivery": { "delivery": "next_turn", "effort": "low" }
+        })),
+        // bandeja, preguntas y atención (#28)
+        ("GET", "/api/orgs/spike-fixture/inbox") => (200, json!({
+            "pending": [{ "id": "m1", "from": "worker", "kind": "message", "body": "El CI está rojo", "at": "2026-10-07T12:00:00Z",
+                          "urgent": true, "urgent_reason": "necesito una decisión" }],
+            "delivered": [], "sent": []
+        })),
+        ("POST", p) if p.ends_with("/inbox/read") => (200, json!({ "read": 1 })),
+        ("POST", p) if p.ends_with("/inbox/clear") => (200, json!({ "ok": true })),
+        ("POST", p) if p.ends_with("/batch") => (200, json!({ "resolved": "worker" })),
+        ("POST", p) if p.ends_with("/answer") => (200, json!({ "answered": "a1", "node": "worker" })),
+        ("GET", p) if p.ends_with("/work-items-view") => (200, json!({
+            "items": [], "counts": {}, "now": "",
+            "attention": [{ "slug": "firmar-instalador", "title": "Firmar", "status": "in_progress",
+                            "owner": { "node": "worker" }, "attention_sources": ["manual"],
+                            "manual_attention": { "reason": "¿certificado?", "at": "2026-10-07T12:00:00Z", "by": { "node": "worker" }, "set_rev": 3 } }]
+        })),
+        ("POST", p) if p.ends_with("/dismiss-attention") => (200, json!({ "dismissed": "firmar-instalador", "status": "blocked", "pending_questions": 0 })),
+        ("POST", p) if p.ends_with("/reply") => (200, json!({ "accepted": true, "to": "worker" })),
+        ("GET", "/api/desktop/notifications") => (200, json!({
+            "notices": [{ "id": "n1", "org": "spike-fixture", "kind": "question", "title": "Question from worker", "body": "¿Publico?", "agent": "worker", "source_id": "a1" }],
+            "total": 2, "truncated": true, "next_offset": 1,
+            "active": [{ "org": "spike-fixture", "id": "n1" }, { "org": "spike-fixture", "id": "n2" }]
+        })),
+        ("GET", "/api/desktop/notifications?offset=1") => (200, json!({
+            "notices": [{ "id": "n2", "org": "spike-fixture", "kind": "work-attention", "title": "Firmar", "body": "¿certificado?", "item": "firmar-instalador", "rev": 3 }],
+            "total": 2, "truncated": false,
+            "active": [{ "org": "spike-fixture", "id": "n1" }, { "org": "spike-fixture", "id": "n2" }]
+        })),
+        ("GET", "/api/orgs/spike-fixture") => (200, json!({
+            "slug": "spike-fixture", "name": "spike-fixture",
+            "roots": [{ "id": "worker", "state": "live", "ask": { "id": 7, "node": "worker", "kind": "batch", "status": "open", "at": "2026-10-07T12:00:00Z",
+                        "tabs": [{ "kind": "question", "question": "¿Publico?", "header": "Release", "options": ["Sí", { "label": "Todavía no", "description": "esperar" }] }],
+                        "revs": { "ask": 1 } } }],
+            // una forma rara en la cabecera no rompe el árbol
+            "asks": "no es una lista"
         })),
         _ => (404, json!({ "detail": "no existe" })),
     }
@@ -212,4 +248,88 @@ async fn el_desk_como_el_renderer() {
     let seen = last(&log);
     assert_eq!((seen.method.as_str(), seen.path.as_str(), seen.body), ("DELETE", "/api/orgs/spike-fixture/nodes/worker/mail/f47beb2b74b8", None));
     assert!(log.lock().unwrap().iter().all(|s| s.token.as_deref() == Some(TOKEN)), "todos los pedidos llevan el token");
+}
+
+#[tokio::test]
+async fn la_bandeja_como_el_renderer() {
+    let (client, log) = fake_engine(ok).await;
+    let inbox = client.inbox("spike-fixture").await.unwrap();
+    assert_eq!(inbox.pending.len(), 1);
+    assert_eq!(inbox.pending[0].urgent, Some(true));
+    assert_eq!(inbox.pending[0].urgent_reason.as_deref(), Some("necesito una decisión"));
+    assert_eq!(last(&log).path, "/api/orgs/spike-fixture/inbox");
+
+    // leer: `markRead(slug, [id])`
+    client.mark_read("spike-fixture", &["m1".to_string()]).await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/orgs/spike-fixture/inbox/read"));
+    assert_eq!(seen.body, Some(json!({ "ids": ["m1"] })));
+    // archivar todo: `clearInbox`, sin cuerpo
+    client.clear_inbox("spike-fixture").await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str(), seen.body), ("POST", "/api/orgs/spike-fixture/inbox/clear", None));
+    // responder: `replyMessage` al remitente, con la identidad del mail como `target`
+    client.reply_mail("spike-fixture", "worker", "Reintentá", "m1", Some("dx-r1".into())).await.unwrap();
+    let seen = last(&log);
+    assert_eq!(seen.path, "/api/orgs/spike-fixture/nodes/worker/message");
+    assert_eq!(seen.body, Some(json!({
+        "text": "Reintentá", "client_op": "dx-r1",
+        "target": { "kind": "mail", "org": "spike-fixture", "box": "user", "id": "m1" }
+    })));
+    assert!(log.lock().unwrap().iter().all(|s| s.token.as_deref() == Some(TOKEN)), "todos los pedidos llevan el token");
+}
+
+#[tokio::test]
+async fn preguntas_y_banderas_como_el_renderer() {
+    let (client, log) = fake_engine(ok).await;
+    // la tarjeta compuesta llega en el árbol; una cabecera rara no lo rompe
+    let tree = client.tree("spike-fixture").await.unwrap();
+    let ask = tree.roots[0].ask.clone().expect("la tarjeta del agente");
+    assert!(ask.is_open() && ask.id == "7" && ask.tabs.len() == 1);
+    assert_eq!(ask.tabs[0].options[0].label, "Sí");
+    assert_eq!(ask.tabs[0].options[1].description.as_deref(), Some("esperar"));
+    assert!(tree.asks.is_empty());
+
+    // responder: `resolveBatch` con las respuestas por posición
+    let answer = BatchAnswer { revs: ask.revs.clone(), answers: Some(vec![json!("Sí")]), ..Default::default() };
+    client.resolve_batch("spike-fixture", "worker", &answer).await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/orgs/spike-fixture/nodes/worker/batch"));
+    assert_eq!(seen.body, Some(json!({ "revs": { "ask": 1 }, "answers": ["Sí"] })));
+    // descartar: la ✕ salta todas las pestañas (`null` explícito)
+    let skip = BatchAnswer { revs: ask.revs.clone(), answers: Some(vec![Value::Null]), ..Default::default() };
+    client.resolve_batch("spike-fixture", "worker", &skip).await.unwrap();
+    assert_eq!(last(&log).body, Some(json!({ "revs": { "ask": 1 }, "answers": [null] })));
+    // una pregunta suelta: `answerAsk(slug, aid, { dismiss: true })`
+    client.answer_ask("spike-fixture", "a1", &json!({ "dismiss": true })).await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.path.as_str(), seen.body), ("/api/orgs/spike-fixture/asks/a1/answer", Some(json!({ "dismiss": true }))));
+
+    // la bandera de un ticket: leer, responder y descartar
+    let work = client.work_items("spike-fixture").await.unwrap();
+    let flagged = &work.attention.as_ref().unwrap()[0];
+    assert_eq!(flagged.manual_attention.as_ref().unwrap().set_rev, 3);
+    assert_eq!(flagged.owner_node().as_deref(), Some("worker"));
+    client.reply_work_item("spike-fixture", "firmar-instalador", "Usá el de prueba").await.unwrap();
+    let seen = last(&log);
+    assert_eq!(seen.path, "/api/orgs/spike-fixture/work-items/firmar-instalador/reply");
+    assert_eq!(seen.body, Some(json!({ "body": "Usá el de prueba" })));
+    let dismissed = client.dismiss_attention("spike-fixture", "firmar-instalador", 3).await.unwrap();
+    assert_eq!(dismissed.status.as_deref(), Some("blocked"));
+    let seen = last(&log);
+    assert_eq!(seen.path, "/api/orgs/spike-fixture/work-items/firmar-instalador/dismiss-attention");
+    assert_eq!(seen.body, Some(json!({ "set_rev": 3 })));
+}
+
+#[tokio::test]
+async fn las_notificaciones_se_leen_con_todas_sus_paginas() {
+    let (client, log) = fake_engine(ok).await;
+    let notices = client.notifications().await.unwrap();
+    let ids: Vec<&str> = notices.notices.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, ["n1", "n2"]);
+    assert_eq!(notices.notices[1].item.as_deref(), Some("firmar-instalador"));
+    let active = notices.active.unwrap();
+    assert!(active.contains(&NoticeIdentity { org: "spike-fixture".into(), id: "n2".into() }));
+    let paths: Vec<String> = log.lock().unwrap().iter().map(|s| s.path.clone()).collect();
+    assert_eq!(paths, ["/api/desktop/notifications", "/api/desktop/notifications?offset=1"]);
 }

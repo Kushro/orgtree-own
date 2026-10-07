@@ -1,10 +1,13 @@
 // Release builds run without a console window on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod attention;
 mod desk;
 mod home;
 mod icons;
+mod inbox;
 mod native;
+mod notify;
 mod org;
 mod probe;
 mod reveal;
@@ -22,6 +25,8 @@ use std::sync::{Mutex, OnceLock};
 pub(crate) const RENDERER_CSS: &str = include_str!("../../desktop/renderer/src/styles.css");
 /// Lo poco que el recorte agrega encima (pantalla de arranque y vista de org).
 pub(crate) const SHELL_CSS: &str = include_str!("shell.css");
+/// La hoja propia de la vista de atención del renderer (`attention/attention.css`), sin cambios (#28).
+pub(crate) const ATTENTION_CSS: &str = include_str!("../../desktop/renderer/src/attention/attention.css");
 
 /// El motor vive fuera del VirtualDom para poder apagarlo al cerrar el loop.
 /// El token nunca llega al webview: solo lo usa el cliente Rust.
@@ -48,7 +53,7 @@ enum Update {
 
 /// Carpeta propia de la app (nunca la de Orgtree instalado): guarda la raíz de
 /// datos por defecto y el descriptor `engine-paths.json`, como `userData` en Electron.
-fn app_dir() -> Option<PathBuf> {
+pub(crate) fn app_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .map(|base| PathBuf::from(base).join("com.kushro.orgtree.dioxus-spike"))
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/orgtree-dioxus-spike")))
@@ -217,6 +222,11 @@ fn App() -> Element {
     use_hook(|| windows::register_main(dioxus::desktop::window()));
     native::use_tray();
     native::use_second_instance();
+    // #28: las notificaciones nativas y la barra de tareas corren solo en la
+    // principal; un clic deja acá el elemento que la vista de la org abre.
+    let focus = use_signal(|| None::<orgtree_engine_client::DesktopNotice>);
+    use_context_provider(|| focus);
+    notify::use_notifications(focus);
     use_hook(move || {
         let (sender, mut receiver) = futures_channel::mpsc::unbounded();
         start_engine(sender);
@@ -250,6 +260,7 @@ fn App() -> Element {
     rsx! {
         style { {RENDERER_CSS} }
         style { {SHELL_CSS} }
+        style { {ATTENTION_CSS} }
         {body}
         if client().is_some() {
             probe::Probe {}

@@ -23,6 +23,10 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 tokio = { version = "1", features = ["time", "sync", "macros"] }
 notify-rust = "4"
 
+# Notificaciones con clic (#28): el toast de WinRT directo, como el spike de Tauri.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

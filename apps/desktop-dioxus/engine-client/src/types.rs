@@ -111,6 +111,10 @@ pub struct TreeNode {
     /// Un cambio de modelo pedido a mitad de turno, en cola para el próximo.
     #[serde(default)]
     pub pending_switch: Option<PendingSwitch>,
+    /// Bandeja y atención (#28): la tarjeta de pedidos abierta del agente
+    /// (`node_ask`, compuesta) o el último pedido resuelto.
+    #[serde(default, deserialize_with = "crate::attention::lenient")]
+    pub ask: Option<crate::AskInfo>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -211,6 +215,10 @@ pub struct TreePayload {
     /// Detención de toda la org (killswitch), si está trabada.
     #[serde(default)]
     pub killswitch: Option<Value>,
+    /// Bandeja y atención (#28): los pedidos abiertos y los últimos resueltos
+    /// de toda la org, también de agentes que el árbol no trae.
+    #[serde(default, deserialize_with = "crate::attention::lenient")]
+    pub asks: Vec<crate::AskInfo>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -302,6 +310,12 @@ pub struct MailRow {
     pub via: Option<String>,
     #[serde(default)]
     pub event_id: Option<String>,
+    /// Bandeja del usuario (#28): mail marcado urgente por su remitente, con
+    /// la razón que tuvo que dar (D-169).
+    #[serde(default)]
+    pub urgent: Option<bool>,
+    #[serde(default)]
+    pub urgent_reason: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -476,6 +490,10 @@ pub struct SendMessage {
     pub attachments: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<Value>,
+    /// La respuesta a un mail (`replyMessage` en api.ts): solo la identidad
+    /// `{kind: 'mail', org, box, id}`; el motor arma el contexto citado.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<Value>,
     /// El nombre de este envío, para reconocer su copia durable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_op: Option<String>,
