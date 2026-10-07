@@ -3,7 +3,9 @@
 //! mismo cuerpo que el renderer (`apps/desktop/renderer/src/api.ts`), con el
 //! token como header.
 
-use orgtree_engine_client::{BatchAnswer, Client, ClientError, NoticeIdentity, OpRequest, QuickStaffSelection, SendMessage, WorkReply};
+use orgtree_engine_client::{
+    BatchAnswer, Client, ClientError, NewAccount, NoticeIdentity, Offer, OpRequest, OrgSettings, QuickStaffSelection, SendMessage, TreePayload, WorkReply,
+};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -86,7 +88,7 @@ fn last(log: &Log) -> Seen {
 fn ok(method: &str, path: &str) -> (u16, Value) {
     match (method, path) {
         ("POST", "/api/orgs") => (200, json!({ "slug": "prueba-dioxus" })),
-        ("DELETE", _) => (200, json!({ "ok": true, "net": { "unregistered": [] } })),
+        ("DELETE", p) if !p.starts_with("/api/accounts/") => (200, json!({ "ok": true, "net": { "unregistered": [] } })),
         ("POST", p) if p.ends_with("/ops") => (200, json!({ "node": "jefe", "warnings": ["aviso"] })),
         ("POST", p) if p.ends_with("/unhalt") => (200, json!({ "node": "a", "unhalted": true })),
         ("POST", p) if p.ends_with("/halt") => {
@@ -165,6 +167,43 @@ fn ok(method: &str, path: &str) -> (u16, Value) {
         })),
         ("POST", p) if p.ends_with("/quick-staff") => (200, json!({ "message": "Staffed medir-la-memoria at top level; ticket moved to Open.", "assigned_to": "medir-la-memoria" })),
         ("GET", p) if p.contains("/artifacts/") => (200, json!("runtime 62.8 MB")),
+        // proveedores, cuentas y ajustes (#30)
+        ("GET", "/api/providers") | ("PUT", "/api/providers/openai/enabled") => (200, json!({
+            "providers": [
+                { "id": "claude", "label": "Claude", "cli": "claude", "hire_enabled": true, "reason": null,
+                  "status": { "installed": true, "connected": true, "version": "2.1.0" },
+                  "tiers": [{ "tier": "haiku", "provider": "claude", "seat": 1, "model": "claude-haiku-4-5", "letter": "H" }] },
+                { "id": "openai", "label": "Codex", "cli": "codex", "hire_enabled": false, "reason": "codex is not signed in",
+                  "status": { "installed": true, "connected": false }, "tiers": [], "user_enabled": true },
+                { "id": "google", "label": "Antigravity", "cli": "agy", "hire_enabled": false, "reason": "not installed",
+                  "status": { "installed": false }, "tiers": [] },
+                { "id": "openrouter", "label": "OpenRouter", "cli": "", "hire_enabled": true, "user_enabled": false,
+                  "status": { "installed": true, "key_set": true }, "tiers": [] },
+                // un proveedor con una forma rara no rompe la lista
+                "no es un proveedor"
+            ],
+            "apikey_fallback": { "claude": false }
+        })),
+        ("GET", "/api/app-settings/runtime") | ("PUT", "/api/app-settings/runtime") => (200, json!({
+            "max_concurrent_turns": 8, "turn_slots": { "limit": 8, "held": 1, "waiting": 0, "waiting_by_org": {} },
+            "warming_enabled": true, "working_checkups_enabled": true, "wait_for_mcp_tools_enabled": false,
+            "idle_docket_reminders_enabled": false, "blocked_docket_reminders_enabled": false, "git_periodic_fetch_enabled": false
+        })),
+        ("GET", "/api/accounts") => (200, json!({
+            "accounts": [{ "id": "acct_1", "provider": "openai", "label": "codex-2", "name": "codex-2", "ambient": false,
+                           "credential": { "kind": "managed", "path": "D:/data/profiles/openai-1" },
+                           "identity": { "email": "a@example.com" }, "tint_ordinal": 1,
+                           "standing": { "auth": "unauthenticated" }, "bound": [{ "org": "o", "node": "worker", "state": "live" }] }],
+            "primary": { "claude": "claude/primary" }
+        })),
+        ("POST", "/api/accounts") => (200, json!({ "id": "acct_2", "provider": "openai", "name": "codex-3", "label": "codex-3",
+                                                   "credential": { "kind": "managed", "path": "D:/data/profiles/openai-2" },
+                                                   "standing": { "auth": "unobserved" } })),
+        ("GET", "/api/accounts/acct_1/identity") => (200, json!({ "account": "acct_1", "identity": {}, "auth": "unauthenticated" })),
+        ("DELETE", "/api/accounts/acct_1") => (200, json!({ "removed": "acct_1", "rebound": [{ "org": "o", "node": "worker" }] })),
+        ("POST", "/api/orgs/spike-fixture/settings") => (200, json!({ "dirs": [], "warnings": ["compaction threshold set to 70%"] })),
+        ("GET", "/api/orgs/spike-fixture/orgmd") => (200, json!({ "content": "# Charter", "chars": 9, "prompt_max": 6000, "read_truncated": false })),
+        ("PUT", "/api/orgs/spike-fixture/orgmd") => (200, json!({ "path": "CLAUDE.md", "bytes": 11, "warnings": [] })),
         _ => (404, json!({ "detail": "no existe" })),
     }
 }
@@ -425,4 +464,78 @@ async fn el_docket_como_el_renderer() {
     // un 404 trae su detail
     let missing = client.work_item("spike-fixture", "no-existe").await.unwrap_err();
     assert!(matches!(missing, ClientError::Status { status: 404, .. }));
+}
+
+#[tokio::test]
+async fn proveedores_cuentas_y_ajustes_como_el_renderer() {
+    let (client, log) = fake_engine(ok).await;
+
+    // proveedores: la lista tolera una entrada rara, y `familyOffer` decide qué se ofrece
+    let providers = client.providers().await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str(), seen.token.as_deref()), ("GET", "/api/providers", Some(TOKEN)));
+    assert_eq!(providers.providers.len(), 4, "una entrada rara se salta y no borra a las demás");
+    let offer = |id: &str| providers.get(id).unwrap().offer();
+    assert_eq!(offer("claude"), Offer::Offer);
+    assert_eq!(offer("openai"), Offer::Disable, "instalado sin sesión: se ve deshabilitado");
+    assert_eq!(offer("google"), Offer::Hide, "no instalado: no aparece");
+    assert_eq!(offer("openrouter"), Offer::Hide, "apagado por el usuario: no aparece");
+    assert_eq!(providers.get("claude").unwrap().tiers[0].model, "claude-haiku-4-5");
+    assert_eq!(providers.apikey_fallback.as_ref().unwrap().get("claude"), Some(&false));
+    client.set_provider_enabled("openai", false).await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("PUT", "/api/providers/openai/enabled"));
+    assert_eq!(seen.body, Some(json!({ "enabled": false })));
+
+    // ajustes de la app: una clave por pedido, como cada set… de api.ts
+    let runtime = client.runtime_settings().await.unwrap();
+    assert_eq!((runtime.max_concurrent_turns, runtime.turn_slots.as_ref().unwrap().held), (Some(8), 1));
+    let saved = client.set_runtime("max_concurrent_turns", json!(8)).await.unwrap();
+    assert_eq!(saved.working_checkups_enabled, Some(true));
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("PUT", "/api/app-settings/runtime"));
+    assert_eq!(seen.body, Some(json!({ "max_concurrent_turns": 8 })));
+    client.set_runtime("enabled", json!(false)).await.unwrap();
+    assert_eq!(last(&log).body, Some(json!({ "enabled": false })));
+
+    // cuentas: listar, agregar, refrescar y quitar
+    let registry = client.accounts().await.unwrap();
+    let row = &registry.accounts[0];
+    assert_eq!((row.provider.as_str(), row.credential.kind.as_str(), row.standing.auth.as_str()), ("openai", "managed", "unauthenticated"));
+    assert_eq!((row.email(), row.bound[0].node.as_str()), (Some("a@example.com"), "worker"));
+    let made = client.add_account(&NewAccount { provider: "openai".into(), kind: "managed".into(), path: None, key: None }).await.unwrap();
+    assert_eq!(made.id, "acct_2");
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/accounts"));
+    assert_eq!(seen.body, Some(json!({ "provider": "openai", "kind": "managed" })));
+    let identity = client.account_identity("acct_1").await.unwrap();
+    assert_eq!((identity.auth.as_str(), last(&log).path.as_str()), ("unauthenticated", "/api/accounts/acct_1/identity"));
+    let removed = client.remove_account("acct_1").await.unwrap();
+    assert_eq!((removed.removed.as_str(), removed.rebound.len()), ("acct_1", 1));
+    assert_eq!(last(&log).method, "DELETE");
+
+    // ajustes de la org: leídos del árbol (con los valores por defecto del panel) y guardados
+    let tree: TreePayload = serde_json::from_value(json!({
+        "slug": "spike-fixture", "name": "spike-fixture", "roots": [],
+        "max_top_grant": 1000, "default_top_grant": 50, "compact_at": 0.8, "default_effort": "", "headless": false
+    }))
+    .unwrap();
+    let mut settings = OrgSettings::from_tree(&tree);
+    assert_eq!((settings.max_top_grant, settings.default_top_grant, settings.compact_at), (1000, 50, 80));
+    assert!(settings.cascade_hire && settings.cascade_alloc && !settings.headless);
+    settings.compact_at = 70;
+    settings.default_effort = "low".into();
+    let result = client.save_org_settings("spike-fixture", &settings.request()).await.unwrap();
+    assert_eq!(result.warnings, ["compaction threshold set to 70%"]);
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/orgs/spike-fixture/settings"));
+    assert_eq!(seen.body, Some(json!({ "max_top_grant": 1000, "default_top_grant": 50, "compact_at": 70, "default_effort": "low",
+                                       "cascade_hire": true, "cascade_alloc": true })));
+    // el charter de la org
+    let md = client.org_md("spike-fixture").await.unwrap();
+    assert_eq!((md.content.as_str(), md.read_truncated), ("# Charter", false));
+    client.put_org_md("spike-fixture", "# Charter 2").await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("PUT", "/api/orgs/spike-fixture/orgmd"));
+    assert_eq!(seen.body, Some(json!({ "content": "# Charter 2" })));
 }

@@ -7,10 +7,12 @@
 
 mod attention;
 mod docket;
+mod settings;
 mod types;
 
 pub use attention::*;
 pub use docket::*;
+pub use settings::*;
 pub use types::*;
 
 use futures_util::{SinkExt, StreamExt};
@@ -148,6 +150,11 @@ impl Client {
 
     pub async fn post<T: serde::de::DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T, ClientError> {
         let response = self.http.post(format!("{}{path}", self.origin)).json(body).send().await?;
+        self.json(response).await
+    }
+
+    pub async fn put<T: serde::de::DeserializeOwned>(&self, path: &str, body: &serde_json::Value) -> Result<T, ClientError> {
+        let response = self.http.put(format!("{}{path}", self.origin)).json(body).send().await?;
         self.json(response).await
     }
 
@@ -377,6 +384,73 @@ impl Client {
                 _ => return Ok(out),
             }
         }
+    }
+
+    // ---- proveedores, cuentas y ajustes (#30)
+
+    /// `GET /api/providers` — `getProviders` (api.ts): cada proveedor con su
+    /// CLI, sus tiers y si está instalado y con sesión en esta máquina.
+    pub async fn providers(&self) -> Result<ProvidersPayload, ClientError> {
+        self.get("/api/providers").await
+    }
+
+    /// `PUT /api/providers/{id}/enabled` `{enabled}` — `setProviderEnabled`
+    /// (api.ts): el interruptor del usuario; responde el documento entero.
+    pub async fn set_provider_enabled(&self, provider: &str, enabled: bool) -> Result<ProvidersPayload, ClientError> {
+        self.put(&format!("/api/providers/{}/enabled", encode(provider)), &serde_json::json!({ "enabled": enabled })).await
+    }
+
+    /// `GET /api/app-settings/runtime` — `getRuntimeSettings` (api.ts).
+    pub async fn runtime_settings(&self) -> Result<RuntimeSettings, ClientError> {
+        self.get("/api/app-settings/runtime").await
+    }
+
+    /// `PUT /api/app-settings/runtime` con una sola clave, como cada `set…` de
+    /// api.ts (`{max_concurrent_turns}`, `{working_checkups_enabled}`…; el
+    /// calentamiento es `{enabled}`). Responde los ajustes enteros.
+    pub async fn set_runtime(&self, key: &str, value: serde_json::Value) -> Result<RuntimeSettings, ClientError> {
+        let mut body = serde_json::Map::new();
+        body.insert(key.to_string(), value);
+        self.put("/api/app-settings/runtime", &serde_json::Value::Object(body)).await
+    }
+
+    /// `GET /api/accounts` — `useAccountRegistry` (accountsregistry.tsx).
+    pub async fn accounts(&self) -> Result<AccountRegistry, ClientError> {
+        self.get("/api/accounts").await
+    }
+
+    /// `POST /api/accounts` — `AddAccountDialog`: una cuenta administrada, una
+    /// carpeta importada o una clave de API.
+    pub async fn add_account(&self, account: &NewAccount) -> Result<AccountRow, ClientError> {
+        let body = serde_json::to_value(account).expect("NewAccount siempre se serializa");
+        self.post("/api/accounts", &body).await
+    }
+
+    /// `GET /api/accounts/{id}/identity` — el "refresh" de una cuenta: lee su
+    /// perfil y actualiza su estado de sesión.
+    pub async fn account_identity(&self, id: &str) -> Result<AccountIdentity, ClientError> {
+        self.get(&format!("/api/accounts/{}/identity", encode(id))).await
+    }
+
+    /// `DELETE /api/accounts/{id}` — quita la cuenta y pasa sus agentes a la
+    /// cuenta por defecto del proveedor.
+    pub async fn remove_account(&self, id: &str) -> Result<RemovedAccount, ClientError> {
+        self.delete(&format!("/api/accounts/{}", encode(id))).await
+    }
+
+    /// `POST /api/orgs/{slug}/settings` — `saveSettings` (api.ts).
+    pub async fn save_org_settings(&self, slug: &str, body: &serde_json::Value) -> Result<SettingsResult, ClientError> {
+        self.post(&format!("/api/orgs/{}/settings", encode(slug)), body).await
+    }
+
+    /// `GET /api/orgs/{slug}/orgmd` — `getOrgMd` (api.ts): el charter de la org.
+    pub async fn org_md(&self, slug: &str) -> Result<OrgMd, ClientError> {
+        self.get(&format!("/api/orgs/{}/orgmd", encode(slug))).await
+    }
+
+    /// `PUT /api/orgs/{slug}/orgmd` `{content}` — `putOrgMd` (api.ts).
+    pub async fn put_org_md(&self, slug: &str, content: &str) -> Result<SettingsResult, ClientError> {
+        self.put(&format!("/api/orgs/{}/orgmd", encode(slug)), &serde_json::json!({ "content": content })).await
     }
 
     /// `GET /api/orgs` — la ventana de inicio.

@@ -168,6 +168,7 @@ fn DeskWindow(props: DeskWindowProps) -> Element {
     rsx! {
         style { {crate::RENDERER_CSS} }
         style { {crate::SHELL_CSS} }
+        crate::settings::ThemeStyle {}
         crate::desk::DeskView { org: props.org.clone(), node: props.node.clone(), popout: true }
         crate::probe::PopoutProbe {}
     }

@@ -22,6 +22,13 @@
 //!   (decisiones, evidencias, artefactos, holders e historial); comentar,
 //!   bajar la bandera, responder la pregunta adjunta y asignar con "Staff…";
 //!   y los cambios de los agentes (estado, bandera, pregunta) en vivo;
+//! - #30, cuentas, proveedores y ajustes: guardar los ajustes de la org y de
+//!   la app y releerlos; el diálogo de contratar filtra los tiers por los
+//!   proveedores instalados; los proveedores con lo que detecta el shell; una
+//!   cuenta administrada de Codex, su login con el `codex` falso del `PATH`
+//!   (los rechazos, el ciclo y cancelar), refrescarla y quitarla; y el tema.
+//!   Al final, un enlace `https` del desk se abre por la vía controlada y los
+//!   raros se muestran como texto;
 //! - #12, desk en RSX: la conversación, la herramienta, el Markdown sanitizado,
 //!   el texto en vivo, la carga de páginas anteriores hasta el primer mensaje y
 //!   los cuadros de un scroll de punta a punta;
@@ -605,6 +612,216 @@ if (home.agentShown) {
   await waitFor(() => document.querySelector('.dx-agent[data-node="worker"]'), 10000);
 }
 
+// #30: ajustes de la org, filtro de tiers al contratar, ajustes de la app,
+// proveedores, cuentas y login (con un `codex` falso en el PATH). Rust
+// contesta lo que dice el motor y el estado del login (`setup_probe`).
+const st = r.setup = {};
+const rpc = async message => { dioxus.send(message); return await dioxus.recv() };
+if (home.agentShown) {
+  const orgToasts = () => [...document.querySelectorAll('.dx-org-view .toast')].map(t => t.textContent);
+  const field = sel => document.querySelector(`.dx-org-settings ${sel}`);
+  const openOrgSettings = async () => {
+    document.querySelector('.dx-org-view .dx-org-settings-open').click();
+    return !!(await waitFor(() => field('[data-setting="compact_at"] input'), 5000));
+  };
+  const closeOrgSettings = async () => {
+    document.querySelector('.dx-org-settings-overlay')?.click();
+    await waitFor(() => !document.querySelector('.dx-org-settings'), 5000);
+  };
+  // 1. Ajustes de la org: Basic (créditos, compactación, esfuerzo y org.md), Policies y Autonomy
+  st.orgOpened = await openOrgSettings();
+  st.orgBefore = await rpc({ settingsState: true });
+  st.orgShown = {
+    compact: field('[data-setting="compact_at"] input')?.value, grant: field('[data-setting="default_top_grant"] input')?.value,
+    effort: field('[data-setting="default_effort"] select')?.value,
+  };
+  setValue(field('[data-setting="compact_at"] input'), '70');
+  setValue(field('[data-setting="default_top_grant"] input'), '7');
+  setValue(field('[data-setting="default_effort"] select'), 'low', 'change');
+  const md = await waitFor(() => field('textarea.orgmd-editor'), 10000);
+  if (md) setValue(md, '# Charter de prueba\n\nEl equipo del spike de Dioxus.');
+  field('[data-tab="policies"]').click();
+  const cascade = await waitFor(() => field('[data-setting="cascade_hire"] input'), 5000);
+  if (cascade) cascade.click();
+  await timeout(300);
+  st.orgDirty = document.querySelector('.dx-org-settings').dataset.dirty;
+  field('[data-tab="basic"]').click();
+  await timeout(200);
+  dioxus.send({ pause: 'org-settings' });
+  await timeout(3000);
+  document.querySelector('.dx-org-settings-save').click();
+  st.orgSaveToast = await waitFor(() => orgToasts().find(t => /saved|compaction|error/.test(t)), 10000);
+  for (let i = 0; i < 30; i++) {
+    st.orgAfter = await rpc({ settingsState: true });
+    if (st.orgAfter && st.orgAfter.settings && st.orgAfter.settings.compact_at === 70) break;
+    await timeout(300);
+  }
+  // releer: cerrar y abrir el panel muestra lo que dice el motor
+  await closeOrgSettings();
+  await timeout(500);
+  await openOrgSettings();
+  await waitFor(() => field('[data-setting="compact_at"] input')?.value === '70', 10000);
+  st.orgReread = {
+    compact: field('[data-setting="compact_at"] input')?.value, grant: field('[data-setting="default_top_grant"] input')?.value,
+    effort: field('[data-setting="default_effort"] select')?.value,
+    orgmd: (await waitFor(() => field('textarea.orgmd-editor'), 10000) || {}).value || null,
+  };
+  field('[data-tab="policies"]').click();
+  st.orgReread.cascadeHire = (await waitFor(() => field('[data-setting="cascade_hire"] input'), 5000) || {}).checked;
+  // headless se guarda en el acto; con las políticas de Fable en 'halt' (las
+  // de fábrica) el motor lo rechaza, y la vista dice por qué
+  field('[data-tab="autonomy"]').click();
+  const headless = await waitFor(() => field('.dx-headless input'), 5000);
+  if (headless) {
+    headless.click();
+    st.headlessToast = await waitFor(() => orgToasts().find(t => t.includes('headless')), 10000);
+    st.headlessUnchanged = (await rpc({ settingsState: true })).settings.headless === false;
+  }
+  await closeOrgSettings();
+
+  // 2. Contratar: los tiers según los proveedores instalados (`/api/providers`)
+  st.providersEngine = await rpc({ providersState: true });
+  if (await pick('@user', 'Hire a top-level agent…')) {
+    const form = await waitFor(() => document.querySelector('.dx-hire'), 5000);
+    const tierSelect = form && await waitFor(() => form.querySelector('#dx-hire-tier[data-providers="known"]'), 10000);
+    if (tierSelect) {
+      const options = [...tierSelect.options];
+      st.hireTiers = options.map(o => o.value);
+      st.hireProviders = [...new Set(options.map(o => o.dataset.provider))];
+      st.hireDisabled = options.filter(o => o.disabled).map(o => o.value);
+      st.orgTiers = await rpc({ orgTiers: true });
+      dioxus.send({ pause: 'hire-filter' });
+      await timeout(3000);
+    }
+    const cancel = form && [...form.querySelectorAll('button')].find(b => b.textContent === 'cancel');
+    if (cancel) cancel.click();
+    await waitFor(() => !document.querySelector('.dx-hire'), 5000);
+  }
+
+  // 3. Ajustes de la app: proveedores, harnesses, cuentas y login
+  document.querySelector('.dx-org-view button.home').click();
+  const openApp = async () => {
+    const button = await waitFor(() => document.querySelector('.welcome-card .dx-app-settings-open'), 10000);
+    if (button) button.click();
+    return await waitFor(() => document.querySelector('.dx-app-settings'), 5000);
+  };
+  const appPanel = () => document.querySelector('.dx-app-settings');
+  const notes = () => [...document.querySelectorAll('.dx-app-settings .dx-settings-note')].map(n => n.textContent);
+  st.appOpened = !!(await openApp());
+  const groups = await waitFor(() => { const g = [...document.querySelectorAll('.dx-app-settings .acct-provider-group')]; return g.length >= 3 && g }, 15000) || [];
+  st.groups = groups.map(g => ({
+    provider: g.dataset.provider,
+    state: (g.querySelector('.acct-provider-state') || {}).textContent || null,
+    harness: (g.querySelector('.dx-harness') || {}).dataset?.detected ?? null,
+    download: !!g.querySelector('.dx-harness-link'),
+    tiers: [...g.querySelectorAll('.acct-provider-tier')].length,
+  }));
+  st.harnesses = await rpc({ harnesses: true });
+  dioxus.send({ pause: 'providers' });
+  await timeout(3000);
+  const codexGroup = () => document.querySelector('.dx-app-settings .acct-provider-group[data-provider="openai"]');
+  const rowIds = () => [...(codexGroup()?.querySelectorAll('.account-row') || [])].map(r => r.dataset.account);
+  const before = rowIds();
+  codexGroup()?.querySelector('.dx-add-account')?.click();
+  const managed = await waitFor(() => document.querySelector('.dx-add-account-dialog .dx-create-managed'), 5000);
+  if (managed) managed.click();
+  st.accountId = await waitFor(() => rowIds().find(id => !before.includes(id)), 15000);
+  st.accountsAfterAdd = await rpc({ accountsState: true });
+  const row = () => st.accountId && document.querySelector(`.dx-app-settings .account-row[data-account="${st.accountId}"]`);
+  if (row()) {
+    st.rowAuth = row().dataset.auth;
+    st.loginIdle = await rpc({ loginStatus: 'codex' });
+    row().querySelector('.dx-signin-start').click();
+    st.loginStarting = !!(await waitFor(() => row()?.querySelector('.dx-signin[data-phase="starting"]'), 5000));
+    for (let i = 0; i < 30; i++) {
+      st.loginRunning = await rpc({ loginStatus: 'codex' });
+      if ((st.loginRunning.output || '').includes('fake-codex login')) break;
+      await timeout(300);
+    }
+    st.loginChecks = await rpc({ loginChecks: true });
+    row()?.scrollIntoView({ block: 'center' });
+    dioxus.send({ pause: 'login' });
+    await timeout(3000);
+    row().querySelector('.dx-signin-cancel').click();
+    st.loginCancelled = !!(await waitFor(() => row()?.querySelector('.dx-signin[data-phase="idle"]'), 5000));
+    st.loginAfter = await rpc({ loginStatus: 'codex' });
+    // refrescar la cuenta (sin sesión) y quitarla
+    row().querySelector('.dx-account-refresh').click();
+    st.refreshNote = await waitFor(() => notes().find(n => n.includes(': unauthenticated')), 10000);
+    row().querySelector('.dx-account-remove').click();
+    st.removed = !!(await waitFor(() => !row(), 10000));
+    st.removeNote = notes().find(n => n.includes('removed')) || null;
+    st.accountsAfterRemove = await rpc({ accountsState: true });
+  }
+
+  // 4. Runtime: límite de turnos y tiempos de turno, guardados y releídos
+  const tab = async id => { appPanel().querySelector(`[data-tab="${id}"]`).click(); await timeout(300) };
+  await tab('runtime');
+  const limit = await waitFor(() => document.querySelector('#app-settings-max-concurrent-turns'), 10000);
+  st.runtimeBefore = await rpc({ runtimeState: true });
+  const toggle = key => document.querySelector(`.dx-app-settings [data-setting="${key}"] input`);
+  if (limit) {
+    setValue(limit, '8');
+    await timeout(200);
+    limit.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    for (let i = 0; i < 20; i++) { st.runtimeAfter = await rpc({ runtimeState: true }); if (st.runtimeAfter.max_concurrent_turns === 8) break; await timeout(300) }
+    toggle('working_checkups_enabled')?.click();
+    await timeout(600);
+    toggle('wait_for_mcp_tools_enabled')?.click();
+    for (let i = 0; i < 20; i++) {
+      st.runtimeAfter = await rpc({ runtimeState: true });
+      if (st.runtimeAfter.working_checkups_enabled === false && st.runtimeAfter.wait_for_mcp_tools_enabled === true) break;
+      await timeout(300);
+    }
+    // releer: cerrar y abrir el panel
+    document.querySelector('.dx-settings-close').click();
+    await waitFor(() => !appPanel(), 5000);
+    await openApp();
+    await tab('runtime');
+    await waitFor(() => document.querySelector('#app-settings-max-concurrent-turns'), 10000);
+    await timeout(500);
+    st.runtimeReread = {
+      limit: document.querySelector('#app-settings-max-concurrent-turns')?.value,
+      checkups: toggle('working_checkups_enabled')?.checked, mcp: toggle('wait_for_mcp_tools_enabled')?.checked,
+      notifications: document.querySelectorAll('.dx-app-settings [data-pref]').length,
+    };
+    document.querySelector('#app-settings-max-concurrent-turns')?.scrollIntoView({ block: 'center' });
+    dioxus.send({ pause: 'runtime' });
+    await timeout(3000);
+    // volver a como estaba
+    const back = document.querySelector('#app-settings-max-concurrent-turns');
+    setValue(back, String(st.runtimeBefore.max_concurrent_turns || 16));
+    back.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    await timeout(600);
+    toggle('working_checkups_enabled')?.click();
+    await timeout(600);
+    toggle('wait_for_mcp_tools_enabled')?.click();
+    await timeout(600);
+    st.runtimeRestored = await rpc({ runtimeState: true });
+  }
+
+  // 5. Display: el tema se guarda en las preferencias y se aplica en el acto
+  await tab('display');
+  const themeSelect = await waitFor(() => document.querySelector('.dx-app-settings .dx-theme-select'), 5000);
+  if (themeSelect) {
+    setValue(themeSelect, 'codex', 'change');
+    st.themeApplied = await waitFor(() => document.querySelector('#dx-theme[data-theme="codex"]')
+      && getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(), 5000);
+    st.themePrefs = await rpc({ prefs: true });
+    dioxus.send({ pause: 'theme' });
+    await timeout(3000);
+    setValue(document.querySelector('.dx-app-settings .dx-theme-select'), 'claude', 'change');
+    st.themeBack = await waitFor(() => document.querySelector('#dx-theme[data-theme="claude"]')
+      && getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(), 5000);
+  }
+  document.querySelector('.dx-settings-close').click();
+  st.appClosed = !!(await waitFor(() => !appPanel(), 5000));
+  // volver a la org del fixture para el desk
+  const again = await waitFor(() => [...document.querySelectorAll('.welcome-card nav .org')].find(el => el.textContent.includes('spike-fixture')), 15000);
+  if (again) again.click();
+  st.backInOrg = !!(await waitFor(() => document.querySelector('.dx-agent[data-node="worker"]'), 15000));
+}
+
 // #12: desk
 const desk = r.desk = {};
 const card = document.querySelector('.dx-agent[data-node="worker"]');
@@ -704,10 +921,11 @@ if (card) {
     if (chip) { chip.click(); full.revealRelative = await waitFor(() => reveals().find(t => t.includes('uploads/informe.txt')), 5000) }
     const missing = [...msgs.querySelectorAll('.md a.local-file')].find(a => a.getAttribute('data-local-path').endsWith('falta.log'));
     if (missing) { missing.click(); full.revealMissing = await waitFor(() => reveals().find(t => t.includes('falta.log')), 5000) }
-    // un enlace externo o relativo no navega ni abre nada: se muestra como texto
+    // #30: un enlace relativo, de otro esquema o con usuario no navega ni abre
+    // nada: se muestra como texto (el https se abre al final, en la etapa externa)
     const links = () => [...document.querySelectorAll('.dx-desk .toast.dx-link')].map(t => t.textContent);
-    for (const a of [...msgs.querySelectorAll('.md a:not(.local-file)')].filter(a => /example\.com|^uploads/.test(a.getAttribute('href')))) a.click();
-    full.linksShown = await waitFor(() => { const l = links(); return l.length >= 2 && l }, 5000);
+    for (const a of [...msgs.querySelectorAll('.md a:not(.local-file)')].filter(a => /^uploads|^ssh:|usuario/.test(a.getAttribute('href')))) a.click();
+    full.linksShown = await waitFor(() => { const l = links(); return l.length >= 3 && l }, 5000);
     full.notNavigated = !!document.querySelector('.dx-desk .msgs');
 
     // estado del turno: inactivo, en cola por el límite de turnos, trabajando
@@ -855,6 +1073,22 @@ if (existing) {
   dioxus.send({ pause: 'reveal' });
   await timeout(3000);
 }
+
+// #30: un enlace https del contenido del agente se abre en el navegador por la
+// vía controlada en Rust (al final: el navegador taparía la ventana). El CI
+// cuenta los navegadores antes y busca el que abrió la URL.
+const ext = r.external = {};
+const web = [...document.querySelectorAll('.dx-desk .md a:not(.local-file)')].find(a => a.getAttribute('href') === 'https://example.com/orgtree');
+ext.found = !!web;
+if (web) {
+  ext.ciBefore = await rpc({ waitCi: 'external-before' });
+  web.click();
+  ext.toast = await waitFor(() => [...document.querySelectorAll('.dx-desk .toast.dx-external')].map(t => t.textContent).find(t => t.includes('example.com/orgtree')), 5000);
+  ext.notNavigated = !!document.querySelector('.dx-desk .msgs');
+  ext.log = await rpc({ externalLog: true });
+  dioxus.send({ pause: 'external' });
+  await timeout(3000);
+}
 dioxus.send({ done: r });
 "#;
 
@@ -933,6 +1167,92 @@ async fn attention_probe(client: &orgtree_engine_client::Client, message: &serde
     None
 }
 
+/// Los pedidos de la etapa #30 que la página le hace a Rust: lo que dice el
+/// motor (ajustes de la org y de la app, proveedores, cuentas), el estado del
+/// login, los harnesses detectados, las preferencias y los enlaces externos.
+/// `None` si el mensaje no es de esta etapa.
+async fn setup_probe(client: &orgtree_engine_client::Client, message: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::json;
+    let err = |e: orgtree_engine_client::ClientError| json!({ "error": e.to_string() });
+    if message.get("settingsState").is_some() {
+        let tree = match client.tree("spike-fixture").await {
+            Ok(tree) => tree,
+            Err(e) => return Some(err(e)),
+        };
+        let s = orgtree_engine_client::OrgSettings::from_tree(&tree);
+        let md = client.org_md("spike-fixture").await.ok().map(|m| m.content);
+        return Some(json!({
+            "settings": { "max_top_grant": s.max_top_grant, "default_top_grant": s.default_top_grant, "compact_at": s.compact_at,
+                          "default_effort": s.default_effort, "cascade_hire": s.cascade_hire, "cascade_alloc": s.cascade_alloc, "headless": s.headless },
+            "orgmd": md,
+        }));
+    }
+    if message.get("orgTiers").is_some() {
+        return Some(match client.tree("spike-fixture").await {
+            Ok(tree) => json!(tree.tiers.keys().collect::<Vec<_>>()),
+            Err(e) => err(e),
+        });
+    }
+    if message.get("providersState").is_some() {
+        return Some(match client.providers().await {
+            Ok(p) => json!(p
+                .providers
+                .iter()
+                .map(|p| (p.id.clone(), json!({ "installed": p.status.installed, "hire_enabled": p.hire_enabled, "offer": format!("{:?}", p.offer()) })))
+                .collect::<serde_json::Map<_, _>>()),
+            Err(e) => err(e),
+        });
+    }
+    if message.get("runtimeState").is_some() {
+        return Some(match client.runtime_settings().await {
+            Ok(r) => json!({ "max_concurrent_turns": r.max_concurrent_turns, "working_checkups_enabled": r.working_checkups_enabled,
+                             "wait_for_mcp_tools_enabled": r.wait_for_mcp_tools_enabled, "warming_enabled": r.warming_enabled }),
+            Err(e) => err(e),
+        });
+    }
+    if message.get("accountsState").is_some() {
+        return Some(match client.accounts().await {
+            Ok(registry) => json!(registry
+                .accounts
+                .iter()
+                .map(|a| json!({ "id": a.id, "provider": a.provider, "kind": a.credential.kind, "auth": a.standing.auth, "ambient": a.ambient }))
+                .collect::<Vec<_>>()),
+            Err(e) => err(e),
+        });
+    }
+    if message.get("harnesses").is_some() {
+        // la ruta del CLI no sale del shell: solo si está
+        return Some(json!(crate::harnesses::detect().iter().map(|h| json!({ "id": h.id, "detected": h.detected(), "url": h.url })).collect::<Vec<_>>()));
+    }
+    if let Some(provider) = message.get("loginStatus").and_then(|v| v.as_str()) {
+        let provider = crate::login::provider(provider).ok()?;
+        return Some(json!(crate::login::logins().status(provider)));
+    }
+    if message.get("loginChecks").is_some() {
+        // con el login de codex en curso: un proveedor inventado, un harness no
+        // detectado, un segundo login del mismo y un código pegado a codex
+        let logins = crate::login::logins();
+        let missing = crate::harnesses::detect().into_iter().find(|h| !h.detected() && h.id != "codex").map(|h| h.id);
+        let refused = missing.map(|id| logins.start(id, Default::default(), crate::login::EngineAccess::current()));
+        let again = logins.start("codex", Default::default(), crate::login::EngineAccess::current());
+        return Some(json!({
+            "badProvider": crate::login::provider("codex --help").err(),
+            "missingId": missing,
+            "missing": refused,
+            "again": again,
+            "code": logins.submit_code("codex", "123456").err(),
+            "harnessLinkBad": crate::harnesses::link("https://example.com").is_none(),
+        }));
+    }
+    if message.get("prefs").is_some() {
+        return Some(crate::notify::prefs());
+    }
+    if message.get("externalLog").is_some() {
+        return Some(json!(crate::external::log_snapshot()));
+    }
+    None
+}
+
 /// La mitad de la etapa #13 que corre en la ventana del desk.
 const POPOUT_SCRIPT: &str = r#"
 const timeout = ms => new Promise(done => setTimeout(done, ms));
@@ -970,6 +1290,23 @@ const waitFor = async (test, ms) => {
   return null;
 };
 const r = {};
+// #30: una instalación nueva, sin orgs, abre el primer uso; sin harnesses en el
+// PATH explica qué instalar, con los enlaces oficiales. Saltearlo lo guarda.
+const onboard = await waitFor(() => document.querySelector('.dx-onboarding'), 30000);
+const ob = r.onboarding = { shown: !!onboard };
+if (onboard) {
+  ob.harnesses = [...onboard.querySelectorAll('.dx-onboard-harness')].map(h => ({ id: h.dataset.harness, detected: h.dataset.detected === 'true', link: !!h.querySelector('.dx-harness-link') }));
+  ob.noHarness = (onboard.querySelector('.dx-no-harness') || {}).textContent || null;
+  ob.themes = onboard.querySelectorAll('.onboard-theme').length;
+  ob.newOrg = !!onboard.querySelector('.dx-new-org');
+  ob.fontFamily = getComputedStyle(onboard).fontFamily;
+  dioxus.send({ pause: 'onboarding' });
+  await timeout(3000);
+  onboard.querySelector('.dx-onboard-skip').click();
+  ob.skipped = !!(await waitFor(() => !document.querySelector('.dx-onboarding') && document.querySelector('.welcome-card nav'), 10000));
+  dioxus.send({ prefs: true });
+  ob.prefs = await dioxus.recv();
+}
 const card = await waitFor(() => document.querySelector('.welcome-card'), 30000);
 r.card = !!card;
 r.version = (document.querySelector('.welcome-card .build-badge') || {}).textContent || null;
@@ -999,6 +1336,8 @@ async fn installed_probe() {
             Ok(message) => {
                 if let Some(name) = message.get("pause").and_then(|v| v.as_str()) {
                     marker(name);
+                } else if message.get("prefs").is_some() {
+                    let _ = eval.send(crate::notify::prefs());
                 } else if let Some(done) = message.get("done") {
                     break done.clone();
                 }
@@ -1146,6 +1485,14 @@ pub fn Probe() -> Element {
                             Err(e) => serde_json::json!({ "error": e.to_string() }),
                         };
                         let _ = eval.send(result);
+                    } else if let Some(name) = message.get("waitCi").and_then(|v| v.as_str()) {
+                        // #30: una pausa en la que el CI hace algo y avisa con `<salida>.<nombre>-done`
+                        marker(name);
+                        let finished = wait_for_ci(name).await;
+                        let _ = eval.send(serde_json::json!(finished));
+                    } else if let Some(reply) = setup_probe(&client, &message).await {
+                        // #30: ajustes, proveedores, cuentas, login, preferencias y enlaces
+                        let _ = eval.send(reply);
                     } else if let Some(reply) = attention_probe(&client, &message).await {
                         // #28: preferencias, ventana, siembra del fixture, registro y clic
                         let _ = eval.send(reply);
@@ -1157,7 +1504,7 @@ pub fn Probe() -> Element {
             }
         };
         // `native` ya quedó guardado con la parte del shell durante la pausa.
-        for key in ["home", "chart", "attention", "docket", "desk", "deskFull", "multiwindow", "reveal", "error"] {
+        for key in ["home", "chart", "attention", "docket", "setup", "desk", "deskFull", "multiwindow", "reveal", "external", "error"] {
             if let Some(value) = report.get(key) {
                 record(key, value.clone());
             }

@@ -554,9 +554,10 @@ pub fn DeskView(org: String, node: String, #[props(default)] popout: bool) -> El
         }
     });
 
-    // Los enlaces del Markdown: un archivo local se revela; nada navega el
-    // webview ni abre nada. Dioxus desktop, sin esto, manda el `href` de
-    // cualquier `<a>` clicado a `webbrowser::open` (`handleClickNavigate` del
+    // Los enlaces del Markdown: un archivo local se revela, un `http(s)` se
+    // abre en el navegador por la vía controlada (#30); nada navega el
+    // webview. Dioxus desktop, sin esto, manda el `href` de cualquier `<a>`
+    // clicado a `webbrowser::open` (`handleClickNavigate` del
     // intérprete), que puede abrir el navegador o lanzar una ruta relativa: el
     // clic se corta en la captura, antes de que llegue a su listener.
     use_future(move || async move {
@@ -577,8 +578,11 @@ pub fn DeskView(org: String, node: String, #[props(default)] popout: bool) -> El
             if let Some(path) = click.get("reveal").and_then(|v| v.as_str()) {
                 desk.reveal(path);
             } else if let Some(href) = click.get("link").and_then(|v| v.as_str()) {
-                // un enlace externo no se abre desde el desk del spike: se muestra para copiarlo
-                desk.toast(format!("Link: {href}"), "dx-link");
+                // #30: `http(s)` se abre en el navegador por la vía controlada en
+                // Rust (`external`); cualquier otra cosa se muestra como texto
+                let line = crate::org::link_line(href);
+                let class = if line.starts_with("Opened") { "dx-link dx-external" } else { "dx-link" };
+                desk.toast(line, class);
             }
         }
     });

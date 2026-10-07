@@ -4,14 +4,19 @@
 mod attention;
 mod desk;
 mod docket;
+mod external;
+mod harnesses;
 mod home;
 mod icons;
 mod inbox;
+mod login;
 mod native;
 mod notify;
 mod org;
+mod orgsettings;
 mod probe;
 mod reveal;
+mod settings;
 mod windows;
 
 use dioxus::desktop::tao::event::Event;
@@ -207,6 +212,8 @@ fn main() {
     let config = Config::new().with_window(window).with_menu(None).with_custom_event_handler(|event, _| {
         // Último evento del loop antes de que la app salga: apagar el motor.
         if let Event::LoopDestroyed = event {
+            // #30: ningún login de proveedor queda vivo (se mata su árbol)
+            login::logins().cancel_all();
             stop_engine();
         }
     });
@@ -239,7 +246,16 @@ fn App() -> Element {
                         probe::startup_status(&text);
                         status.set(text)
                     }
-                    Update::Ready(ready) => client.set(Some(ready)),
+                    Update::Ready(ready) => {
+                        // #30: el tema por defecto sigue al primer proveedor instalado
+                        let probe = ready.clone();
+                        spawn(async move {
+                            if let Ok(payload) = probe.providers().await {
+                                settings::providers_known(&payload);
+                            }
+                        });
+                        client.set(Some(ready))
+                    }
                 }
             }
         });
@@ -262,6 +278,7 @@ fn App() -> Element {
         style { {RENDERER_CSS} }
         style { {SHELL_CSS} }
         style { {ATTENTION_CSS} }
+        settings::ThemeStyle {}
         {body}
         if client().is_some() {
             probe::Probe {}

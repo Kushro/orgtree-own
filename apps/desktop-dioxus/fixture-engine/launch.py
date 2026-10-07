@@ -101,7 +101,9 @@ def _records(sid: str) -> list[dict]:
                     {"type": "thinking", "thinking": "Pienso: el informe está adjunto; lo leo y respondo."},
                     {"type": "text", "text": "Listo. El informe está en "
                      f"[informe.txt](<{REPORT}>) y el log en [falta.log](<{MISSING}>), que no existe. "
-                     "Más en [el sitio](https://example.com/orgtree) y en [un relativo](uploads/informe.txt)."}]})
+                     "Más en [el sitio](https://example.com/orgtree) y en [un relativo](uploads/informe.txt). "
+                     # #30: enlaces que la vía controlada no abre (otro esquema, con usuario)
+                     "Ni [un raro](ssh://example.com/x) ni [con usuario](https://usuario:clave@example.com/)."}]})
     return records + [mail, reply]
 
 
@@ -128,14 +130,18 @@ def _rich_segments() -> list[dict]:
 
 def _stub_providers() -> None:
     from orgtree import accounts, providers, supervisor, warmpool
-    providers.antigravity_status = lambda **kw: {"available": False, "installed": False}
-    providers.codex_status = lambda **kw: {"available": False, "installed": False}
+    # #30: con la forma entera de un CLI ausente, porque `/api/providers` la lee
+    absent = {"available": False, "installed": False, "path": None, "source": "", "version": None,
+              "connected": False, "email": None, "kind": None}
+    providers.antigravity_status = lambda **kw: {**absent, "models": []}
+    providers.codex_status = lambda **kw: {**absent, "codex_home": ""}
     # Proveedor stub para contratar (#26): la puerta de contratación
     # (`provider_hire_gate`) pide el CLI de Claude instalado y una cuenta
     # iniciada. En el CI no hay ninguno de los dos, así que el fixture los
     # declara presentes. Ningún turno corre: `send_message` y el pool de
     # procesos calientes están apagados abajo.
-    supervisor.claude_install_state = lambda force=False: {"installed": True, "path": "fixture-claude"}
+    supervisor.claude_install_state = lambda force=False: {"installed": True, "path": "fixture-claude", "source": "path"}
+    supervisor.cli_version = lambda: "fixture"
     accounts.live_identity = lambda: {"uuid": "fixture-account", "email": ""}
     supervisor.start_usage_warm_loop = lambda: None
     supervisor.start_cred_watcher = lambda: None

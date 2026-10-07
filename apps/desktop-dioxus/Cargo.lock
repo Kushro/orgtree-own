@@ -3312,8 +3312,10 @@ dependencies = [
  "orgtree-engine-client",
  "orgtree-engine-host",
  "pulldown-cmark",
+ "serde",
  "serde_json",
  "tokio",
+ "url",
  "windows 0.62.2",
 ]
 

@@ -100,7 +100,7 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (engine, home, org chart, inbox and attention, docket, full desk, desk window and native integration in RSX)
+      - name: Smoke test (engine, home, org chart, inbox and attention, docket, settings and accounts, full desk, desk window and native integration in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -115,6 +115,7 @@ jobs:
           # escriba al usuario, le pregunte y levante la bandera en dos tickets.
           # Docket (#29): POST /api/fixture/docket siembra tickets por el ledger real y
           # hace que los agentes cambien un estado, levanten la bandera o pregunten.
+          # Cuentas, proveedores y ajustes (#30): un `codex` falso en el PATH de la app.
           ORGTREE_FIXTURE_LIVE: '1'
           ORGTREE_FIXTURE_MESSAGES: '1200'
         run: |
@@ -122,6 +123,15 @@ jobs:
             Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
           if (-not $exe) { throw "orgtree-dioxus.exe not found" }
           Write-Host "Running $($exe.FullName)"
+          # #30: un `codex` falso en el PATH de la app (el runner no trae harnesses). Repite
+          # sus argumentos, avisa si recibió el token o la variable de la prueba (el shell
+          # las quita) y tarda 30 s: si cancelar el login no mata el árbol, deja finished.txt.
+          $fake = Join-Path $env:RUNNER_TEMP 'fake-harness'
+          New-Item -ItemType Directory -Force $fake | Out-Null
+          Set-Content -Path (Join-Path $fake 'codex.cmd') -Encoding ascii -Value @(
+            '@echo off', 'echo fake-codex %*', 'if defined ORGTREE_V2_TOKEN echo token-leak',
+            'if defined ORGTREE_DIOXUS_PROBE echo probe-leak', 'ping -n 30 127.0.0.1 >nul', 'echo done> "%~dp0finished.txt"')
+          $env:PATH = "$fake;$env:PATH"
           # #27: ningún enlace del desk abre el navegador (Dioxus manda cada <a> clicado a webbrowser::open)
           $browsersBefore = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
           $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
@@ -181,10 +191,30 @@ jobs:
             # #28: la barra de tareas parpadeando (ventana minimizada), la cola tras el clic en
             # la notificación, el panel de un ticket con bandera y la bandeja
             # #29: el docket con el detalle de un ticket y con una bandera abierta desde la cola
-            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'taskbar', 'notification-click', 'attention', 'inbox', 'docket', 'docket-flag', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
+            # #30: los ajustes de la org, el filtro de tiers, los proveedores, el login, el
+            # runtime y el tema
+            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'taskbar', 'notification-click', 'attention', 'inbox', 'docket', 'docket-flag', 'org-settings', 'hire-filter', 'providers', 'login', 'runtime', 'theme', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
               if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
                 try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
               }
+            }
+            # #30: antes del enlace externo, contar los navegadores (ninguno abrió antes)
+            if (-not $ci.externalBefore -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).external-before")) {
+              $ci.externalBefore = $true
+              $ci.browsersBeforeExternal = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
+              New-Item -ItemType File -Force "$($env:ORGTREE_DIOXUS_PROBE).external-before-done" | Out-Null
+            }
+            # #30: el enlace https del desk abrió el navegador del sistema en esa URL
+            if (-not $shots['external'] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).external")) {
+              $shots['external'] = $true
+              $until = (Get-Date).AddSeconds(15)
+              do {
+                Start-Sleep -Milliseconds 700
+                $browser = Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'msedge.exe', 'chrome.exe', 'firefox.exe' -and $_.CommandLine -like '*example.com/orgtree*' } | Select-Object -First 1
+              } while (-not $browser -and (Get-Date) -lt $until)
+              $ci.externalBrowser = [bool]$browser
+              $ci.externalBrowserName = if ($browser) { $browser.Name } else { $null }
+              try { Save-Screen 'external' } catch { Write-Host "screenshot: $_" }
             }
             # #27: revelar un archivo abre su carpeta con el archivo seleccionado (explorer /select,)
             if (-not $shots['reveal'] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).reveal")) {
@@ -360,6 +390,51 @@ jobs:
             if ($st.($t.runtime).status -ne 'blocked' -or $st.($t.runtime).flagged -ne $false -or $st.($t.lzma).blocked_reason -ne 'El runner no tiene 7-Zip.' -or $st.($t.docs).status -ne 'dropped' -or $st.($t.docs).archived -ne $true) { $failures += "engine state: $($st | ConvertTo-Json -Compress)" }
           }
           "### Docket (#29, Dioxus)`n- rows: $($dk.rows -join ', ')`n- totals: $($dk.totals.text) (with archived: $($dk.totalsWithArchived.text))`n- filters: blocked $($dk.blockedRows -join ', ') / jefe $($dk.jefeRows -join ', ') / unassigned $($dk.unassignedRows -join ', ')`n- detail: $($dk.detail | ConvertTo-Json -Compress)`n- actions: $($dk.commentToast) / $($dk.dismissToast) / $($dk.answerToast) / $($dk.staffToast)`n- explorer: $($ci.docketExplorer)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #30: ajustes de la org y de la app, filtro de tiers, proveedores, cuentas y login
+          $su = $probe.setup
+          if (-not $su) { $failures += 'the settings stage (#30) did not run' }
+          else {
+            foreach ($check in 'orgOpened', 'appOpened', 'loginStarting', 'loginCancelled', 'removed', 'appClosed', 'backInOrg', 'headlessUnchanged') {
+              if ($su.$check -ne $true) { $failures += "setup.$check was $($su.$check)" }
+            }
+            # ajustes de la org: lo guardado está en el motor y el panel lo relee
+            $os = $su.orgAfter.settings
+            if ($su.orgShown.compact -ne '80' -or $os.compact_at -ne 70 -or $os.default_top_grant -ne 7 -or $os.default_effort -ne 'low' -or $os.cascade_hire -ne $false -or $su.orgAfter.orgmd -notlike '# Charter de prueba*') { $failures += "org settings in the engine: $($su.orgAfter | ConvertTo-Json -Compress)" }
+            # headless se guarda en el acto; el motor lo rechaza con las políticas de Fable en 'halt'
+            if ($su.headlessToast -notlike "error:*headless refuses while*") { $failures += "headless: $($su.headlessToast)" }
+            $rr = $su.orgReread
+            if ($rr.compact -ne '70' -or $rr.grant -ne '7' -or $rr.effort -ne 'low' -or $rr.cascadeHire -ne $false -or $rr.orgmd -notlike '# Charter de prueba*') { $failures += "org settings reread: $($rr | ConvertTo-Json -Compress)" }
+            # contratar: el fixture solo tiene Claude instalado; los tiers de Codex y Antigravity no aparecen
+            $pe = $su.providersEngine
+            if ($pe.claude.offer -ne 'Offer' -or $pe.openai.offer -ne 'Hide' -or $pe.google.offer -ne 'Hide') { $failures += "providers in the engine: $($pe | ConvertTo-Json -Compress)" }
+            $foreign = @($su.orgTiers | Where-Object { $_ -in 'luna', 'sol', 'astra', 'flash', 'pro' })
+            if ((@($su.hireProviders) -join ',') -ne 'claude' -or $su.hireTiers -notcontains 'haiku' -or -not $foreign.Count -or @($su.hireTiers | Where-Object { $_ -in $foreign }).Count) { $failures += "hire filter: offered $($su.hireTiers -join ', ') of $($su.orgTiers -join ', ')" }
+            # proveedores: el codex falso del PATH, detectado por el shell
+            $hc = @($su.harnesses | Where-Object { $_.id -eq 'codex' })[0]
+            $gc = @($su.groups | Where-Object { $_.provider -eq 'openai' })[0]
+            if (-not $hc.detected -or $gc.harness -ne 'true' -or @($su.groups).Count -lt 3) { $failures += "providers panel: $($su.groups | ConvertTo-Json -Compress) / harnesses $($su.harnesses | ConvertTo-Json -Compress)" }
+            # cuentas: una administrada de Codex, su login con el CLI falso, refrescar y quitar
+            if (-not $su.accountId -or -not @($su.accountsAfterAdd | Where-Object { $_.id -eq $su.accountId -and $_.provider -eq 'openai' -and $_.kind -eq 'managed' }).Count) { $failures += "managed account: $($su.accountsAfterAdd | ConvertTo-Json -Compress)" }
+            if ($su.loginIdle.phase -ne 'idle' -or $su.loginRunning.output -notlike '*fake-codex login*') { $failures += "the codex CLI did not run with its fixed arguments: $($su.loginRunning | ConvertTo-Json -Compress)" }
+            if ($su.loginRunning.output -like '*token-leak*' -or $su.loginRunning.output -like '*probe-leak*') { $failures += "the login child inherited scrubbed variables: $($su.loginRunning.output)" }
+            $lc = $su.loginChecks
+            if ($lc.badProvider -notlike '*Unknown login provider*') { $failures += "login with a made-up provider: $($lc.badProvider)" }
+            if (-not $lc.missingId) { $failures += 'no undetected harness to test the login refusal' }
+            elseif ($lc.missing.phase -ne 'error' -or $lc.missing.error -ne 'not-installed' -or $lc.missing.started -ne $false) { $failures += "login of an undetected $($lc.missingId): $($lc.missing | ConvertTo-Json -Compress)" }
+            if ($lc.again.started -ne $false -or $lc.code -notlike '*does not use a pasted code*' -or $lc.harnessLinkBad -ne $true) { $failures += "login checks: $($lc | ConvertTo-Json -Compress)" }
+            if ($su.loginAfter.phase -ne 'idle') { $failures += "login after cancel: $($su.loginAfter | ConvertTo-Json -Compress)" }
+            if ($su.refreshNote -notlike '*: unauthenticated' -or @($su.accountsAfterRemove | Where-Object { $_.id -eq $su.accountId }).Count) { $failures += "account refresh/remove: $($su.refreshNote) / $($su.accountsAfterRemove | ConvertTo-Json -Compress)" }
+            # ajustes de la app: el límite de turnos y los tiempos de turno, guardados y releídos
+            $ra = $su.runtimeAfter
+            if ($ra.max_concurrent_turns -ne 8 -or $ra.working_checkups_enabled -ne $false -or $ra.wait_for_mcp_tools_enabled -ne $true) { $failures += "runtime settings in the engine: $($ra | ConvertTo-Json -Compress)" }
+            if ($su.runtimeReread.limit -ne '8' -or $su.runtimeReread.checkups -ne $false -or $su.runtimeReread.mcp -ne $true -or $su.runtimeReread.notifications -lt 9) { $failures += "runtime settings reread: $($su.runtimeReread | ConvertTo-Json -Compress)" }
+            if ($su.runtimeRestored.max_concurrent_turns -ne $su.runtimeBefore.max_concurrent_turns) { $failures += "turn limit not restored: $($su.runtimeRestored | ConvertTo-Json -Compress)" }
+            # tema: guardado en las preferencias y aplicado en el acto
+            if ($su.themeApplied -ne '#22c4bd' -or $su.themePrefs.visualTheme -ne 'codex' -or $su.themePrefs.visualThemeExplicit -ne $true -or $su.themeBack -ne '#d97757') { $failures += "theme: applied $($su.themeApplied), back $($su.themeBack), prefs $($su.themePrefs | ConvertTo-Json -Compress)" }
+          }
+          # cancelar el login mató el árbol: el CLI falso no llegó a terminar
+          if (Test-Path (Join-Path $fake 'finished.txt')) { $failures += 'the cancelled login left the fake CLI running (finished.txt)' }
+          "### Settings, providers and accounts (#30, Dioxus)`n- org settings: $($su.orgAfter.settings | ConvertTo-Json -Compress)`n- hire tiers: $($su.hireTiers -join ', ') (org: $($su.orgTiers -join ', '))`n- providers: $($su.groups | ConvertTo-Json -Compress)`n- login: $($su.loginRunning.phase) -> '$(($su.loginRunning.output -replace '\s+', ' ').Trim())' -> $($su.loginAfter.phase); refused $($lc.missingId): $($lc.missing.error)`n- runtime: $($su.runtimeAfter | ConvertTo-Json -Compress)`n- theme: $($su.themeApplied)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           # #12: desk en RSX
           $desk = $probe.desk
           foreach ($check in 'opened', 'toolShown', 'markdownBold', 'markdownList', 'injectionBlocked') {
@@ -404,9 +479,18 @@ jobs:
             # esfuerzo
             if (($full.effortLevels -join ',') -ne 'low,medium,high,xhigh,max' -or $full.effortAfter -ne 'low' -or $full.effortToast -notlike '*applies from its next turn') { $failures += "effort: $($full.effortLevels -join ',') / $($full.effortAfter) / $($full.effortToast)" }
           }
-          if (@($full.linksShown | Where-Object { $_ -like 'Link: *' }).Count -lt 2) { $failures += "links in the desk: $($full.linksShown -join ', ')" }
-          $browsersAfter = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
-          if ($browsersAfter -gt $browsersBefore) { $failures += "a browser was opened during the smoke test ($browsersBefore -> $browsersAfter processes)" }
+          # #30: un enlace relativo, de otro esquema o con usuario se muestra como texto, con el motivo
+          $refusedLinks = @($full.linksShown | Where-Object { $_ -like "Link: * $([char]0x2014) *" })
+          if ($refusedLinks.Count -lt 3 -or -not ($full.linksShown -match 'ssh://') -or -not ($full.linksShown -match 'usuario')) { $failures += "links in the desk: $($full.linksShown -join ', ')" }
+          # ningún navegador se abrió antes de la etapa del enlace externo
+          if ($ci.externalBefore -ne $true -or $ci.browsersBeforeExternal -gt $browsersBefore) { $failures += "a browser was opened before the external link stage ($browsersBefore -> $($ci.browsersBeforeExternal) processes)" }
+          # #30: el enlace https se abrió por la vía controlada en Rust, y los raros no
+          $ex = $probe.external
+          if ($ex.toast -ne 'Opened in the browser: https://example.com/orgtree' -or $ex.notNavigated -ne $true) { $failures += "external link: $($ex | ConvertTo-Json -Compress)" }
+          $opened = @($ex.log | Where-Object { $_.opened }); $refused = @($ex.log | Where-Object { $_.refused })
+          if ($opened.Count -ne 1 -or $opened[0].opened -ne 'https://example.com/orgtree' -or $refused.Count -lt 3) { $failures += "external link log: $($ex.log | ConvertTo-Json -Compress)" }
+          if ($ci.externalBrowser -ne $true) { $failures += 'no browser process opened https://example.com/orgtree' }
+          "### External links (#30, Dioxus)`n- opened: $($opened.opened -join ', ') in $($ci.externalBrowserName)`n- refused: $(($refused | ForEach-Object { $_.refused }) -join ' / ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           $rv = $probe.reveal
           if ($rv.toast -notlike 'Shown in folder:*informe.txt' -or $rv.notNavigated -ne $true) { $failures += "reveal of an existing file: $($rv | ConvertTo-Json -Compress)" }
           Write-Host "Explorer windows after the reveal: $($ci.explorer)"
@@ -454,7 +538,7 @@ jobs:
             try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
           }
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Home window, org chart, inbox and attention, docket, full desk, desk window and native integration in RSX verified in WebView2"
+          Write-Host "Home window, org chart, inbox and attention, docket, settings and accounts, full desk, desk window and native integration in RSX verified in WebView2"
 
       # #24: el instalador generado, instalado en silencio en una carpeta descartable
       # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y
@@ -513,7 +597,7 @@ jobs:
             $psi.UseShellExecute = $false; $psi.LoadUserProfile = $true; $psi.WorkingDirectory = $cwd
             $psi.UserName = $user; $psi.Domain = $env:COMPUTERNAME; $psi.Password = $secure
             # Sin el modo de desarrollo: la app tiene que encontrar sus recursos sola.
-            foreach ($name in 'ORGTREE_DIOXUS_PYTHON', 'ORGTREE_DIOXUS_ENGINE_DIR', 'ORGTREE_DATA', 'ORGTREE_PG_BOOTSTRAP') { [void]$psi.Environment.Remove($name) }
+            foreach ($name in 'ORGTREE_DIOXUS_PYTHON', 'ORGTREE_DIOXUS_ENGINE_DIR', 'ORGTREE_DATA', 'ORGTREE_PG_BOOTSTRAP', 'ORGTREE_CODEX', 'ORGTREE_ANTIGRAVITY') { [void]$psi.Environment.Remove($name) }
             foreach ($name in $vars.Keys) { $psi.Environment[$name] = $vars[$name] }
             [System.Diagnostics.Process]::Start($psi)
           }
@@ -529,7 +613,10 @@ jobs:
             TEMP = "$userDir\AppData\Local\Temp"; TMP = "$userDir\AppData\Local\Temp"
           }
           New-Item -ItemType Directory -Force $userVars.TEMP, $userVars.APPDATA | Out-Null
-          $appVars = $userVars + @{ ORGTREE_DIOXUS_DATA = $data; ORGTREE_DIOXUS_PROBE = $probeFile; ORGTREE_DIOXUS_PROBE_MODE = 'installed' }
+          # #30: el PATH de Windows y nada más, como una máquina sin harnesses: el primer uso
+          # explica qué instalar
+          $bare = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem;$env:SystemRoot\System32\WindowsPowerShell\v1.0\"
+          $appVars = $userVars + @{ ORGTREE_DIOXUS_DATA = $data; ORGTREE_DIOXUS_PROBE = $probeFile; ORGTREE_DIOXUS_PROBE_MODE = 'installed'; PATH = $bare }
 
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           function Save-Screen($name) {
@@ -547,10 +634,13 @@ jobs:
           $started = Get-Date
           $p = Start-AsUser $exe '' $appVars $target
           $deadline = (Get-Date).AddSeconds(300)
-          $shot = $false; $splash = $false
+          $shot = $false; $splash = $false; $onboardShot = $false
           while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
             if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) {
               try { Save-Screen 'installed-splash' } catch { Write-Host "screenshot: $_" }; $splash = $true
+            }
+            if (-not $onboardShot -and (Test-Path "$probeFile.onboarding")) {
+              try { Save-Screen 'onboarding' } catch { Write-Host "screenshot: $_" }; $onboardShot = $true
             }
             if (-not $shot -and (Test-Path "$probeFile.installed")) {
               try { Save-Screen 'installed' } catch { Write-Host "screenshot: $_" }; $shot = $true
@@ -568,6 +658,15 @@ jobs:
           $probe = $raw | ConvertFrom-Json
           if (-not $probe.installed) { $failures += "the installed app did not load its UI (startup status: $($probe.startup_status))" }
           $ui = $probe.installed
+          # #30: el primer uso en una instalación nueva, sin harnesses
+          $ob = $ui.onboarding
+          if ($ob.shown -ne $true) { $failures += 'the first-run setup did not show on a fresh installation' }
+          else {
+            if (@($ob.harnesses).Count -ne 3 -or @($ob.harnesses | Where-Object { $_.detected }).Count -or @($ob.harnesses | Where-Object { -not $_.link }).Count) { $failures += "onboarding harnesses: $($ob.harnesses | ConvertTo-Json -Compress)" }
+            if ($ob.noHarness -notlike 'No supported harness was found*') { $failures += "onboarding without harnesses: $($ob.noHarness)" }
+            if ($ob.themes -ne 5 -or $ob.newOrg -ne $true -or $ob.fontFamily -notlike '*Segoe UI*') { $failures += "onboarding card: $($ob | ConvertTo-Json -Compress)" }
+            if ($ob.skipped -ne $true -or $ob.prefs.onboarded -ne $true) { $failures += "skipping the onboarding: $($ob.skipped) / $($ob.prefs | ConvertTo-Json -Compress)" }
+          }
           foreach ($check in 'card', 'orgList', 'empty') {
             if ($ui.$check -ne $true) { $failures += "installed.$check was $($ui.$check)" }
           }

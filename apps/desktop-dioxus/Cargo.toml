@@ -17,7 +17,10 @@ futures-channel = "0.3"
 futures-util = "0.3"
 orgtree-engine-host = { path = "engine-host" }
 orgtree-engine-client = { path = "engine-client" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# #30: los enlaces externos se validan con el parser de URL (solo http y https)
+url = "2"
 ammonia = "4"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 tokio = { version = "1", features = ["time", "sync", "macros"] }

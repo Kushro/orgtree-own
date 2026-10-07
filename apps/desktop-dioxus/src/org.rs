@@ -20,8 +20,8 @@ use crate::icons::HomeIcon;
 use crate::Route;
 use dioxus::prelude::*;
 use orgtree_engine_client::{
-    AskInfo, Backoff, BatchAnswer, Client, DesktopNotice, Frame, InboxPayload, MailRow, NodeState, OpRequest, TreeNode, TreePayload, WorkItem,
-    WorkItemsPayload, WsEvent,
+    AskInfo, Backoff, BatchAnswer, Client, DesktopNotice, Frame, InboxPayload, MailRow, NodeState, Offer, OpRequest, ProvidersPayload, TreeNode,
+    TreePayload, WorkItem, WorkItemsPayload, WsEvent,
 };
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
@@ -195,6 +195,8 @@ pub(crate) struct Ctx {
     /// Las dos casillas del docket: el archivo y el backlog se piden solo con ellas.
     pub(crate) docket_archived: Signal<bool>,
     pub(crate) docket_backlog: Signal<bool>,
+    /// Los ajustes de la org (#30).
+    pub(crate) settings_open: Signal<bool>,
 }
 
 impl Ctx {
@@ -494,6 +496,7 @@ pub fn OrgView(slug: String) -> Element {
         docket_sel: use_signal(|| None),
         docket_archived: use_signal(|| false),
         docket_backlog: use_signal(|| false),
+        settings_open: use_signal(|| false),
     };
     use_context_provider(|| ctx);
     let mut tz = ctx.tz;
@@ -541,7 +544,8 @@ pub fn OrgView(slug: String) -> Element {
                 continue;
             }
             match target.strip_prefix("link:") {
-                Some(href) => ctx.toast(vec![format!("Link: {href}")], None),
+                // #30: solo http(s), por la vía controlada en Rust
+                Some(href) => ctx.toast(vec![link_line(href)], None),
                 None => match crate::reveal::reveal(&target) {
                     Ok(shown) => ctx.toast(vec![format!("Shown in folder: {}", shown.display())], None),
                     Err(why) => ctx.toast(vec![why], None),
@@ -629,6 +633,10 @@ pub fn OrgView(slug: String) -> Element {
                     ViewToggle { attention: attention_count }
                     crate::docket::DocketBell {}
                     crate::inbox::InboxBell {}
+                    button { class: "iconbtn dx-org-settings-open", title: "Org settings", "aria-label": "Org settings",
+                        onclick: move |_| { let mut open = ctx.settings_open; open.set(true) },
+                        crate::icons::SettingsIcon {}
+                    }
                 }
                 crate::native::WindowControls {}
             }
@@ -638,6 +646,11 @@ pub fn OrgView(slug: String) -> Element {
             }
             if (ctx.docket_open)() {
                 crate::docket::DocketPanel {}
+            }
+            if (ctx.settings_open)() {
+                if let Some(Ok(payload)) = &*tree.read() {
+                    crate::orgsettings::OrgSettingsPanel { payload: payload.clone() }
+                }
             }
             Toasts {}
         }
@@ -1181,14 +1194,43 @@ fn DialogView(payload: TreePayload, dialog: Dialog) -> Element {
 #[component]
 fn HireForm(payload: TreePayload, parent: Option<String>) -> Element {
     let mut ctx = use_context::<Ctx>();
-    let mut tiers: Vec<String> = ALL_TIERS.iter().filter(|t| payload.tiers.contains_key(**t)).map(|t| t.to_string()).collect();
-    tiers.extend(payload.tiers.keys().filter(|t| !ALL_TIERS.contains(&t.as_str())).cloned());
+    // #30: los tiers según los proveedores de la máquina (`/api/providers`),
+    // como `familyOffer`: un proveedor no instalado o apagado no aparece; uno
+    // instalado sin poder contratar aparece deshabilitado con su motivo. Hasta
+    // que llega la respuesta (o si falla) se ofrece todo, como el renderer: el
+    // motor rechaza igual en la puerta (`provider_hire_gate`).
+    let mut providers = use_signal(|| None::<ProvidersPayload>);
+    use_hook(move || {
+        let (client, _) = ctx.ids();
+        ctx.spawn(async move {
+            if let Ok(payload) = client.providers().await {
+                crate::settings::providers_known(&payload);
+                let _ = providers.try_write().map(|mut p| *p = Some(payload));
+            }
+        });
+    });
+    let offer = |tier: &str| -> (Offer, Option<String>) {
+        let known = providers.read();
+        match known.as_ref().and_then(|p| p.get(provider_of(tier).0)) {
+            Some(info) => (info.offer(), info.reason.clone()),
+            None => (Offer::Offer, None),
+        }
+    };
+    let mut all: Vec<String> = ALL_TIERS.iter().filter(|t| payload.tiers.contains_key(**t)).map(|t| t.to_string()).collect();
+    all.extend(payload.tiers.keys().filter(|t| !ALL_TIERS.contains(&t.as_str())).cloned());
+    let shown: Vec<(String, Offer, Option<String>)> =
+        all.iter().map(|t| (t.clone(), offer(t))).filter(|(_, (o, _))| *o != Offer::Hide).map(|(t, (o, r))| (t, o, r)).collect();
+    let tiers: Vec<String> = shown.iter().filter(|(_, o, _)| *o == Offer::Offer).map(|(t, ..)| t.clone()).collect();
     let default_grant = if parent.is_none() {
         payload.extra.get("default_top_grant").and_then(|v| v.as_u64()).unwrap_or(0)
     } else {
         0
     };
     let mut tier = use_signal(|| if tiers.iter().any(|t| t == "haiku") { "haiku".to_string() } else { tiers.first().cloned().unwrap_or_default() });
+    // la elección tiene que seguir entre lo ofrecido cuando llegan los proveedores
+    if !tiers.is_empty() && !tiers.contains(&tier.peek()) {
+        tier.set(if tiers.iter().any(|t| t == "haiku") { "haiku".to_string() } else { tiers[0].clone() });
+    }
     let mut name = use_signal(String::new);
     let mut grant = use_signal(move || default_grant.to_string());
     let mut charter = use_signal(String::new);
@@ -1197,7 +1239,7 @@ fn HireForm(payload: TreePayload, parent: Option<String>) -> Element {
         None => "hire a top-level agent".to_string(),
     };
     let seat = |t: &str| payload.tiers.get(t).and_then(|v| v.as_f64()).map(credits).unwrap_or_default();
-    let ok = !name().trim().is_empty() && grant().trim().parse::<u64>().is_ok();
+    let ok = !name().trim().is_empty() && grant().trim().parse::<u64>().is_ok() && tiers.contains(&tier());
     let submit = move |e: FormEvent| {
         e.prevent_default();
         let Ok(credits) = grant().trim().parse::<u64>() else { return };
@@ -1215,10 +1257,16 @@ fn HireForm(payload: TreePayload, parent: Option<String>) -> Element {
             onsubmit: submit,
             h3 { "{title}" }
             label { class: "field-label", r#for: "dx-hire-tier", "model" }
-            select { id: "dx-hire-tier", value: "{tier}", onchange: move |e| tier.set(e.value()),
-                for t in tiers.iter() {
-                    option { key: "{t}", value: "{t}", selected: *t == tier(), "{t} · {provider_of(t).1} · seat {seat(t)}" }
+            select { id: "dx-hire-tier", value: "{tier}", "data-providers": if providers.read().is_some() { "known" } else { "pending" },
+                onchange: move |e| tier.set(e.value()),
+                for (t, o, reason) in shown.iter() {
+                    option { key: "{t}", value: "{t}", selected: *t == tier(), disabled: *o == Offer::Disable,
+                        "data-provider": "{provider_of(t).0}", title: reason.clone().unwrap_or_default(),
+                        {tier_option(t, &seat(t), *o == Offer::Disable)} }
                 }
+            }
+            if shown.is_empty() && providers.read().is_some() {
+                p { class: "ask-warn dx-hire-none", "No provider can hire on this machine. Install and sign in to Claude Code, Codex or Antigravity (App settings → Providers)." }
             }
             label { class: "field-label", r#for: "dx-hire-name", "name" }
             input { id: "dx-hire-name", placeholder: "name…", value: "{name}", autofocus: true,
@@ -1233,6 +1281,25 @@ fn HireForm(payload: TreePayload, parent: Option<String>) -> Element {
                 button { r#type: "button", onclick: move |_| ctx.dialog.set(None), "cancel" }
             }
         }
+    }
+}
+
+/// El texto de una opción de tier, con el motivo de una deshabilitada.
+fn tier_option(tier: &str, seat: &str, disabled: bool) -> String {
+    let base = format!("{tier} · {} · seat {seat}", provider_of(tier).1);
+    if disabled {
+        format!("{base} · unavailable")
+    } else {
+        base
+    }
+}
+
+/// Un enlace del contenido de los agentes (#30): `http(s)` se abre en el
+/// navegador por la vía controlada (`external`); lo demás se muestra como texto.
+pub(crate) fn link_line(href: &str) -> String {
+    match crate::external::open(href) {
+        Ok(url) => format!("Opened in the browser: {url}"),
+        Err(why) => format!("Link: {href} — {why}"),
     }
 }
 

@@ -58,7 +58,23 @@ pub fn normalize(value: &Value) -> Value {
         };
         out.insert(key.into(), Value::Bool(v));
     }
+    // #30: el resto de las preferencias del escritorio que usa el recorte
+    // (`DesktopPreferences`): el primer uso terminado y el tema.
+    out.insert("onboarded".into(), Value::Bool(value.get("onboarded").and_then(Value::as_bool).unwrap_or(false)));
+    let explicit = value.get("visualThemeExplicit").and_then(Value::as_bool).unwrap_or(false);
+    out.insert("visualThemeExplicit".into(), Value::Bool(explicit));
+    let theme = value.get("visualTheme").and_then(Value::as_str).filter(|t| crate::settings::is_visual_theme(t)).unwrap_or("orgtree");
+    out.insert("visualTheme".into(), Value::String(theme.into()));
     Value::Object(out)
+}
+
+/// Si una clave de las preferencias acepta este valor (`preferencesPatch`).
+fn accepted(key: &str, value: &Value) -> bool {
+    match key {
+        "visualTheme" => value.as_str().is_some_and(crate::settings::is_visual_theme),
+        "notificationsEnabled" | "onboarded" | "visualThemeExplicit" => value.is_boolean(),
+        _ => value.is_boolean() && OPTIONS.iter().any(|(k, _, _)| *k == key),
+    }
 }
 
 fn pref(prefs: &Value, key: &str) -> bool {
@@ -108,7 +124,7 @@ pub fn set_prefs(patch: &Map<String, Value>) -> Value {
     let mut next = prefs();
     if let Some(map) = next.as_object_mut() {
         for (key, value) in patch {
-            if value.is_boolean() && (key == "notificationsEnabled" || OPTIONS.iter().any(|(k, _, _)| k == key)) {
+            if accepted(key, value) {
                 map.insert(key.clone(), value.clone());
             }
         }
@@ -124,6 +140,7 @@ pub fn set_prefs(patch: &Map<String, Value>) -> Value {
     retract(&removed);
     log("configure", serde_json::json!({ "prefs": next, "removed": removed_json(&removed) }));
     bump();
+    crate::settings::theme_changed(&next);
     next
 }
 
