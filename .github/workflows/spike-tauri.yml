@@ -310,8 +310,9 @@ jobs:
           Start-Sleep -Seconds 2
           # Si el instalador dejó la app abierta, cerrarla: la prueba la arranca con su entorno.
           Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe.FullName } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          $failures = @()
           node tools/verify-resources.mjs bundle-resources --compare $dir
-          if ($LASTEXITCODE -ne 0) { throw 'the installed resources differ from the staged ones' }
+          if ($LASTEXITCODE -ne 0) { $failures += 'the installed resources differ from the staged ones' }
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           function Save-Screen($name) {
             $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -334,7 +335,6 @@ jobs:
           $ready = ((Get-Date) - $started).TotalSeconds
           Start-Sleep -Seconds 2
           try { Save-Screen 'installed-app' } catch { Write-Host "screenshot: $_" }
-          $failures = @()
           if ($p.HasExited) { $failures += "the installed app exited early with code $($p.ExitCode)" }
           if (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE)) { $failures += 'the install probe did not report within 600 s' }
           else {

@@ -7,6 +7,7 @@
 // <recursos> es bundle-resources/ (antes de empaquetar) o la carpeta donde
 // quedó instalada la app. Con --compare, además exige que el runtime y el
 // motor sean idénticos en las dos carpetas (lo armado contra lo instalado).
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -53,11 +54,28 @@ function inspect(resources) {
   }
 }
 
+// Ruta relativa → tamaño y SHA-256 de cada archivo del motor.
+function hashes(engine) {
+  const out = new Map()
+  for (const file of walk(engine)) {
+    const data = fs.readFileSync(file)
+    out.set(path.relative(engine, file).split(path.sep).join('/'), `${data.length}:${crypto.createHash('sha256').update(data).digest('hex')}`)
+  }
+  return out
+}
+
 const result = inspect(path.resolve(dir))
 if (other) {
   const second = inspect(path.resolve(other))
-  if (second.runtimeDigest !== result.runtimeDigest) throw new Error('el runtime instalado no es idéntico al armado')
-  if (second.engineFiles !== result.engineFiles) throw new Error(`el motor tiene ${second.engineFiles} archivos en ${other} y ${result.engineFiles} en ${dir}`)
+  const [mine, theirs] = [hashes(path.join(path.resolve(dir), 'engine')), hashes(path.join(path.resolve(other), 'engine'))]
+  const missing = [...mine.keys()].filter(file => !theirs.has(file))
+  const extra = [...theirs.keys()].filter(file => !mine.has(file))
+  const changed = [...mine.keys()].filter(file => theirs.has(file) && theirs.get(file) !== mine.get(file))
+  if (missing.length || extra.length || changed.length) {
+    const show = list => list.slice(0, 25).join('\n    ') + (list.length > 25 ? `\n    (+${list.length - 25})` : '')
+    throw new Error(`el motor instalado no es idéntico al armado: ${missing.length} faltan, ${extra.length} sobran, ${changed.length} distintos`
+      + `\n  faltan:\n    ${show(missing)}\n  sobran:\n    ${show(extra)}\n  distintos:\n    ${show(changed)}`)
+  }
   result.compared = second
 }
 console.log(JSON.stringify(result, null, 2))
