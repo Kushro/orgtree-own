@@ -170,3 +170,34 @@ El CI sube capturas de pantalla del desk y de la ventana recuperada (artefacto `
 El workflow `.github/workflows/spike-tauri.yml` hace lo mismo en `windows-latest` en cada push a `spike/tauri`: compila, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-tauri-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.tauri-spike`), así que no pisa una instalación de Orgtree existente.
+
+### Integración nativa (#7)
+
+**Ventana sin marco.** `main` y los popouts usan `decorations(false)`, como `frame: false` en Electron.
+
+- El renderer ya dibuja sus botones (`WindowControls`), que llegan por el shim (`minimizeWindow`, `toggleMaximizeWindow`, `closeWindow`, `getWindowControlsState`).
+- El shell manda eventos `window-state` al cambiar el tamaño o el foco, para que el ícono de maximizar y restaurar siga el estado real.
+- El arrastre usa el `-webkit-app-region` del CSS del renderer **sin cambios**. WebView2 lo respeta porque wry activa `IsNonClientRegionSupportEnabled`, así que no hizo falta `data-tauri-drag-region` ni `startDragging`.
+- tao deja `WS_CAPTION` en la ventana sin marco (para el snap y las animaciones de Windows) y quita el área no cliente. Por eso la prueba compara el área cliente con la ventana, en lugar de mirar el estilo.
+
+**Bandeja.** Feature `tray-icon`, con el menú Abrir Orgtree / Salir. Un clic en el ícono abre la ventana.
+
+- Con `exitOnClose` apagado (el valor por defecto, como en Electron), cerrar `main` la oculta y la app sigue en la bandeja.
+- Con `exitOnClose` prendido, `main` se cierra, salvo que haya popouts abiertos.
+
+**Notificación.** `orgtreeDesktop.notify` llama a `desktop_notify` (`tauri-plugin-notification`), con el filtro mínimo de `NotificationGate`: campos obligatorios, `notificationsEnabled` y una sola vez por org + id.
+
+- Quedan fuera del recorte: el filtro por tipo, el filtro con la ventana enfocada, el clic que abre el elemento y `syncNotifications`.
+- Desde `target/release`, el plugin usa el AppUserModelID de PowerShell. La app instalada usa el suyo.
+
+**Instancia única.** `tauri-plugin-single-instance`: una segunda ejecución termina antes de crear ventanas o lanzar el motor, y la primera muestra y enfoca `main`.
+
+**Verificado en WebView2** con la prueba y el CI:
+
+- `main` no tiene marco y el ícono de la bandeja existe;
+- los botones del renderer se ven, y maximizar y restaurar llegan con sus eventos `window-state` (el ícono cambia a Restore);
+- `notify` devuelve `true` y, la segunda vez, `false`;
+- una segunda ejecución termina sola, y la ventana existente queda enfocada y al frente;
+- el CI arrastra la ventana con el mouse real desde la zona de arrastre del renderer (`.native-header-main`), y la ventana se mueve lo mismo que el mouse (dx 120, dy 60).
+
+Escalado a 125 % y 150 %: el runner de CI corre al 100 % y no se puede cambiar sin cerrar la sesión. Lo prueba una persona en Windows, con las métricas de tamaño, RAM y arranque.

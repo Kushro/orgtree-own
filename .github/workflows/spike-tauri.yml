@@ -206,15 +206,20 @@ jobs:
             [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
             [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
             [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
-            [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+            [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
             [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
             [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
             [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, IntPtr e);
           }
           '@
           $hwnd = [IntPtr][long]$sn.hwnd
-          $style = [Win]::GetWindowLong($hwnd, -16)
-          if ($style -band 0x00C00000) { $failures += ('main window has a caption (style 0x{0:X8})' -f $style) }
+          # tao deja WS_CAPTION (snap, animaciones) y quita el área no cliente: sin marco,
+          # el área cliente ocupa la ventana entera.
+          $wr = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$wr)
+          $cr = New-Object Win+RECT; [void][Win]::GetClientRect($hwnd, [ref]$cr)
+          $frame = "window $($wr.R - $wr.L)x$($wr.B - $wr.T), client $($cr.R)x$($cr.B)"
+          Write-Host "Frame: $frame"
+          if (($wr.R - $wr.L) - $cr.R -gt 2 -or ($wr.B - $wr.T) - $cr.B -gt 2) { $failures += "main window has a native frame: $frame" }
           # Segunda ejecución: tiene que terminar sola y enfocar la ventana existente.
           $second = Start-Process -FilePath $exe.FullName -ArgumentList '--second' -PassThru
           if (-not $second.WaitForExit(20000)) { $second.Kill(); $failures += 'the second instance did not exit' }
