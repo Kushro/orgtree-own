@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, Webview};
 
 /// La ventana principal que llama, o un rechazo.
-fn authorize(webview: &Webview) -> Result<String, String> {
+pub(crate) fn authorize(webview: &Webview) -> Result<String, String> {
     let app = webview.app_handle();
     let engine = app.state::<Shell>().origin.lock().unwrap().clone();
     let url = webview.url().map_err(|e| e.to_string())?;
@@ -42,9 +42,8 @@ pub fn desktop_app_version(webview: Webview, app: AppHandle) -> Result<String, S
 #[tauri::command]
 pub fn desktop_status(webview: Webview) -> Result<Value, String> {
     authorize(&webview)?;
-    let app = webview.app_handle();
-    let running = app.state::<Shell>().engine.lock().unwrap().as_mut().is_some_and(|e| e.is_running());
-    Ok(if running { json!({ "state": "ready" }) } else { json!({ "state": "stopped", "message": "El motor no está corriendo." }) })
+    // #19: el `EngineStatus` que sigue el ciclo de vida (y que emite `engine-status`).
+    Ok(crate::lifecycle::status(webview.app_handle()))
 }
 
 #[tauri::command]
@@ -122,6 +121,7 @@ pub fn desktop_show(webview: Webview) -> Result<(), String> {
 #[tauri::command]
 pub fn desktop_quit(webview: Webview) -> Result<(), String> {
     authorize(&webview)?;
+    crate::lifecycle::note_exit_trigger(webview.app_handle(), "renderer");
     mainwin::request_quit(webview.app_handle());
     Ok(())
 }

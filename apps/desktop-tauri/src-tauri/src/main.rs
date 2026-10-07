@@ -6,7 +6,9 @@ mod desktop;
 mod dialog;
 mod files;
 mod harnesses;
+mod lifecycle;
 mod login;
+mod lprobe;
 mod mainwin;
 mod notifications;
 mod orgwindows;
@@ -115,7 +117,7 @@ impl Default for Shell {
 ///
 /// La raíz de datos es siempre propia de la app (`ORGTREE_TAURI_DATA` o
 /// `<perfil>/data`) y nunca la de Orgtree instalado.
-fn engine_options(app: &tauri::AppHandle) -> Result<(EngineOptions, &'static str), String> {
+pub(crate) fn engine_options(app: &tauri::AppHandle) -> Result<(EngineOptions, &'static str), String> {
     // Nunca la raíz real de Orgtree: por defecto, una carpeta del identificador del spike.
     let profile = profile_dir(app)?;
     let data_root = match std::env::var_os("ORGTREE_TAURI_DATA").filter(|v| !v.is_empty()) {
@@ -198,14 +200,6 @@ fn splash_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window("splash")
 }
 
-fn show_status(app: &tauri::AppHandle, text: &str) {
-    *app.state::<Shell>().status.lock().unwrap() = text.to_string();
-    if let Some(window) = splash_window(app) {
-        let literal = serde_json::to_string(text).unwrap_or_default();
-        let _ = window.eval(format!("window.orgtreeEngineStatus && window.orgtreeEngineStatus({literal})"));
-    }
-}
-
 /// La raíz de datos en uso y el modo, en la ventana de arranque.
 fn show_launch(app: &tauri::AppHandle) {
     let launch = app.state::<Shell>().launch.lock().unwrap().clone();
@@ -221,7 +215,7 @@ fn show_launch(app: &tauri::AppHandle) {
 /// agregar headers al handshake del WebSocket (WebView2Feedback#4303).
 /// `Domain` sin punto inicial es host-only en WebView2; `HttpOnly` la oculta del
 /// JavaScript de la página; sin `Expires` muere con el proceso del webview.
-fn desktop_cookie(engine: &Engine) -> Result<Cookie<'static>, String> {
+pub(crate) fn desktop_cookie(engine: &Engine) -> Result<Cookie<'static>, String> {
     let text = format!(
         "{DESKTOP_COOKIE}={}; Domain=127.0.0.1; Path=/; HttpOnly; SameSite=Strict",
         engine.token().expose()
@@ -238,123 +232,23 @@ fn desktop_cookie(engine: &Engine) -> Result<Cookie<'static>, String> {
 ///    `window.orgtreeDesktop` lleva el origen exacto del motor, que antes no se
 ///    conoce (Electron le pasa el mismo dato al preload por argv). Son las de
 ///    la última sesión, o una Homepage (#20).
-fn open_engine(app: &tauri::AppHandle, engine: &Engine) -> Result<(), String> {
+pub(crate) fn open_engine(app: &tauri::AppHandle, engine: &Engine) -> Result<(), String> {
     let splash = splash_window(app).ok_or("no hay ventana de arranque")?;
     splash.set_cookie(desktop_cookie(engine)?).map_err(|e| format!("set_cookie: {e}"))?;
     *app.state::<Shell>().origin.lock().unwrap() = Some(engine.origin());
     mainwin::open_startup_windows(app).map(|_| ())
 }
 
-fn start_engine(app: tauri::AppHandle) {
-    let options = match engine_options(&app) {
-        Ok((options, mode)) => {
-            *app.state::<Shell>().launch.lock().unwrap() = serde_json::json!({
-                "mode": mode,
-                "dataRoot": absolute(&options.data_root),
-                "engineDir": options.engine_dir,
-            });
-            show_launch(&app);
-            // También en la bandeja, que queda cuando la ventana de arranque se cierra.
-            if let Some(tray) = app.tray_by_id("main") {
-                let _ = tray.set_tooltip(Some(format!("Orgtree (Tauri spike)\nDatos: {}", absolute(&options.data_root).display())));
-            }
-            options
-        }
-        Err(message) => return show_status(&app, &message),
-    };
-    std::thread::Builder::new()
-        .name("orgtree-engine-start".into())
-        .spawn(move || {
-            let mut notify = |phase: &str| {
-                let text = match phase {
-                    "converting" => "Convirtiendo datos…",
-                    _ => "Iniciando el motor…",
-                };
-                show_status(&app, text);
-            };
-            match Engine::start_with(&options, &mut notify) {
-                Ok(engine) => {
-                    let text = format!("Motor listo en {} (pid {}).", engine.origin(), engine.pid().unwrap_or(0));
-                    let opened = open_engine(&app, &engine);
-                    *app.state::<Shell>().engine.lock().unwrap() = Some(engine);
-                    *app.state::<Shell>().options.lock().unwrap() = Some(options.clone());
-                    match opened {
-                        Ok(()) => {
-                            *app.state::<Shell>().status.lock().unwrap() = text;
-                            watch_engine(app.clone());
-                        }
-                        Err(error) => show_status(&app, &format!("{text} No se pudo abrir la interfaz: {error}")),
-                    }
-                }
-                Err(error) => show_status(&app, &format!("El motor no arrancó: {error}")),
-            }
-        })
-        .expect("no se pudo crear el hilo de arranque del motor");
-}
-
-/// Recuperación (#5): si el motor se cae, lo vuelve a lanzar con las mismas
-/// opciones, renueva la cookie (el token es nuevo en cada arranque) y recarga
-/// cada ventana principal, que reconecta su WebSocket. El guardián del motor
-/// puede tardar en liberar la raíz, así que un `root-owned` se reintenta. Si el
-/// puerto cambiara, los shims quedarían con el origen viejo: el motor persiste
-/// su puerto (`engine-port.json`) justamente para que no pase, y el spike no
-/// cubre ese caso.
-fn watch_engine(app: tauri::AppHandle) {
-    std::thread::Builder::new()
-        .name("orgtree-engine-watch".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let state = app.state::<Shell>();
-            if state.quitting.load(Ordering::SeqCst) {
-                return;
-            }
-            let dead = state.engine.lock().unwrap().as_mut().is_some_and(|engine| !engine.is_running());
-            if !dead {
-                continue;
-            }
-            drop(state.engine.lock().unwrap().take());
-            #[cfg(debug_assertions)]
-            eprintln!("[shell] el motor se cayó; reiniciando");
-            let Some(options) = state.options.lock().unwrap().clone() else { return };
-            // ~2 min: en Linux el puerto guardado sigue en TIME_WAIT unos 60 s después
-            // de la caída y el motor rechaza un puerto ocupado (engine/launch.py `_port`).
-            for attempt in 0..90 {
-                if state.quitting.load(Ordering::SeqCst) {
-                    return;
-                }
-                match Engine::start(&options) {
-                    Ok(engine) => {
-                        let same_origin = state.origin.lock().unwrap().as_deref() == Some(engine.origin().as_str());
-                        let windows: Vec<WebviewWindow> =
-                            mainwin::ids(&app).iter().filter_map(|id| app.get_webview_window(id)).collect();
-                        // La cookie es del perfil de WebView2: alcanza con guardarla una vez.
-                        if let (Some(window), Ok(cookie)) = (windows.first(), desktop_cookie(&engine)) {
-                            let _ = window.set_cookie(cookie);
-                        }
-                        if same_origin {
-                            for window in &windows {
-                                let _ = window.eval("location.reload()");
-                            }
-                        }
-                        *state.engine.lock().unwrap() = Some(engine);
-                        state.restarts.fetch_add(1, Ordering::SeqCst);
-                        break;
-                    }
-                    Err(error) if attempt < 89 => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("[shell] reinicio {attempt} falló: {error}");
-                        let _ = error;
-                        std::thread::sleep(std::time::Duration::from_secs(1))
-                    }
-                    Err(error) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("[shell] el motor no volvió: {error}");
-                        let _ = error;
-                    }
-                }
-            }
-        })
-        .expect("no se pudo crear el vigilante del motor");
+/// El modo y la raíz de datos del arranque, en la ventana de arranque y en la
+/// bandeja (#18). El arranque y la recuperación viven en `lifecycle.rs` (#19).
+pub(crate) fn record_launch(app: &tauri::AppHandle, options: &EngineOptions, mode: &str) {
+    *app.state::<Shell>().launch.lock().unwrap() = serde_json::json!({
+        "mode": mode,
+        "dataRoot": absolute(&options.data_root),
+        "engineDir": options.engine_dir,
+    });
+    show_launch(app);
+    refresh_tray_engine(app);
 }
 
 /// Origen `scheme://host:port` de una URL, como lo compara el navegador.
@@ -503,6 +397,10 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Abrir Orgtree", true, None::<&str>)?;
     let new_window = MenuItem::with_id(app, "new-window", "Nueva ventana", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+    // #19: el estado del motor (una línea, como la de Electron) y "Reiniciar motor",
+    // siempre visible y sin confirmación (decisión del usuario, 2026-09-17, en engine.ts).
+    let engine_status = MenuItem::with_id(app, "engine-status", "Motor: iniciando…", false, None::<&str>)?;
+    let engine_restart = MenuItem::with_id(app, "engine-restart", "Reiniciar motor", true, None::<&str>)?;
     let (start, exit) = {
         let state = app.state::<Shell>();
         let prefs = state.preferences.lock().unwrap();
@@ -520,7 +418,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let harness_refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = harness_items.iter().map(|i| i as _).collect();
     let setup = Submenu::with_items(app, "Harness setup", true, &harness_refs)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &new_window, &setup, &separator, &start_at_login, &exit_on_close, &quit])?;
+    let separator2 = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[&engine_status, &engine_restart, &separator2, &open, &new_window, &setup, &separator, &start_at_login, &exit_on_close, &quit],
+    )?;
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("Orgtree (Tauri spike)")
         .menu(&menu)
@@ -535,7 +437,16 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     });
                 }
             }
-            "quit" => mainwin::request_quit(app),
+            "quit" => {
+                lifecycle::note_exit_trigger(app, "tray");
+                mainwin::request_quit(app)
+            }
+            "engine-restart" => {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    lifecycle::restart_engine(&app, "tray");
+                });
+            }
             id => {
                 if let Some(key) = id.strip_prefix("pref:") {
                     let value = !app.state::<Shell>().preferences.lock().unwrap().bool(key);
@@ -555,7 +466,31 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     }
     tray.build(app)?;
     app.manage(TrayChecks { start_at_login, exit_on_close });
+    app.manage(TrayEngine { status: engine_status, restart: engine_restart });
     Ok(())
+}
+
+/// La línea de estado del motor y "Reiniciar motor" de la bandeja (#19).
+struct TrayEngine {
+    status: tauri::menu::MenuItem<tauri::Wry>,
+    restart: tauri::menu::MenuItem<tauri::Wry>,
+}
+
+/// La bandeja sigue al estado del motor: la línea, el tooltip y el texto de
+/// "Reiniciar motor" mientras un reinicio está en curso (`trayEngineState`).
+pub(crate) fn refresh_tray_engine(app: &tauri::AppHandle) {
+    let line = lifecycle::tray_line(app);
+    let restarting = lifecycle::is_restarting(app);
+    if let Some(tray) = app.try_state::<TrayEngine>() {
+        let _ = tray.status.set_text(&line);
+        let _ = tray.restart.set_text(if restarting { "Reiniciando el motor…" } else { "Reiniciar motor" });
+        let _ = tray.restart.set_enabled(!restarting);
+    }
+    if let Some(tray) = app.tray_by_id("main") {
+        let launch = app.state::<Shell>().launch.lock().unwrap().clone();
+        let root = launch["dataRoot"].as_str().map(|r| format!("\nDatos: {r}")).unwrap_or_default();
+        let _ = tray.set_tooltip(Some(format!("Orgtree (Tauri spike)\n{line}{root}")));
+    }
 }
 
 /// Las casillas de preferencias de la bandeja, para seguir los cambios que
@@ -617,6 +552,10 @@ fn record_install_probe(app: &tauri::AppHandle, title: &str) {
 /// #20 tiene su propio director (`wprobe.rs`).
 pub(crate) fn on_main_loaded(app: &tauri::AppHandle, window: &WebviewWindow) {
     let state = app.state::<Shell>();
+    if let Some(probe) = app.state::<lifecycle::Lifecycle>().probe.as_ref() {
+        probe.loaded(window.label());
+        return;
+    }
     if let Some(windows_probe) = state.windows_probe.as_ref() {
         windows_probe.loaded(app, window.label());
         return;
@@ -652,6 +591,10 @@ fn popout_report(app: &tauri::AppHandle) -> serde_json::Value {
 pub(crate) fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
     if title.starts_with(INSTALL_PROBE_PREFIX) {
         return record_install_probe(app, title);
+    }
+    if let Some(probe) = app.state::<lifecycle::Lifecycle>().probe.as_ref() {
+        probe.title(window.label(), title);
+        return;
     }
     let state = app.state::<Shell>();
     if let Some(windows_probe) = state.windows_probe.as_ref() {
@@ -772,6 +715,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| on_second_instance(app, args)))
         .plugin(tauri_plugin_notification::init())
         .manage(Shell::default())
+        .manage(lifecycle::Lifecycle::default())
         .invoke_handler(tauri::generate_handler![
             desktop::desktop_app_version,
             desktop::desktop_status,
@@ -805,6 +749,9 @@ fn main() {
             desktop::desktop_provider_login_status,
             desktop::desktop_provider_login_code,
             desktop::desktop_provider_login_cancel,
+            lifecycle::desktop_maintenance_status,
+            lifecycle::splash_retry,
+            lifecycle::splash_quit,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -826,10 +773,7 @@ fn main() {
                     // La ventana de inicio puede cargar después del primer aviso: reenviarlo.
                     if payload.event() == PageLoadEvent::Finished {
                         let app = window.app_handle();
-                        let status = app.state::<Shell>().status.lock().unwrap().clone();
-                        if !status.is_empty() {
-                            show_status(app, &status);
-                        }
+                        lifecycle::splash_loaded(app);
                         show_launch(app);
                     }
                 });
@@ -840,7 +784,8 @@ fn main() {
             reap_closed_popouts(handle.clone());
             probe::watch_late(handle.clone());
             wprobe::start(handle.clone());
-            start_engine(handle);
+            lprobe::start(handle.clone());
+            lifecycle::start_engine(handle);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -853,13 +798,18 @@ fn main() {
                 mainwin::save_session(app);
             }
         }
+        // La salida ordenada ya apagó el motor (`mainwin::shutdown`). Si llega acá
+        // con el motor vivo, es el fin de la sesión de Windows o el instalador: el
+        // Restart Manager y Windows mandan `WM_ENDSESSION`, y tao termina el bucle
+        // (`RunEvent::Exit`) sin pasar por `ExitRequested`. Se guarda la sesión y se
+        // apaga el motor con el mismo presupuesto, antes de que el proceso termine.
         RunEvent::Exit => {
-            app.state::<Shell>().quitting.store(true, Ordering::SeqCst);
+            if !app.state::<Shell>().quitting.swap(true, Ordering::SeqCst) {
+                mainwin::save_session(app);
+            }
             // Ningún login de proveedor queda vivo después de la app (como el `quit` de Electron).
             app.state::<Shell>().logins.cancel_all();
-            if let Some(engine) = app.state::<Shell>().engine.lock().unwrap().take() {
-                let _ = engine.stop();
-            }
+            lifecycle::stop_engine_for_exit(app, "session-end");
         }
         _ => {}
     });

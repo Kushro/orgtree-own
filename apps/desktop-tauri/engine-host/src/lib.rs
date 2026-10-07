@@ -17,8 +17,14 @@
 //! En modo empaquetado (`packaged`), además pasa las rutas de PostgreSQL y
 //! `ORGTREE_PG_BOOTSTRAP=1`, como `apps/desktop/main/postgres-runtime.ts`.
 //!
-//! No incluye la conexión a un motor del arranque del sistema (attach) ni el
-//! vigilante de cuelgues: quedan fuera del recorte del spike.
+//! Ciclo de vida (#19): las fases de arranque y de conversión llegan al shell
+//! (`StartupEvent`), la salida tiene el presupuesto de `QUIT_DEADLINES` de
+//! Electron (`stop_for_quit`) y prueba que el árbol soltó la raíz (el candado
+//! del guardián), y `LivenessWatch` decide cuándo un motor colgado se reinicia,
+//! con las reglas de `LIVENESS`.
+//!
+//! No incluye la conexión a un motor del arranque del sistema (attach): la app
+//! del spike no instala esa tarea programada.
 
 pub mod packaged;
 
@@ -58,6 +64,173 @@ const SHUTDOWN_REQUEST: Duration = Duration::from_secs(3);
 const SHUTDOWN_EXIT_WAIT: Duration = Duration::from_secs(5);
 const KILL_EXIT_WAIT: Duration = Duration::from_secs(5);
 
+/// `QUIT_DEADLINES` de `apps/desktop/main/engine.ts`: cada fase que puede
+/// gastar una salida. `stop_for_quit` reparte un solo presupuesto entre ellas.
+pub mod quit_deadlines {
+    use std::time::Duration;
+    /// `stop()` de un hijo administrado: 3 s de pedido de apagado y 5 s de espera.
+    pub const MANAGED_STOP: Duration = Duration::from_secs(8);
+    /// El pedido autenticado a un motor enganchado (attach; no aplica acá).
+    pub const REQUEST: Duration = Duration::from_secs(4);
+    /// Esperar la prueba de salida después de pedir por las buenas.
+    pub const RELEASE: Duration = Duration::from_secs(8);
+    /// `taskkill /T /F` sobre el árbol: el techo, no lo esperable.
+    pub const KILL: Duration = Duration::from_secs(5);
+    /// La prueba después de matar: la salida y el candado del guardián.
+    pub const PROVEN: Duration = Duration::from_secs(5);
+}
+
+/// `QUIT_STOP_BUDGET_MS`: el peor caso de una salida (26 s).
+pub const QUIT_STOP_BUDGET: Duration = Duration::from_secs(
+    if quit_deadlines::MANAGED_STOP.as_secs() > quit_deadlines::REQUEST.as_secs() {
+        quit_deadlines::MANAGED_STOP.as_secs()
+    } else {
+        quit_deadlines::REQUEST.as_secs()
+    } + quit_deadlines::RELEASE.as_secs()
+        + quit_deadlines::KILL.as_secs()
+        + quit_deadlines::PROVEN.as_secs(),
+);
+
+/// `INSTALLER_UPGRADE_STOP_BUDGET_MS` de Electron. En Tauri el instalador NSIS
+/// cierra la app con el Restart Manager (`WM_ENDSESSION`), que pasa por la
+/// misma salida que el fin de sesión de Windows; queda como referencia.
+pub const INSTALLER_UPGRADE_STOP_BUDGET: Duration = Duration::from_secs(45);
+
+/// Archivo del candado del guardián (`engine/process_lifetime.py`, `RootLock`).
+pub const ROOT_LOCK_FILE: &str = ".desktop-engine.lock";
+
+/// Reglas del vigilante de cuelgues, número por número las de `LIVENESS` en
+/// Electron (y las del host de arranque, `engine/service_host.py`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LivenessRules {
+    pub interval: Duration,
+    pub probe_timeout: Duration,
+    pub deadline: Duration,
+    pub min_failures: u32,
+    pub restart_limit: usize,
+    pub restart_window: Duration,
+}
+
+pub const LIVENESS: LivenessRules = LivenessRules {
+    interval: Duration::from_secs(30),
+    probe_timeout: Duration::from_secs(60),
+    deadline: Duration::from_secs(300),
+    min_failures: 3,
+    restart_limit: 3,
+    restart_window: Duration::from_secs(3600),
+};
+
+/// Colgado exige las dos cosas: un silencio largo desde la última respuesta
+/// buena y varias sondas fallidas. Una respuesta lenta es contención, no cuelgue.
+#[derive(Debug, Clone)]
+pub struct LivenessWatch {
+    rules: LivenessRules,
+    last_ok: Instant,
+    failures: u32,
+    last_error: Option<String>,
+}
+
+impl LivenessWatch {
+    pub fn new(rules: LivenessRules, now: Instant) -> Self {
+        LivenessWatch { rules, last_ok: now, failures: 0, last_error: None }
+    }
+
+    /// Anota una sonda: `None` si respondió como sí mismo, si no el motivo.
+    pub fn record(&mut self, error: Option<String>, now: Instant) {
+        match error {
+            None => {
+                self.last_ok = now;
+                self.failures = 0;
+                self.last_error = None;
+            }
+            Some(error) => {
+                self.failures += 1;
+                self.last_error = Some(error);
+            }
+        }
+    }
+
+    pub fn silent(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_ok)
+    }
+
+    pub fn failures(&self) -> u32 {
+        self.failures
+    }
+
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub fn hung(&self, now: Instant) -> bool {
+        self.failures >= self.rules.min_failures && self.silent(now) >= self.rules.deadline
+    }
+}
+
+/// Cuántos reinicios automáticos van en la ventana: los cuelgues (y las caídas
+/// en el shell) se reinician a lo sumo `limit` veces por `window`.
+#[derive(Debug, Clone)]
+pub struct RestartBudget {
+    limit: usize,
+    window: Duration,
+    at: Vec<Instant>,
+}
+
+impl RestartBudget {
+    pub fn new(limit: usize, window: Duration) -> Self {
+        RestartBudget { limit, window, at: Vec::new() }
+    }
+
+    /// Anota un reinicio en `now` y dice si todavía entra en el presupuesto.
+    pub fn consider(&mut self, now: Instant) -> bool {
+        let window = self.window;
+        self.at.retain(|t| now.saturating_duration_since(*t) < window);
+        self.at.push(now);
+        self.at.len() <= self.limit
+    }
+
+    pub fn recent(&self) -> usize {
+        self.at.len()
+    }
+
+    /// Un reinicio pedido por la persona (la bandeja) vuelve a empezar la cuenta.
+    pub fn reset(&mut self) {
+        self.at.clear();
+    }
+}
+
+/// Lo que el arranque le cuenta al shell, en orden.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupEvent<'a> {
+    /// Se lanzó el proceso.
+    Starting,
+    /// Un checkpoint de arranque (`startup-progress`), con su fase.
+    Progress(&'a str),
+    /// Un checkpoint de la conversión de datos (`database-convert…`).
+    Converting(&'a str),
+}
+
+/// Cómo terminó `Engine::stop_for_quit`, como `stopForQuit` de Electron.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitOutcome {
+    /// Salió por las buenas y el árbol soltó la raíz.
+    Stopped,
+    /// Hubo que matar el árbol, y después soltó la raíz.
+    Forced,
+    /// No se pudo probar que el árbol terminó dentro del presupuesto.
+    Unverified,
+}
+
+impl QuitOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuitOutcome::Stopped => "stopped",
+            QuitOutcome::Forced => "forced",
+            QuitOutcome::Unverified => "unverified",
+        }
+    }
+}
+
 /// Credencial del escritorio para un arranque. Solo vive en este proceso y en
 /// el entorno del motor, que la borra antes de lanzar hijos.
 #[derive(Clone, PartialEq, Eq)]
@@ -95,6 +268,9 @@ pub struct EngineOptions {
     pub ui_dir: Option<PathBuf>,
     /// Plazo de silencio entre checkpoints; `STARTUP_SILENCE` por defecto.
     pub silence_timeout: Duration,
+    /// Plazo de silencio mientras la fase es de conversión (`database-convert…`);
+    /// `CONVERSION_SILENCE` por defecto. Mide el tiempo entre checkpoints, no el total.
+    pub conversion_timeout: Duration,
     /// `ORGTREE_PG_BOOTSTRAP=1`: una raíz nueva nace en PostgreSQL. Solo la app
     /// empaquetada lo pide; nunca se hereda del entorno.
     pub bootstrap_postgres: bool,
@@ -113,6 +289,7 @@ impl EngineOptions {
             data_root: data_root.into(),
             ui_dir: None,
             silence_timeout: STARTUP_SILENCE,
+            conversion_timeout: CONVERSION_SILENCE,
             bootstrap_postgres: false,
             env: Vec::new(),
             forbidden_roots: Vec::new(),
@@ -172,10 +349,51 @@ pub enum StopOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Line {
     Ready { port: u16 },
-    Progress { sequence: u64, conversion: bool },
+    Progress { sequence: u64, phase: String },
     Refused(String),
     ConversionFailed(String),
     Ignored,
+}
+
+/// ¿Es una fase de la conversión de datos de la primera ejecución?
+pub fn is_conversion_phase(phase: &str) -> bool {
+    phase.starts_with(CONVERSION_PHASE)
+}
+
+/// El texto que acompaña a una fase de conversión, sin el prefijo
+/// (`database-convert: org 1/4` → `org 1/4`), como `conversionMessage`.
+pub fn conversion_detail(phase: &str) -> &str {
+    phase.strip_prefix(CONVERSION_PHASE).unwrap_or(phase).trim_start_matches([':', ' ', '-'])
+}
+
+/// ¿El árbol del motor soltó la raíz? El guardián tiene un candado exclusivo
+/// sobre el byte 0 de `.desktop-engine.lock` hasta que termina el árbol entero
+/// (PostgreSQL y los CLIs incluidos), así que poder escribir ese byte (el mismo
+/// que ya tiene) lo prueba. Sin archivo, ningún árbol tomó la raíz. Como
+/// `guardianReleased` y `rootReleased` en Electron.
+pub fn root_released(root: &Path) -> bool {
+    let lock = root.join(ROOT_LOCK_FILE);
+    if !lock.exists() {
+        return true;
+    }
+    match std::fs::OpenOptions::new().write(true).open(&lock) {
+        Ok(mut file) => file.write_all(b"0").is_ok() && file.flush().is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Espera a que el árbol suelte la raíz, hasta `budget`.
+pub fn wait_root_released(root: &Path, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        if root_released(root) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// ¿`a` es `b` o está dentro de `b`? Por componentes, sin mayúsculas en Windows.
@@ -272,7 +490,7 @@ fn classify(line: &str, expected_root: &Path, pid: u32, previous: u64) -> Result
             match (valid, sequence, phase) {
                 (true, Some(sequence), Some(phase)) if sequence > previous => Ok(Line::Progress {
                     sequence,
-                    conversion: phase.starts_with(CONVERSION_PHASE),
+                    phase: phase.to_string(),
                 }),
                 _ => Ok(Line::Ignored),
             }
@@ -359,8 +577,9 @@ impl Engine {
         Self::start_with(options, &mut |_| {})
     }
 
-    /// Como `start`, avisando cada fase (`starting`, `progress`, `converting`).
-    pub fn start_with(options: &EngineOptions, notify: &mut dyn FnMut(&str)) -> Result<Engine, EngineError> {
+    /// Como `start`, avisando cada fase (`StartupEvent`): el shell las muestra
+    /// en la ventana de arranque, como la ventana de conversión de Electron.
+    pub fn start_with(options: &EngineOptions, notify: &mut dyn FnMut(StartupEvent<'_>)) -> Result<Engine, EngineError> {
         if !options.python.is_absolute() || !options.python.is_file() {
             return Err(EngineError::Config(format!("no hay un Python absoluto en {}", options.python.display())));
         }
@@ -409,7 +628,7 @@ impl Engine {
             command.env_remove(key);
         }
         hide_console(&mut command);
-        notify("starting");
+        notify(StartupEvent::Starting);
         let mut child = command.spawn().map_err(|e| EngineError::Spawn(e.to_string()))?;
         let pid = child.id();
         let stdout = child.stdout.take().expect("stdout configurado como pipe");
@@ -437,10 +656,13 @@ impl Engine {
                     }
                     Ok(Line::Refused(reason)) => break Err(EngineError::RootOwned(reason)),
                     Ok(Line::ConversionFailed(reason)) => break Err(EngineError::ConversionFailed(reason)),
-                    Ok(Line::Progress { sequence: next, conversion }) => {
+                    Ok(Line::Progress { sequence: next, phase }) => {
                         sequence = next;
-                        window = if conversion { CONVERSION_SILENCE.max(options.silence_timeout) } else { options.silence_timeout };
-                        notify(if conversion { "converting" } else { "progress" });
+                        // Un paso de la conversión (copiar o releer una org grande) puede
+                        // durar más que el plazo común: mientras dura, rige el suyo.
+                        let conversion = is_conversion_phase(&phase);
+                        window = if conversion { options.conversion_timeout } else { options.silence_timeout };
+                        notify(if conversion { StartupEvent::Converting(&phase) } else { StartupEvent::Progress(&phase) });
                         deadline = Instant::now() + window;
                     }
                     Ok(Line::Ignored) => {}
@@ -530,6 +752,106 @@ impl Engine {
         }
     }
 
+    /// LA SALIDA (`stopForQuit` de Electron): por las buenas, después probado y
+    /// recién después forzado, con UN presupuesto repartido entre las fases de
+    /// `quit_deadlines`. La parte amable siempre le deja a la forzada su parte
+    /// (`KILL + PROVEN`, a lo sumo la mitad), para que un motor lento no se coma
+    /// el presupuesto pidiendo y la terminación nunca se intente.
+    ///
+    /// Probado quiere decir el proceso terminado **y** la raíz liberada por el
+    /// guardián, que la tiene hasta que muere todo el árbol (PostgreSQL y los
+    /// CLIs de agentes). Así una salida nunca deja huérfanos sin decirlo.
+    pub fn stop_for_quit(&mut self, budget: Duration) -> QuitOutcome {
+        let until = Instant::now() + budget;
+        let left = || until.saturating_duration_since(Instant::now());
+        let reserve = (quit_deadlines::KILL + quit_deadlines::PROVEN).min(budget / 2);
+        let graceful = |want: Duration| want.min(left().saturating_sub(reserve));
+        let root = self.data_root.clone();
+        if self.child.is_none() || !self.is_running() {
+            self.child = None;
+            return if wait_root_released(&root, quit_deadlines::PROVEN.min(left())) {
+                QuitOutcome::Stopped
+            } else {
+                QuitOutcome::Unverified
+            };
+        }
+        let request = graceful(SHUTDOWN_REQUEST);
+        if !request.is_zero() {
+            let _ = http_request(self.port, "POST", "/api/desktop/shutdown", Some(&self.token), request);
+        }
+        if self.wait_exit(graceful(SHUTDOWN_EXIT_WAIT + quit_deadlines::RELEASE)) {
+            self.child = None;
+            return if wait_root_released(&root, quit_deadlines::PROVEN.min(left())) {
+                QuitOutcome::Stopped
+            } else {
+                QuitOutcome::Unverified
+            };
+        }
+        if let Some(child) = self.child.as_mut() {
+            kill_tree(child);
+        }
+        let exited = self.wait_exit(quit_deadlines::KILL.min(left()));
+        if exited {
+            self.child = None;
+        }
+        if exited && wait_root_released(&root, quit_deadlines::PROVEN.min(left())) {
+            QuitOutcome::Forced
+        } else {
+            QuitOutcome::Unverified
+        }
+    }
+
+    /// La sonda del vigilante de cuelgues (`probeAlive`): `None` si el motor
+    /// respondió `/api/desktop/alive` como sí mismo (su PID y su raíz).
+    pub fn probe_alive(&self, timeout: Duration) -> Option<String> {
+        let pid = self.pid()?;
+        self.handle(pid).probe_alive(timeout)
+    }
+
+    /// Lo necesario para hablar con el motor sin tener su `Engine` (que el shell
+    /// guarda tras un mutex): una sonda lenta no bloquea la salida ni el estado.
+    pub fn handle(&self, pid: u32) -> EngineHandle {
+        EngineHandle { port: self.port, token: self.token.clone(), pid, data_root: self.data_root.clone() }
+    }
+}
+
+/// Un motor listo, visto desde afuera de su `Engine`.
+#[derive(Debug, Clone)]
+pub struct EngineHandle {
+    pub port: u16,
+    pub token: Token,
+    pub pid: u32,
+    pub data_root: PathBuf,
+}
+
+impl EngineHandle {
+    /// `probeAlive` de Electron: `None` si respondió como sí mismo.
+    pub fn probe_alive(&self, timeout: Duration) -> Option<String> {
+        let pid = self.pid;
+        match http_request(self.port, "GET", "/api/desktop/alive", Some(&self.token), timeout) {
+            Ok((200, body)) => {
+                let value: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+                let same = value["pid"].as_u64() == Some(pid as u64)
+                    && value["dataRootId"].as_str().is_some_and(|r| same_root(r, &self.data_root));
+                if same {
+                    None
+                } else {
+                    Some("el motor respondió con otra identidad".into())
+                }
+            }
+            Ok((status, _)) => Some(format!("status {status}")),
+            Err(error) => Some(error.to_string().chars().take(300).collect()),
+        }
+    }
+
+    /// Pedido autenticado con cuerpo JSON opcional.
+    pub fn request(&self, method: &str, path: &str, json: Option<&str>, timeout: Duration) -> std::io::Result<(u16, String)> {
+        http_request_body(self.port, method, path, Some(&self.token), json, timeout)
+    }
+}
+
+impl Engine {
+
     fn wait_exit(&mut self, budget: Duration) -> bool {
         let Some(child) = self.child.as_mut() else { return true };
         let deadline = Instant::now() + budget;
@@ -600,15 +922,35 @@ fn kill_tree(child: &mut Child) {
 /// HTTP/1.1 mínimo contra 127.0.0.1, sin dependencias: alcanza para el
 /// apagado y las pruebas. El cliente completo de la UI vive en el webview.
 pub fn http_request(port: u16, method: &str, path: &str, token: Option<&Token>, timeout: Duration) -> std::io::Result<(u16, String)> {
+    http_request_body(port, method, path, token, None, timeout)
+}
+
+/// Como `http_request`, con un cuerpo JSON opcional (el acuse de mantenimiento).
+pub fn http_request_body(
+    port: u16,
+    method: &str,
+    path: &str,
+    token: Option<&Token>,
+    json: Option<&str>,
+    timeout: Duration,
+) -> std::io::Result<(u16, String)> {
     let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
     let mut stream = TcpStream::connect_timeout(&address.into(), timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: 0\r\n");
+    let body = json.unwrap_or("");
+    let mut request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    if json.is_some() {
+        request.push_str("Content-Type: application/json\r\n");
+    }
     if let Some(token) = token {
         request.push_str(&format!("{TOKEN_HEADER}: {}\r\n", token.expose()));
     }
     request.push_str("\r\n");
+    request.push_str(body);
     stream.write_all(request.as_bytes())?;
     let mut response = Vec::new();
     stream.take(1 << 20).read_to_end(&mut response)?;
@@ -669,12 +1011,15 @@ mod tests {
         let line = |seq: u64, phase: &str| {
             format!(r#"{{"type":"startup-progress","protocol":1,"pid":42,"sequence":{seq},"phase":"{phase}","dataRootId":{}}}"#, root_json())
         };
-        assert_eq!(classify(&line(1, "api-loaded"), &root(), 42, 0), Ok(Line::Progress { sequence: 1, conversion: false }));
+        assert_eq!(classify(&line(1, "api-loaded"), &root(), 42, 0), Ok(Line::Progress { sequence: 1, phase: "api-loaded".into() }));
         assert_eq!(classify(&line(1, "api-loaded"), &root(), 42, 1), Ok(Line::Ignored));
         assert_eq!(
             classify(&line(2, "database-convert:org-1"), &root(), 42, 1),
-            Ok(Line::Progress { sequence: 2, conversion: true })
+            Ok(Line::Progress { sequence: 2, phase: "database-convert:org-1".into() })
         );
+        assert!(is_conversion_phase("database-convert:org-1") && !is_conversion_phase("api-loaded"));
+        assert_eq!(conversion_detail("database-convert: org 1/4"), "org 1/4");
+        assert_eq!(conversion_detail("database-convert"), "");
         assert_eq!(classify(&line(3, "api-loaded"), &root(), 7, 0), Ok(Line::Ignored));
     }
 
@@ -689,6 +1034,50 @@ mod tests {
             Ok(Line::ConversionFailed("mal".into()))
         );
         assert_eq!(classify(r#"{"type":"refused","code":"otra"}"#, &root(), 42, 0), Ok(Line::Ignored));
+    }
+
+    #[test]
+    fn colgado_exige_silencio_y_varias_sondas() {
+        let t0 = Instant::now();
+        let mut watch = LivenessWatch::new(LIVENESS, t0);
+        let later = |s: u64| t0 + Duration::from_secs(s);
+        watch.record(Some("timeout".into()), later(30));
+        watch.record(Some("timeout".into()), later(60));
+        assert!(!watch.hung(later(400)), "dos sondas no alcanzan");
+        watch.record(Some("timeout".into()), later(90));
+        assert!(!watch.hung(later(200)), "tres sondas sin el silencio no alcanzan");
+        assert!(watch.hung(later(300)));
+        watch.record(None, later(301));
+        assert!(!watch.hung(later(400)) && watch.failures() == 0, "una respuesta buena lo reinicia");
+        assert_eq!(LIVENESS.restart_limit, 3);
+    }
+
+    #[test]
+    fn el_presupuesto_de_reinicios_es_por_ventana() {
+        let t0 = Instant::now();
+        let mut budget = RestartBudget::new(3, Duration::from_secs(3600));
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert!(budget.consider(at(0)) && budget.consider(at(10)) && budget.consider(at(20)));
+        assert!(!budget.consider(at(30)), "el cuarto en una hora no");
+        assert!(budget.consider(at(3700)), "pasada la ventana, sí");
+        budget.reset();
+        assert_eq!(budget.recent(), 0);
+    }
+
+    #[test]
+    fn el_presupuesto_de_salida_es_el_de_electron() {
+        // max(8, 4) + 8 + 5 + 5 = 26 s, `QUIT_STOP_BUDGET_MS`.
+        assert_eq!(QUIT_STOP_BUDGET, Duration::from_secs(26));
+    }
+
+    #[test]
+    fn la_raiz_sin_candado_esta_libre() {
+        let dir = std::env::temp_dir().join(format!("orgtree-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(root_released(&dir));
+        std::fs::write(dir.join(ROOT_LOCK_FILE), b"0").unwrap();
+        assert!(root_released(&dir), "un candado que nadie tiene se puede escribir");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

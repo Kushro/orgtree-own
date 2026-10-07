@@ -34,6 +34,11 @@ const COMMANDS: &[&str] = &[
     "desktop_set_unsaved_creation",
     "desktop_open_orgs",
     "desktop_take_pending_events",
+    // Ciclo de vida del motor (#19): el estado del mantenimiento para las
+    // ventanas principales, y Reintentar / Salir para la ventana de arranque.
+    "desktop_maintenance_status",
+    "splash_retry",
+    "splash_quit",
 ];
 
 fn main() {

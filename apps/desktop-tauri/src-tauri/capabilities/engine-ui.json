@@ -42,6 +42,7 @@
     "allow-desktop-bind-created-org",
     "allow-desktop-set-unsaved-creation",
     "allow-desktop-open-orgs",
-    "allow-desktop-take-pending-events"
+    "allow-desktop-take-pending-events",
+    "allow-desktop-maintenance-status"
   ]
 }

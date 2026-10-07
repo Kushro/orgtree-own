@@ -66,6 +66,8 @@
     }),
     getAppVersion: () => call('desktop_app_version'),
     getStatus: () => call('desktop_status'),
+    // #19: lo último que reportó el mantenimiento pedido por el motor, o null.
+    getMaintenanceStatus: () => call('desktop_maintenance_status'),
     getWindowState: () => call('desktop_window_state'),
     getWindowControlsState: () => call('desktop_window_controls_state'),
     getPreferences: () => call('desktop_preferences'),

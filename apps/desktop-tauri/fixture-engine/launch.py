@@ -20,6 +20,18 @@ avisos sintéticos que ``/api/desktop/notifications`` suma a los reales: la
 prueba de integraciones (#21) los usa para que el renderer real pida
 notificaciones nativas y el parpadeo de la barra de tareas, como haría con una
 pregunta de un agente.
+
+Ciclo de vida (#19):
+
+- ``ORGTREE_FIXTURE_CONVERT=N`` simula la conversión de la primera ejecución:
+  N checkpoints ``database-convert: …`` separados por
+  ``ORGTREE_FIXTURE_CONVERT_GAP`` segundos (2,5 por defecto), por el mismo
+  reportero de progreso que usa ``engine/pg_process.py``. Con ``fail``, el
+  último paso levanta ``ConversionFailed`` y el motor imprime el rechazo
+  ``conversion-failed``.
+- ``POST /api/fixture/maintenance`` (``{"action": "restart" | "update"}``)
+  crea un pedido de mantenimiento del motor, como lo haría un agente con
+  ``orgtree_self_relaunch``.
 """
 
 from __future__ import annotations
@@ -150,6 +162,40 @@ def _install_fixture_notices() -> None:
     # Antes que cualquier ruta comodín de la app.
     api.app.router.routes.insert(0, api.app.router.routes.pop())
 
+    def post_maintenance(body: dict) -> dict:
+        from orgtree import desktop_maintenance
+        action = body.get("action")
+        if action not in {"restart", "update"}:
+            raise HTTPException(422, "action must be restart or update")
+        return desktop_maintenance.request(ORG, AGENT, "org", "prueba del ciclo de vida (#19)", action=action)
+
+    api.app.add_api_route("/api/fixture/maintenance", post_maintenance, methods=["POST"])
+    api.app.router.routes.insert(0, api.app.router.routes.pop())
+
+
+def _install_fake_conversion() -> None:
+    """La conversión de la primera ejecución, simulada en el punto donde el
+    motor real la hace (``start_for_engine``, llamado por ``launch.main``)."""
+    spec = os.environ.get("ORGTREE_FIXTURE_CONVERT", "")
+    if not spec:
+        return
+    from engine import pg_process
+    original = pg_process.start_for_engine
+    steps = int(spec) if spec.isdigit() else 2
+    gap = float(os.environ.get("ORGTREE_FIXTURE_CONVERT_GAP", "2.5"))
+
+    def converting(root, env, migrator=None, progress=None):
+        for step in range(1, steps + 1):
+            if progress:
+                progress(f"database-convert: copiando la org {step} de {steps}")
+            time.sleep(gap)
+        if spec == "fail":
+            raise pg_process.ConversionFailed(
+                f"La conversión de prueba se detuvo en la org {steps}. El registro está en {root / 'conversion'}.")
+        return original(root, env, migrator=migrator, progress=progress)
+
+    pg_process.start_for_engine = converting
+
 
 original_load_app = launch.load_app
 
@@ -194,6 +240,7 @@ def serve_without_lifetime() -> None:
 
 
 if __name__ == "__main__":
+    _install_fake_conversion()
     if os.name == "nt":
         launch.main()
     else:

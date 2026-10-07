@@ -570,6 +570,213 @@ jobs:
           if ($failures) { throw ($failures -join '; ') }
           Write-Host 'Windows per organization verified: Homepage, creation, two orgs, refocus, notification routing, preferences, restore and error window'
 
+      # #19: ciclo de vida del motor, sobre el motor de fixture y raíces descartables.
+      # 1. "full": otro motor (lanzado acá) tiene la raíz, así que la app muestra el
+      #    rechazo con Reintentar; se libera la raíz y la prueba toca el botón real. El
+      #    fixture simula la conversión de datos (4 pasos a 2,5 s) con un plazo de
+      #    silencio de 6 s: el total lo supera, ningún paso solo. Después: estado y
+      #    eventos del puente, una caída con aviso, una recarga que falla con el motor
+      #    caído y su recuperación, mantenimiento (restart y update) y la salida por la
+      #    bandeja. 2. "close": con exitOnClose, cerrar la última ventana sale de la app.
+      #    3. "session": WM_QUERYENDSESSION + WM_ENDSESSION, como Windows al cerrar la
+      #    sesión. En las tres se busca que no quede ningún proceso del árbol de la app y
+      #    que el candado de la raíz quede libre.
+      - name: Engine lifecycle (refusal and retry, conversion, crash and load recovery, maintenance, orderly exits)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Session {
+            [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+          }
+          '@
+          # Los procesos descendientes de la app (motor, guardián, hub, PostgreSQL).
+          function Get-Tree($rootPid) {
+            $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+            $tree = @(); $queue = @($rootPid)
+            while ($queue.Count) {
+              $next = @()
+              foreach ($id in $queue) { $kids = @($all | Where-Object { $_.ParentProcessId -eq $id -and $_.ProcessId -ne $id }); $tree += $kids; $next += @($kids | ForEach-Object { $_.ProcessId }) }
+              $queue = $next
+            }
+            return ,$tree
+          }
+          function Wait-Gone($tree, $seconds) {
+            $deadline = (Get-Date).AddSeconds($seconds)
+            do {
+              $alive = @($tree | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+              if (-not $alive.Count) { return ,@() }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+            return ,$alive
+          }
+          function Lock-Free($root) {
+            $lock = Join-Path $root '.desktop-engine.lock'
+            if (-not (Test-Path $lock)) { return $true }
+            try { $fs = [IO.File]::Open($lock, 'Open', 'Write', 'ReadWrite'); $fs.WriteByte(48); $fs.Flush(); $fs.Close(); return $true } catch { return $false }
+          }
+          $failures = @()
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          $root = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-lifecycle'
+          $out = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-lifecycle.json'
+          $exitReport = "$out.exit.jsonl"
+          Remove-Item $exitReport -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $root | Out-Null
+          # Corre la app en una modalidad, atiende los marcadores (capturas y acciones) y
+          # devuelve el reporte; verifica que no queden procesos del árbol anotado.
+          function Run-Lifecycle($run, $markers, $onMarker) {
+            Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.exit.jsonl' } | Remove-Item -Force
+            $env:ORGTREE_TAURI_DATA = $root
+            $env:ORGTREE_TAURI_PROFILE = Join-Path $env:RUNNER_TEMP "orgtree-tauri-lifecycle-profile-$run"
+            $env:ORGTREE_TAURI_LIFECYCLE_PROBE = $out
+            $env:ORGTREE_TAURI_LIFECYCLE_RUN = $run
+            $env:ORGTREE_TAURI_EXIT_REPORT = $exitReport
+            $started = Get-Date
+            $p = Start-Process -FilePath $exe.FullName -PassThru
+            $script:tree = @()
+            $deadline = $started.AddSeconds(720)
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+              foreach ($name in $markers) {
+                if (Test-Path "$out.$name") {
+                  if ($name -ne 'converting') { Start-Sleep -Milliseconds 400 }
+                  try { Save-Screen "lifecycle-$name" } catch { Write-Host "screenshot: $_" }
+                  & $onMarker $name $p
+                  Remove-Item "$out.$name" -Force -ErrorAction SilentlyContinue
+                }
+              }
+              Start-Sleep -Milliseconds 300; $p.Refresh()
+            }
+            $seconds = [int]((Get-Date) - $started).TotalSeconds
+            if (-not $p.HasExited) {
+              $script:failures += "run ${run}: the app did not quit within 720 s"
+              taskkill /PID $p.Id /T /F 2>&1 | Out-Null
+            }
+            Write-Host "Run $run exited with $($p.ExitCode) after $seconds s"
+            $report = if (Test-Path $out) { Get-Content $out -Raw } else { $null }
+            if ($report) {
+              Copy-Item $out "$out.$run.json" -Force
+              "### Engine lifecycle, run $run ($seconds s)`n``````json`n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+              $report = $report | ConvertFrom-Json
+            } else { $script:failures += "run ${run}: no report" }
+            # Ningún proceso del árbol de la app sigue vivo, y el guardián soltó la raíz.
+            $alive = Wait-Gone $script:tree 30
+            & $check ($script:tree.Count -ge 2) "run ${run}: the process tree was not recorded ($($script:tree.Count) processes)"
+            & $check (-not $alive.Count) "run ${run}: orphans after the exit: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')"
+            & $check (Lock-Free $root) "run ${run}: the data root lock is still held after the exit"
+            "- run ${run}: $($script:tree.Count) processes under the app before the exit ($(($script:tree | ForEach-Object { $_.Name }) -join ', ')); left alive: $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            return $report
+          }
+          $exits = { if (Test-Path $exitReport) { @(Get-Content $exitReport | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
+
+          # ---------------------------------------------------------------- 1. full
+          # Otro motor (el mismo fixture) toma la raíz antes que la app.
+          $extOut = Join-Path $env:RUNNER_TEMP 'lifecycle-external.out'
+          $env:ORGTREE_DATA = $root
+          $env:ORGTREE_V2_TOKEN = [guid]::NewGuid().ToString('N')
+          $ext = Start-Process -FilePath $env:ORGTREE_TAURI_PYTHON -ArgumentList "`"$env:ORGTREE_TAURI_ENGINE_DIR\launch.py`"" -WorkingDirectory $env:ORGTREE_TAURI_ENGINE_DIR `
+            -RedirectStandardOutput $extOut -RedirectStandardError "$extOut.err" -PassThru -WindowStyle Hidden
+          # La app nunca hereda ORGTREE_DATA (sería una raíz prohibida) ni el token.
+          Remove-Item Env:ORGTREE_DATA, Env:ORGTREE_V2_TOKEN
+          $deadline = (Get-Date).AddSeconds(150)
+          while (-not ((Test-Path $extOut) -and (Select-String -Path $extOut -Pattern '"type":"ready"' -Quiet)) -and (Get-Date) -lt $deadline -and -not $ext.HasExited) { Start-Sleep -Milliseconds 500; $ext.Refresh() }
+          if (-not (Select-String -Path $extOut -Pattern '"type":"ready"' -Quiet)) { Get-Content "$extOut.err" -Tail 40; throw "the external engine did not become ready" }
+          Write-Host "External engine $($ext.Id) owns $root"
+          $env:ORGTREE_FIXTURE_CONVERT = '4'
+          $env:ORGTREE_FIXTURE_CONVERT_GAP = '2.5'
+          $env:ORGTREE_TAURI_CONVERSION_SILENCE_S = '6'
+          $onFull = {
+            param($name, $p)
+            if ($name -eq 'refused') {
+              # Se libera la raíz: el motor externo termina y su guardián suelta el candado.
+              taskkill /PID $ext.Id /T /F 2>&1 | Out-Null
+              $until = (Get-Date).AddSeconds(30)
+              while (-not (Lock-Free $root) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+              New-Item -ItemType File -Force "$out.retry-go" | Out-Null
+            }
+            if ($name -eq 'maintenance') { $script:tree = Get-Tree $p.Id }
+          }
+          $full = Run-Lifecycle 'full' @('refused', 'converting', 'ready', 'engine-down', 'load-failed', 'recovered', 'maintenance') $onFull
+          Remove-Item Env:ORGTREE_FIXTURE_CONVERT, Env:ORGTREE_FIXTURE_CONVERT_GAP, Env:ORGTREE_TAURI_CONVERSION_SILENCE_S
+          if ($full) {
+            $refused = @($full.refused.log)[0]
+            & $check ($refused.splash.title -eq 'Otra instancia está usando estos datos' -and $refused.splash.retry -eq $true -and $refused.error -like '*otro motor*') "refusal: $($full.refused | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.refused.status.state -eq 'unavailable') "status after the refusal: $($full.refused.status | ConvertTo-Json -Compress)"
+            & $check ($full.retryClicked -eq $true -and @($full.logs.retry).Count -ge 1) "the Retry button did not reach the shell: clicked $($full.retryClicked), retry log $(@($full.logs.retry).Count)"
+            $phases = @($full.logs.phases)
+            $conv = @($phases | Where-Object { $_.conversion -eq $true })
+            $after = @($phases | Where-Object { -not $_.conversion -and $conv.Count -and $_.ms -gt $conv[-1].ms }) | Select-Object -First 1
+            $gaps = @(); for ($i = 1; $i -lt $conv.Count; $i++) { $gaps += $conv[$i].ms - $conv[$i - 1].ms }
+            if ($after) { $gaps += $after.ms - $conv[-1].ms }
+            $span = if ($after) { $after.ms - $conv[0].ms } else { 0 }
+            $maxGap = ($gaps | Measure-Object -Maximum).Maximum
+            & $check ($conv.Count -eq 4 -and $conv[0].phase -like 'database-convert*') "conversion phases: $($phases | ConvertTo-Json -Compress)"
+            & $check ($span -gt 6000 -and $maxGap -lt 6000) "the conversion window must measure silence: span $span ms, largest gap $maxGap ms"
+            "- conversion: $($conv.Count) phases over $span ms, largest gap $maxGap ms (window 6000 ms)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            $rd = $full.ready.page
+            & $check ($rd.status.state -eq 'ready' -and $rd.maintenanceFn -eq 'function' -and $null -eq $rd.maintenance -and $rd.listed -eq $true) "ready: $($rd | ConvertTo-Json -Compress)"
+            $dn = $full.down
+            $stoppedEvents = @($dn.page.events | Where-Object { $_.type -eq 'engine-status' -and $_.data.state -eq 'stopped' })
+            & $check ($dn.stopped -eq $true -and $dn.page.status.state -eq 'stopped' -and $dn.page.notice -like '*se detuvo*' -and $stoppedEvents.Count -ge 1) "engine down: $($dn | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.loadFailed.recorded -eq $true) "the failed load was not recorded: $($full.loadFailed | ConvertTo-Json -Compress)"
+            $rc = $full.recovered
+            & $check ($rc.back -eq $true -and $rc.page.http -eq 200 -and $rc.page.ws -eq 'open' -and $rc.page.listed -eq $true -and $rc.page.status.state -eq 'ready' -and $null -eq $rc.page.notice) "recovery: $($rc | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($rc.pid -and $rc.pid -ne $full.ready.pid) "the engine was not replaced: $($full.ready.pid) -> $($rc.pid)"
+            $mr = $full.maintenanceRestart
+            & $check ($mr.request.status -eq 200 -and $mr.restarted -eq $true -and $mr.pidAfter -ne $mr.pidBefore) "maintenance restart: $($mr | ConvertTo-Json -Compress -Depth 6)"
+            $mu = $full.maintenanceUpdate
+            & $check ($mu.reported -eq $true -and $mu.page.maintenance.state -eq 'unavailable' -and @($mu.page.events).Count -ge 1) "maintenance update: $($mu | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.done -eq $true) 'run full did not finish its steps'
+          }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'quit' -and $last.trigger -eq 'tray' -and $last.outcome -eq 'stopped' -and $last.ms -lt 26000) "exit through the tray: $($last | ConvertTo-Json -Compress)"
+
+          # ---------------------------------------------------------------- 2. close
+          $prefs = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-lifecycle-profile-close'
+          New-Item -ItemType Directory -Force $prefs | Out-Null
+          '{"exitOnClose": true}' | Set-Content -Path (Join-Path $prefs 'preferences.json') -Encoding utf8NoBOM
+          $close = Run-Lifecycle 'close' @('close-ready') { param($name, $p) $script:tree = Get-Tree $p.Id }
+          if ($close) { & $check ($close.ready.page.status.state -eq 'ready' -and $close.ready.exitOnClose -eq $true) "close run: $($close.ready | ConvertTo-Json -Compress -Depth 5)" }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'quit' -and $last.trigger -eq 'last-window' -and $last.outcome -eq 'stopped') "exit by closing the last window: $($last | ConvertTo-Json -Compress)"
+
+          # ---------------------------------------------------------------- 3. session
+          $onSession = {
+            param($name, $p)
+            $script:tree = Get-Tree $p.Id
+            $r = Get-Content $out -Raw | ConvertFrom-Json
+            $hwnd = [IntPtr][long]$r.ready.hwnd
+            $res = [IntPtr]::Zero
+            # ENDSESSION_LOGOFF; WM_QUERYENDSESSION y después WM_ENDSESSION(TRUE).
+            $q = [Session]::SendMessageTimeout($hwnd, 0x11, [IntPtr]::Zero, [IntPtr][long]2147483648, 0, 10000, [ref]$res)
+            Write-Host "WM_QUERYENDSESSION -> $q (result $res)"
+            $e = [Session]::SendMessageTimeout($hwnd, 0x16, [IntPtr]1, [IntPtr][long]2147483648, 0, 60000, [ref]$res)
+            Write-Host "WM_ENDSESSION -> $e"
+          }
+          $session = Run-Lifecycle 'session' @('session-ready') $onSession
+          if ($session) { & $check ($session.ready.page.status.state -eq 'ready' -and $session.ready.hwnd) "session run: $($session.ready | ConvertTo-Json -Compress -Depth 5)" }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'session-end' -and $last.outcome -eq 'stopped') "exit at the end of the Windows session: $($last | ConvertTo-Json -Compress)"
+          "- exits: $((& $exits | ForEach-Object { "$($_.path)/$($_.trigger): $($_.outcome) in $($_.ms) ms" }) -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Engine lifecycle verified: refusal and retry, conversion phases, crash notice and load recovery, maintenance, and three orderly exits without orphans'
+
       # #18: el instalador en una carpeta descartable, arrancado desde ahí con su
       # motor empaquetado (sin ORGTREE_TAURI_PYTHON) sobre una raíz descartable.
       #
@@ -580,7 +787,7 @@ jobs:
       # completo con ese alias y rechaza sus propias carpetas de secretos
       # (acl.not_owner_only, run 37574867250). No se cambia el producto: queda
       # documentado en docs/spikes/tauri.md.
-      - name: Install and run the standalone installer (packaged engine on PostgreSQL)
+      - name: Install and run the standalone installer (packaged engine on PostgreSQL, upgrade with the app open)
         # Corre aunque falle el smoke test de desarrollo: son pruebas independientes.
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
@@ -633,6 +840,9 @@ jobs:
           $data = Join-Path $work 'data'
           $env:ORGTREE_TAURI_DATA = $data
           $env:ORGTREE_TAURI_INSTALL_PROBE = Join-Path $work 'install-probe.json'
+          # #19: cada salida de la app anota su camino y si el motor se detuvo en orden.
+          $exitReport = Join-Path $work 'exit.jsonl'
+          $env:ORGTREE_TAURI_EXIT_REPORT = $exitReport
           $env:USERPROFILE = $profileDir
           $env:APPDATA = Join-Path $profileDir 'AppData\Roaming'
           $env:LOCALAPPDATA = Join-Path $profileDir 'AppData\Local'
@@ -694,6 +904,81 @@ jobs:
           }
           $size = (Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum
           "- installed folder: {0:N1} MB, {1}: {2:N1} MB, {3} postgres processes" -f ($size / 1MB), $exe.Name, ($exe.Length / 1MB), $postgres.Count | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          # #19: actualizar con la app abierta. El instalador NSIS de Tauri cierra la app con el
+          # Restart Manager, que le manda WM_QUERYENDSESSION y WM_ENDSESSION como el fin de la
+          # sesión de Windows; la app apaga su motor (Python embebido, guardián y PostgreSQL) con
+          # el presupuesto de la salida antes de terminar. El instalador corre como el mismo
+          # usuario que la app, como lo haría una persona que actualiza su instalación.
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Session {
+            [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+          }
+          '@
+          $fromDir = { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$dir\*" } | Select-Object ProcessId, Name, ExecutablePath) }
+          $waitGone = {
+            param($procs, $seconds)
+            $until = (Get-Date).AddSeconds($seconds)
+            do {
+              $alive = @($procs | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+              if (-not $alive.Count) { return ,@() }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $until)
+            return ,$alive
+          }
+          $lockFree = {
+            $lock = Join-Path $data '.desktop-engine.lock'
+            if (-not (Test-Path $lock)) { return $true }
+            try { $fs = [IO.File]::Open($lock, 'Open', 'Write', 'ReadWrite'); $fs.WriteByte(48); $fs.Flush(); $fs.Close(); return $true } catch { return $false }
+          }
+          $exitLines = { if (Test-Path $exitReport) { @(Get-Content $exitReport | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
+          if (-not $p.HasExited) {
+            $before = & $fromDir
+            Write-Host "Before the upgrade: $(($before | ForEach-Object { $_.Name }) -join ', ')"
+            icacls $dir /grant "${user}:(OI)(CI)F" | Out-Null
+            $upStart = Get-Date
+            $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$dir" -Credential $credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -PassThru -Wait
+            $upSeconds = [int]((Get-Date) - $upStart).TotalSeconds
+            $p.WaitForExit(30000) | Out-Null
+            $alive = & $waitGone $before 30
+            $upExit = @(& $exitLines)[-1]
+            "### Upgrade with the app open (#19)`n- installer exit code $($upgrade.ExitCode) after $upSeconds s; app exited: $($p.HasExited)`n- the app's exit: $($upExit | ConvertTo-Json -Compress)`n- processes from the install folder before: $($before.Count), left: $($alive.Count) $(($alive | ForEach-Object { $_.Name }) -join ', ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            if ($upgrade.ExitCode -ne 0) { $failures += "the upgrade installer exited with $($upgrade.ExitCode)" }
+            if (-not $p.HasExited) { $failures += 'the upgrade did not close the running app' }
+            if ($alive.Count) { $failures += "processes left after the upgrade closed the app: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')" }
+            if (-not (& $lockFree)) { $failures += 'the data root lock is still held after the upgrade' }
+            if ($upExit.path -ne 'session-end' -or $upExit.outcome -ne 'stopped') { $failures += "the app did not stop its engine in order for the upgrade: $($upExit | ConvertTo-Json -Compress)" }
+            # Si el instalador volvió a abrir la app, se cierra: la prueba la arranca con su entorno.
+            & $fromDir | Where-Object { $_.Name -like 'orgtree*' } | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null }
+            Start-Sleep -Seconds 2
+            # La app actualizada arranca otra vez sobre el mismo cluster, y sale con el fin de sesión.
+            Remove-Item $env:ORGTREE_TAURI_INSTALL_PROBE -ErrorAction SilentlyContinue
+            $again = Get-Date
+            $p = Start-Process -FilePath $exe.FullName -Credential $credential -LoadUserProfile -WorkingDirectory $dir -PassThru
+            $until = $again.AddSeconds(240)
+            while (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE) -and (Get-Date) -lt $until -and -not $p.HasExited) { Start-Sleep -Milliseconds 500; $p.Refresh() }
+            $againSeconds = [int]((Get-Date) - $again).TotalSeconds
+            if (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE)) { $failures += 'the upgraded app did not load within 240 s' }
+            else {
+              $second = Get-Content $env:ORGTREE_TAURI_INSTALL_PROBE -Raw | ConvertFrom-Json
+              if ($second.page.rendered -ne $true -or @($second.page.orgs) -notcontains 'instalado') { $failures += "the upgraded app: rendered $($second.page.rendered), orgs $($second.page.orgs -join ', ')" }
+            }
+            Start-Sleep -Seconds 2
+            try { Save-Screen 'installed-after-upgrade' } catch { Write-Host "screenshot: $_" }
+            $before = & $fromDir
+            $p.Refresh()
+            $hwnd = $p.MainWindowHandle
+            $res = [IntPtr]::Zero
+            $q = [Session]::SendMessageTimeout($hwnd, 0x11, [IntPtr]::Zero, [IntPtr][long]2147483648, 0, 10000, [ref]$res)
+            $e = [Session]::SendMessageTimeout($hwnd, 0x16, [IntPtr]1, [IntPtr][long]2147483648, 0, 60000, [ref]$res)
+            $p.WaitForExit(40000) | Out-Null
+            $alive = & $waitGone $before 30
+            $endExit = @(& $exitLines)[-1]
+            "- relaunched after the upgrade in $againSeconds s; session end (hwnd $hwnd, query $q): exited $($p.HasExited), exit $($endExit | ConvertTo-Json -Compress), processes before $($before.Count), left $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            if (-not $p.HasExited) { $failures += 'the installed app did not exit at the end of the session' }
+            if ($alive.Count) { $failures += "processes left after the session end: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')" }
+            if ($endExit.path -ne 'session-end' -or $endExit.outcome -ne 'stopped' -or $endExit.enginePid -eq $upExit.enginePid) { $failures += "the installed app's session-end exit: $($endExit | ConvertTo-Json -Compress)" }
+          }
           taskkill /PID $p.Id /T /F 2>&1 | Out-Null
           if ($failures) {
             # Diagnóstico: los registros de la raíz y el motor empaquetado lanzado a mano

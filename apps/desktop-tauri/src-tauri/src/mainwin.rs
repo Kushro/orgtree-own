@@ -204,6 +204,13 @@ pub fn capture_placement(app: &tauri::AppHandle, id: &str) {
     }
 }
 
+/// La ruta de la ventana `id` según el registro (`/` o `/o/<org>`).
+pub fn route_of(app: &tauri::AppHandle, id: &str) -> Option<String> {
+    let windows = shell(app).windows.lock().unwrap();
+    let entry = windows.get(id)?;
+    Some(route_for(entry.kind, entry.org.as_deref()))
+}
+
 fn route_for(kind: Kind, org: Option<&str>) -> String {
     match (kind, org) {
         (Kind::Org, Some(org)) => format!("/o/{org}"),
@@ -338,6 +345,8 @@ fn on_page_load(window: WebviewWindow, payload: PageLoadPayload<'_>) {
             if let Some(splash) = app.get_webview_window("splash") {
                 let _ = splash.close();
             }
+            // #19: una carga que termina con el motor caído falló; el relanzamiento la repite.
+            crate::lifecycle::page_finished(&app, &id);
             crate::on_main_loaded(&app, &window);
         }
     }
@@ -438,6 +447,7 @@ fn perform_close(app: &tauri::AppHandle, id: &str) -> bool {
         let exit_on_close = crate::exit_on_close(app);
         if !quitting {
             if exit_on_close && other_views == 0 {
+                crate::lifecycle::note_exit_trigger(app, "last-window");
                 request_quit(app);
             } else if let Some(window) = app.get_webview_window(id) {
                 // Se queda en la bandeja; los popouts siguen vivos en su contexto de JS.
@@ -529,6 +539,13 @@ pub fn shutdown(app: &tauri::AppHandle) {
         }
     }
     std::thread::sleep(std::time::Duration::from_millis(300));
+    // #19: la salida ya empezó; las ventanas se van y el motor se apaga con el
+    // presupuesto de `QUIT_DEADLINES`, con la prueba de que soltó la raíz.
+    for (_, window) in app.webview_windows() {
+        let _ = window.hide();
+    }
+    state.logins.cancel_all();
+    crate::lifecycle::stop_engine_for_exit(app, "quit");
     app.exit(0);
 }
 
