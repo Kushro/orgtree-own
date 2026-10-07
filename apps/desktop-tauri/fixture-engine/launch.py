@@ -32,6 +32,10 @@ Ciclo de vida (#19):
 - ``POST /api/fixture/maintenance`` (``{"action": "restart" | "update"}``)
   crea un pedido de mantenimiento del motor, como lo haría un agente con
   ``orgtree_self_relaunch``.
+
+Actualizaciones (#23): ``ORGTREE_FIXTURE_BUSY_FILE`` nombra un archivo; mientras
+exista, ``/api/desktop/status`` dice que el motor está ocupado (``idle: false``),
+como con un turno en curso. La prueba lo borra para que el motor quede quieto.
 """
 
 from __future__ import annotations
@@ -173,6 +177,29 @@ def _install_fixture_notices() -> None:
     api.app.router.routes.insert(0, api.app.router.routes.pop())
 
 
+def _install_fixture_busy() -> None:
+    """Un turno simulado para la prueba de actualizaciones (#23): mientras el
+    archivo de ``ORGTREE_FIXTURE_BUSY_FILE`` exista, el estado que sondea el
+    shell dice ``idle: false``. El resto de la respuesta es la real."""
+    marker = os.environ.get("ORGTREE_FIXTURE_BUSY_FILE", "")
+    if not marker:
+        return
+    from orgtree import api
+    route = next((r for r in api.app.router.routes if getattr(r, "path", None) == "/api/desktop/status"), None)
+    if route is None:
+        raise RuntimeError("no /api/desktop/status route to wrap")
+    original = route.endpoint
+
+    def desktop_status() -> dict:
+        status = original()
+        if Path(marker).exists():
+            status = {**status, "idle": False, "activeAgents": max(1, int(status.get("activeAgents") or 0))}
+        return status
+
+    api.app.add_api_route("/api/desktop/status", desktop_status, methods=["GET"])
+    api.app.router.routes.insert(0, api.app.router.routes.pop())
+
+
 def _install_fake_conversion() -> None:
     """La conversión de la primera ejecución, simulada en el punto donde el
     motor real la hace (``start_for_engine``, llamado por ``launch.main``)."""
@@ -204,6 +231,7 @@ def seeded_load_app():
     result = original_load_app()
     _stub_providers()
     _install_fixture_notices()
+    _install_fixture_busy()
     _seed()
     if os.environ.get("ORGTREE_FIXTURE_LIVE") == "1":
         threading.Thread(target=_live_frames, name="fixture-live", daemon=True).start()

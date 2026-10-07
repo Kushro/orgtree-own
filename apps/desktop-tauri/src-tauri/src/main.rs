@@ -17,6 +17,7 @@ mod popouts;
 mod pprobe;
 mod preferences;
 mod probe;
+mod updater;
 mod wprobe;
 
 use orgtree_engine_host::packaged::PackagedRuntime;
@@ -745,8 +746,11 @@ fn main() {
         // Primero: una segunda ejecución termina acá, antes de crear ventanas o motor.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| on_second_instance(app, args)))
         .plugin(tauri_plugin_notification::init())
+        // #23: el feed, la clave y el punto seguro los maneja `updater.rs`; el webview no recibe sus comandos.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Shell::default())
         .manage(lifecycle::Lifecycle::default())
+        .manage(updater::Updates::default())
         .invoke_handler(tauri::generate_handler![
             desktop::desktop_app_version,
             desktop::desktop_status,
@@ -781,6 +785,10 @@ fn main() {
             desktop::desktop_provider_login_code,
             desktop::desktop_provider_login_cancel,
             lifecycle::desktop_maintenance_status,
+            updater::desktop_update_status,
+            updater::desktop_check_updates,
+            updater::desktop_install_update,
+            updater::desktop_update_capability,
             popouts::desktop_popout_state,
             popouts::desktop_popout_minimize,
             popouts::desktop_popout_toggle_maximize,
@@ -822,6 +830,7 @@ fn main() {
             wprobe::start(handle.clone());
             pprobe::start(handle.clone());
             lprobe::start(handle.clone());
+            updater::start(&handle);
             lifecycle::start_engine(handle);
             Ok(())
         })

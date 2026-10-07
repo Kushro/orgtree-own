@@ -708,6 +708,8 @@ fn poll_status(app: tauri::AppHandle) {
             _ => continue,
         };
         maintenance_tick(&app, &handle, &stats);
+        // #23: el updater busca y espera el mismo punto seguro (motor y usuario quietos).
+        crate::updater::tick(&app, &stats);
     }
 }
 
@@ -786,7 +788,7 @@ fn report_failure(handle: &EngineHandle, id: &str) -> bool {
 /// Cuánto hace que el usuario no toca el teclado ni el mouse
 /// (`powerMonitor.getSystemIdleTime`).
 #[cfg(windows)]
-fn user_idle() -> Duration {
+pub(crate) fn user_idle() -> Duration {
     #[repr(C)]
     struct LastInputInfo {
         cb_size: u32,
@@ -811,7 +813,7 @@ fn user_idle() -> Duration {
 }
 
 #[cfg(not(windows))]
-fn user_idle() -> Duration {
+pub(crate) fn user_idle() -> Duration {
     // Linux no es destino del spike: se considera quieto.
     Duration::from_secs(3600)
 }
