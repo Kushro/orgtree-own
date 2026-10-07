@@ -437,6 +437,8 @@ jobs:
           }
           if ($failures) { throw ($failures -join '; ') }
           Write-Host 'Installed app verified: packaged engine on the embedded Python and PostgreSQL, own data root, renderer loaded'
+          # taskkill devuelve 128 si el guardián ya cerró el árbol; el resultado es el de arriba.
+          exit 0
 
       - name: Report sizes
         if: always()

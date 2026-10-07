@@ -15,6 +15,7 @@ Se reemplaza solo la capa de escritorio (`apps/desktop/main` y `preload`). El re
 | 5 | #5 Ventana de organización con desk en vivo | Feed WebSocket y fluidez |
 | 6 | #6 Popouts con `window.open` y portales de React | **Riesgo principal** del spike |
 | 7 | #7 Ventana sin marco, bandeja y notificación | Integración nativa básica |
+| 8 | #18 Instalador autónomo con motor, runtime y PostgreSQL | Instalador que se usa sin preparar nada |
 
 ## Decisiones de diseño ya tomadas
 
@@ -24,7 +25,7 @@ Se reemplaza solo la capa de escritorio (`apps/desktop/main` y `preload`). El re
 
 ## Fuera del alcance
 
-Tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, empaquetado del runtime de Python y PostgreSQL, updater firmado.
+Tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, updater firmado. El empaquetado del runtime de Python y PostgreSQL quedó fuera al principio y se agregó en #18.
 
 ## Cómo compilar
 
@@ -41,11 +42,11 @@ npx tauri build   # instalador NSIS en src-tauri/target/release/bundle/nsis/
 
 ### Motor Python (#2)
 
-La app lanza `engine/launch.py` al abrir y lo apaga al salir. El supervisor vive en el crate `apps/desktop-tauri/engine-host`, sin dependencia de Tauri, para poder probarlo solo y reutilizarlo en el spike de Dioxus. Como el empaquetado del runtime queda fuera del spike, el intérprete se indica por entorno:
+La app lanza `engine/launch.py` al abrir y lo apaga al salir. El supervisor vive en el crate `apps/desktop-tauri/engine-host`, sin dependencia de Tauri, para poder probarlo solo y reutilizarlo en el spike de Dioxus. En desarrollo, el intérprete se indica por entorno; la app instalada usa el que trae el paquete (ver #18 más abajo):
 
 | Variable | Qué es | Por defecto |
 |---|---|---|
-| `ORGTREE_TAURI_PYTHON` | Python absoluto con `tools/runtime-requirements.in` instalado | obligatoria |
+| `ORGTREE_TAURI_PYTHON` | Python absoluto con `tools/runtime-requirements.in` instalado | obligatoria sin el paquete |
 | `ORGTREE_TAURI_ENGINE_DIR` | Carpeta con `launch.py` | `engine/` del checkout donde se compiló |
 | `ORGTREE_TAURI_DATA` | Raíz de datos | `%LOCALAPPDATA%\com.kushro.orgtree.tauri-spike\data` |
 
@@ -201,3 +202,54 @@ La app se instala por usuario con su propio identificador (`com.kushro.orgtree.t
 - el CI arrastra la ventana con el mouse real desde la zona de arrastre del renderer (`.native-header-main`), y la ventana se mueve lo mismo que el mouse (dx 120, dy 60).
 
 Escalado a 125 % y 150 %: el runner de CI corre al 100 % y no se puede cambiar sin cerrar la sesión. Lo prueba una persona en Windows, con las métricas de tamaño, RAM y arranque.
+
+### Instalador autónomo (#18)
+
+El instalador NSIS trae lo mismo que el de Electron (`build.extraResources` en `package.json`), así que una persona lo instala y lo usa sin preparar nada:
+
+- el motor `engine/`, con el submódulo `engine/mailhub`, sin `__pycache__`, `.git` ni `native/**/target`;
+- el runtime de Python 3.13 embebido con sus dependencias (`tools/provision-runtime.py`);
+- PostgreSQL 18.6 y `pg-custodian.exe` (`tools/provision-postgres.py`);
+- `tools/pypg/pgimport.py` y `cutover_verify.py`;
+- el renderer construido, en `ui/`, y un `build-info.json` con el commit.
+
+`bundle.resources` de Tauri no admite exclusiones, así que `tools/stage-resources.py` arma esa carpeta en `bundle-resources/` y `src-tauri/tauri.bundle.conf.json` la agrega al build:
+
+```powershell
+python tools/provision-runtime.py          # desde la raíz del repo, en Windows
+python tools/provision-postgres.py
+npx vite build apps/desktop/renderer --base / --outDir ../../../dist/renderer --emptyOutDir
+cd apps/desktop-tauri
+npm run build:standalone                   # stage-resources.py + tauri build --config src-tauri/tauri.bundle.conf.json
+```
+
+`tools/verify-resources.mjs` aplica los controles del empaquetado de Electron (`assertRuntimeLayout` y `assertPostgresRuntime`, cada byte de PostgreSQL contra su manifiesto). Con `--compare`, exige además que el motor instalado sea idéntico, archivo por archivo, al armado.
+
+**Modo empaquetado.** Sin `ORGTREE_TAURI_PYTHON` y con `<recursos>/engine/runtime/python.exe` presente, el shell lanza el motor como `apps/desktop/main/index.ts` con `app.isPackaged`:
+
+- el Python embebido y el `ui/` del paquete (`ORGTREE_V2_UI_DIR`);
+- `ORGTREE_PG_BOOTSTRAP=1`, `ORGTREE_PG_CUSTODIAN` y `ORGTREE_P03_PG_BIN`, como `postgres-runtime.ts`;
+- el descriptor `engine-paths.json` en `%LOCALAPPDATA%\com.kushro.orgtree.tauri-spike`, como `writeEnginePaths`.
+
+Lo implementa el módulo `packaged` de `engine-host`. Un paquete al que le falta una pieza da un error en la ventana de arranque y no cae al modo de desarrollo. Con `ORGTREE_TAURI_PYTHON`, el modo de desarrollo sigue igual y lo usa el smoke test.
+
+**Raíz de datos.** Sigue siendo la de la app (`%LOCALAPPDATA%\com.kushro.orgtree.tauri-spike\data`, o `ORGTREE_TAURI_DATA`). La ventana de arranque la muestra con el modo, y el ícono de la bandeja también, en su tooltip. El supervisor rechaza una raíz que se superpone con las de Orgtree instalado (`%APPDATA%\Orgtree v2`, `%LOCALAPPDATA%\Programs\Orgtree`, `~/orgtree`, `ORGTREE_DATA`). Hace falta porque el motor, en modo producto, sí acepta la raíz real: es la suya.
+
+**Tres trampas del empaquetado**, todas visibles solo en Windows:
+
+- Tauri da la carpeta de recursos con el prefijo `\\?\`. Con una ruta así, el Python embebido no resuelve las entradas relativas de su `._pth` (`../backend`, `../../`), porque Windows no normaliza `..` en rutas literales, y el motor termina antes de `ready`. `PackagedRuntime::locate` quita el prefijo.
+- libpq prefiere `PGPASSWORD` al `passfile` de `pg-custodian`. Los runners de GitHub traen un PostgreSQL propio con `PGPASSWORD=root`, y las migraciones fallaban con "password authentication failed for user orgtree_admin". El supervisor ya no le pasa al motor las variables de libpq (`PGPASSWORD`, `PGUSER`, `PGHOST`, etc.). Electron tiene el mismo riesgo con cualquier usuario que tenga esas variables.
+- En el runner, `pg-custodian init` se negaba con `acl.not_owner_only` sobre su propia carpeta de secretos, con DACL `O:LAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)`. El usuario del runner (`runneradmin`) es la cuenta Administrador integrada (RID 500), cuyo SID Windows abrevia `LA` en SDDL, y `prototype-guard` (`acl.rs`) lo compara con el SID completo. Es un problema del producto con esa cuenta, no del token elevado: PostgreSQL arrancaba bien con el token restringido de `pg-custodian`. No se cambió el motor. El CI corre la app instalada como un usuario local estándar creado para la prueba, como la usaría una persona.
+
+**Verificado en el CI** (paso "Install and run the standalone installer"):
+
+- el instalador se instala en silencio (`/S /D=<carpeta en RUNNER_TEMP>`), y el motor instalado es idéntico al armado;
+- la app instalada arranca como usuario estándar, sin `ORGTREE_TAURI_PYTHON`, en modo `packaged`, con la raíz descartable que se le pidió;
+- la raíz se crea sobre PostgreSQL (`store-backend.json` con `postgres`, el cluster en `<raíz>\pg\cluster\data`), y corren `postgres.exe` y el Python embebido desde la carpeta instalada;
+- `engine-paths.json` describe la instalación;
+- en la página del motor, la navegación y `fetch` se autentican, `window.orgtreeDesktop` responde, el renderer se dibuja, y una org creada por la API (`instalado`) aparece en la lista y en la pantalla;
+- las capturas `installed-splash` e `installed-app` (artefacto `orgtree-tauri-screens`) muestran la ventana de arranque con la raíz y la app cargada.
+
+Números del CI: instalador **50,8 MB** (LZMA), exe **4,4 MB**, unos **227 MB** instalada. De los 222 MB armados, 141 son de PostgreSQL y 63 del runtime de Python. Con una raíz nueva, la primera página está lista en unos **15 s**, incluido `initdb`.
+
+**Pre-release.** Un `workflow_dispatch` con `prerelease: true` agrega el job `prerelease`. Publica el instalador que el job de Windows acaba de probar como pre-release `tauri-preview-<run_number>`, sobre el commit del run, con notas en español. No toca `main` ni los releases normales.
