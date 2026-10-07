@@ -207,7 +207,7 @@ jobs:
           }
           if (-not ($dp.messagesInChild -gt 0)) { $failures += 'the popped-out desk shows no messages' }
           # window.close() desde JS tiene que cerrar la ventana nativa: queda solo el popout de la primitiva
-          if ($probe.page.shell_after.popouts -ne 1) { $failures += "popout windows still open after the desk redocked: $($probe.page.shell_after.popouts) (expected 1)" }
+          if ($probe.page.shell_after.popouts -ne 1) { $failures += "popout windows still open after the desk redocked: $($probe.page.shell_after.popouts) (expected 1): $($probe.page.shell_after.windows | ConvertTo-Json -Compress)" }
           $rc = $probe.reconnect
           if (-not $rc) { $failures += 'reconnect stage did not report' }
           else {

@@ -554,6 +554,22 @@ fn record_install_probe(app: &tauri::AppHandle, title: &str) {
     let _ = std::fs::write(out, serde_json::to_vec_pretty(&report).unwrap_or_default());
 }
 
+/// Para diagnosticar el vigilante de popouts: cada popout abierto, si es
+/// visible y si todavía tiene su contenedor `WRY_WEBVIEW`.
+fn popout_report(app: &tauri::AppHandle) -> serde_json::Value {
+    app.webview_windows()
+        .into_iter()
+        .filter(|(label, _)| label.starts_with(POPOUT_PREFIX))
+        .map(|(label, window)| {
+            serde_json::json!({
+                "label": label,
+                "visible": window.is_visible().ok(),
+                "containerGone": webview_container_gone(&window),
+            })
+        })
+        .collect()
+}
+
 /// La prueba de `ORGTREE_TAURI_PROBE` devuelve sus resultados por el título.
 fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
     if title.starts_with(INSTALL_PROBE_PREFIX) {
@@ -564,7 +580,7 @@ fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
     let Some(probe) = probe.as_ref() else { return };
     if title.starts_with(probe::PAUSE_PREFIX) {
         probe.record_pause(title);
-    } else if probe.record_page(title, serde_json::json!({ "popouts": popout_labels(app, None).len() })) {
+    } else if probe.record_page(title, serde_json::json!({ "popouts": popout_labels(app, None).len(), "windows": popout_report(app) })) {
         probe_owner_close(app.clone());
     } else if title.starts_with(probe::CLOSE_PREFIX) {
         let shell = serde_json::json!({

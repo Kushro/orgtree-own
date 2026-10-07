@@ -194,6 +194,8 @@
       composer.dispatchEvent(new child.Event('input', { bubbles: true }));
       await timeout(500);
       child.close();
+      // El vigilante de popouts (reap_closed_popouts) revisa cada 400 ms.
+      await timeout(2000);
       const back = await waitFor(() => {
         const area = document.querySelector('#root textarea');
         return area && area.value === 'borrador escrito en el popout' && area.value;
