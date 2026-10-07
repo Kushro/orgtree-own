@@ -5,12 +5,13 @@
 //! (Tauri sí): acá son unas decenas de líneas propias y `notify-rust`.
 
 use dioxus::desktop::tao::event::{Event, WindowEvent};
-use dioxus::desktop::trayicon::menu::{Menu, MenuItem};
+use dioxus::desktop::trayicon::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use dioxus::desktop::{use_tray_menu_event_handler, use_wry_event_handler};
 use dioxus::prelude::*;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::cell::RefCell;
 use std::sync::Mutex;
 
 /// Los botones de la ventana sin marco, con las clases de `WindowControls`
@@ -50,7 +51,9 @@ pub fn WindowControls() -> Element {
                 }
             }
             button { r#type: "button", class: "window-control close", aria_label: "Close window", title: "Close window",
-                onclick: move |_| dioxus::desktop::window().close(),
+                // #25: el cierre decide (`performClose`): una de varias se cierra, la
+                // última se oculta en la bandeja o sale con `exitOnClose`.
+                onclick: move |_| crate::orgwindows::request_close(&dioxus::desktop::window()),
                 svg { width: "1em", height: "1em", view_box: "0 0 24 24", fill: "currentColor",
                     path { d: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" } }
             }
@@ -58,41 +61,111 @@ pub fn WindowControls() -> Element {
     }
 }
 
-/// Ícono en la bandeja con el menú mínimo: abrir y salir. Un clic en el ícono
-/// muestra las ventanas (comportamiento por defecto de Dioxus).
+/// Ícono en la bandeja. Un clic en el ícono muestra las ventanas
+/// (comportamiento por defecto de Dioxus). El menú, como el de Electron con lo
+/// que el spike tiene: el estado del motor (#25), abrir, una ventana nueva,
+/// reiniciar el motor (siempre visible y sin confirmación, como decidió el
+/// usuario para Electron), arrancar con Windows, salir al cerrar la última
+/// ventana y salir.
 static TRAY_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn tray_ready() -> bool {
     TRAY_READY.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Los ítems que cambian (los de muda no son `Send`: viven en el hilo del loop).
+struct TrayItems {
+    tray: dioxus::desktop::trayicon::DioxusTray,
+    status: MenuItem,
+    start_at_login: CheckMenuItem,
+    exit_on_close: CheckMenuItem,
+}
+
+thread_local! {
+    static TRAY_ITEMS: RefCell<Option<TrayItems>> = const { RefCell::new(None) };
+}
+
 pub fn use_tray() {
     use_hook(|| {
         let menu = Menu::new();
+        let status = MenuItem::with_id("engine-status", crate::lifecycle::tray_line(), false, None);
         let open = MenuItem::with_id("open", "Abrir Orgtree", true, None);
+        let new_window = MenuItem::with_id("new-window", "Nueva ventana", true, None);
+        let restart = MenuItem::with_id("restart-engine", "Reiniciar motor", true, None);
+        let prefs = crate::notify::prefs();
+        let flag = |key: &str| prefs.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+        let start_at_login = CheckMenuItem::with_id("start-at-login", "Iniciar con Windows", true, flag("startAtLogin"), None);
+        let exit_on_close = CheckMenuItem::with_id("exit-on-close", "Salir al cerrar la última ventana", true, flag("exitOnClose"), None);
         let quit = MenuItem::with_id("quit", "Salir", true, None);
-        let _ = menu.append_items(&[&open, &quit]);
-        dioxus::desktop::trayicon::init_tray_icon(menu, None);
+        let (sep1, sep2, sep3) = (PredefinedMenuItem::separator(), PredefinedMenuItem::separator(), PredefinedMenuItem::separator());
+        let _ = menu.append_items(&[
+            &status,
+            &sep1,
+            &open,
+            &new_window,
+            &restart,
+            &sep2,
+            &start_at_login,
+            &exit_on_close,
+            &sep3,
+            &quit,
+        ]);
+        let tray = dioxus::desktop::trayicon::init_tray_icon(menu, None);
+        TRAY_ITEMS.with(|items| *items.borrow_mut() = Some(TrayItems { tray, status, start_at_login, exit_on_close }));
         TRAY_READY.store(true, std::sync::atomic::Ordering::SeqCst);
     });
     use_tray_menu_event_handler(|event| match event.id().as_ref() {
         "open" => show_main(),
+        "new-window" => {
+            crate::orgwindows::open_homepage_window();
+        }
+        "restart-engine" => crate::lifecycle::restart_from_tray(),
+        "start-at-login" | "exit-on-close" => {
+            let key = if event.id().as_ref() == "start-at-login" { "startAtLogin" } else { "exitOnClose" };
+            let on = !crate::notify::prefs().get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut patch = serde_json::Map::new();
+            patch.insert(key.into(), serde_json::Value::Bool(on));
+            crate::notify::set_prefs(&patch);
+        }
         "quit" => quit(),
         _ => {}
     });
+    // La línea de estado del motor sigue al canal del ciclo de vida.
+    use_future(|| async move {
+        let mut changes = crate::lifecycle::subscribe_status();
+        loop {
+            refresh_tray();
+            if changes.changed().await.is_err() {
+                break;
+            }
+        }
+    });
 }
 
-pub fn show_main() {
-    crate::windows::with_main(|main| {
-        main.window.set_visible(true);
-        main.window.set_minimized(false);
-        main.window.set_focus();
+/// Pone la bandeja al día: la línea y el tooltip del motor, y las preferencias.
+/// Solo en el hilo del loop (los ítems viven ahí).
+pub fn refresh_tray() {
+    let line = crate::lifecycle::tray_line();
+    let prefs = crate::notify::prefs();
+    let flag = |key: &str| prefs.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let _ = TRAY_ITEMS.try_with(|items| {
+        if let Some(items) = items.borrow().as_ref() {
+            items.status.set_text(&line);
+            items.start_at_login.set_checked(flag("startAtLogin"));
+            items.exit_on_close.set_checked(flag("exitOnClose"));
+            let _ = items.tray.set_tooltip(Some(format!("Orgtree — {line}")));
+        }
     });
+}
+
+/// "Abrir Orgtree" de la bandeja y una segunda ejecución.
+pub fn show_main() {
+    crate::orgwindows::show_all();
 }
 
 /// Salir de la app (menú de la bandeja). El motor se apaga en `LoopDestroyed`.
 pub fn quit() {
-    crate::windows::quit_all();
+    crate::orgwindows::quit("tray");
 }
 
 /// Notificación nativa. En Windows, `notify-rust` usa el AppUserModelID de

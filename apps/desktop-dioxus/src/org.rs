@@ -600,7 +600,9 @@ pub fn OrgView(slug: String) -> Element {
     let attention_count = crate::attention::entries(&ctx).len();
     let body = match &*tree.read() {
         None => rsx! { p { class: "dim pad", "cargando…" } },
-        Some(Err(error)) => rsx! { p { class: "dim pad", "{error}" } },
+        // #25: una ventana guardada cuya org ya no existe muestra el error del motor
+        // (la ventana de error de Electron).
+        Some(Err(error)) => rsx! { p { class: "dim pad dx-org-error", role: "alert", "{error}" } },
         Some(Ok(_)) if (ctx.view)() == View::Attention => rsx! {
             crate::attention::AttentionQueue {}
         },
@@ -636,6 +638,12 @@ pub fn OrgView(slug: String) -> Element {
                     button { class: "iconbtn dx-org-settings-open", title: "Org settings", "aria-label": "Org settings",
                         onclick: move |_| { let mut open = ctx.settings_open; open.set(true) },
                         crate::icons::SettingsIcon {}
+                    }
+                    // #25: "New window" (`openHomepageWindow`): una ventana de inicio aparte,
+                    // desde la que se abre otra org en su propia ventana.
+                    button { class: "iconbtn dx-new-window", title: "New window", "aria-label": "New window",
+                        onclick: move |_| { crate::orgwindows::open_homepage_window(); },
+                        crate::icons::NewWindowIcon {}
                     }
                 }
                 crate::native::WindowControls {}

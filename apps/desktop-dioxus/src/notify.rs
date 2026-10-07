@@ -65,6 +65,12 @@ pub fn normalize(value: &Value) -> Value {
     out.insert("visualThemeExplicit".into(), Value::Bool(explicit));
     let theme = value.get("visualTheme").and_then(Value::as_str).filter(|t| crate::settings::is_visual_theme(t)).unwrap_or("orgtree");
     out.insert("visualTheme".into(), Value::String(theme.into()));
+    // #25: salir al cerrar la última ventana y arrancar con Windows. En Electron
+    // `startAtLogin` viene prendido; el spike no se registra solo en el inicio
+    // de Windows de quien lo prueba, así que acá viene apagado.
+    for key in ["exitOnClose", "startAtLogin"] {
+        out.insert(key.into(), Value::Bool(value.get(key).and_then(Value::as_bool).unwrap_or(false)));
+    }
     Value::Object(out)
 }
 
@@ -72,7 +78,7 @@ pub fn normalize(value: &Value) -> Value {
 fn accepted(key: &str, value: &Value) -> bool {
     match key {
         "visualTheme" => value.as_str().is_some_and(crate::settings::is_visual_theme),
-        "notificationsEnabled" | "onboarded" | "visualThemeExplicit" => value.is_boolean(),
+        "notificationsEnabled" | "onboarded" | "visualThemeExplicit" | "exitOnClose" | "startAtLogin" => value.is_boolean(),
         _ => value.is_boolean() && OPTIONS.iter().any(|(k, _, _)| *k == key),
     }
 }
@@ -131,11 +137,14 @@ pub fn set_prefs(patch: &Map<String, Value>) -> Value {
     }
     *PREFS.lock().unwrap() = Some(next.clone());
     if let Some(path) = file("preferences.json") {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(path, serde_json::to_vec_pretty(&next).unwrap_or_default());
+        let _ = crate::placement::write_atomic(&path, &serde_json::to_vec_pretty(&next).unwrap_or_default());
     }
+    // #25: `startAtLogin` escribe o borra el valor de `Run` (HKCU).
+    if let Some(on) = patch.get("startAtLogin").and_then(Value::as_bool) {
+        let result = crate::autostart::apply(on);
+        log("autostart", serde_json::json!({ "enabled": on, "result": format!("{result:?}") }));
+    }
+    crate::native::refresh_tray();
     let removed = STATE.lock().unwrap().configure(&next);
     retract(&removed);
     log("configure", serde_json::json!({ "prefs": next, "removed": removed_json(&removed) }));
@@ -455,11 +464,9 @@ pub fn bump() {
     BUMP.notify_one();
 }
 
-/// ¿Alguna ventana de Orgtree tiene el foco?
+/// ¿Alguna ventana de Orgtree tiene el foco? (cualquier ventana principal, #25)
 fn any_focused() -> bool {
-    let mut focused = false;
-    crate::windows::with_main(|main| focused |= main.window.is_focused() && !main.window.is_minimized());
-    focused || crate::windows::popout_focused()
+    crate::orgwindows::any_focused() || crate::windows::popout_focused()
 }
 
 /// Una pasada de `poll()`: leer, la barra de tareas, sincronizar y mostrar.
@@ -475,7 +482,8 @@ async fn pass(client: &Client) {
     let pulse = STATE.lock().unwrap().attention(ids.clone());
     let mut started = false;
     let mut main_focused = false;
-    crate::windows::with_main(|main| {
+    // #25: parpadea la principal, o la primera ventana visible si está oculta.
+    crate::orgwindows::with_attention_window(|main| {
         main_focused = main.window.is_focused() && !main.window.is_minimized();
         match pulse {
             Pulse::Start if !main_focused => {
@@ -536,8 +544,9 @@ async fn pass(client: &Client) {
 
 /// El clic: la notificación tiene que seguir pendiente y su tipo encendido
 /// (el sistema puede retener un banner que ya se resolvió en otro lado). Se
-/// muestra la ventana principal y la vista abre el elemento.
-async fn clicked(client: &Client, tag: &str, mut focus: Signal<Option<DesktopNotice>>, mut route: Signal<crate::Route>) {
+/// lleva a la ventana de su org (#25: enfocada, ligada o nueva) y esa vista
+/// abre el elemento.
+async fn clicked(client: &Client, tag: &str) {
     let notice = STATE.lock().unwrap().by_tag.get(tag).cloned();
     let Some(notice) = notice else {
         log("click", serde_json::json!({ "tag": tag, "opened": false, "why": "unknown tag" }));
@@ -551,31 +560,26 @@ async fn clicked(client: &Client, tag: &str, mut focus: Signal<Option<DesktopNot
         log("click", serde_json::json!({ "tag": tag, "id": notice.id, "opened": false, "why": "resolved" }));
         return;
     };
-    crate::native::show_main();
-    if *route.peek() != crate::Route::Org(current.org.clone()) {
-        route.set(crate::Route::Org(current.org.clone()));
-    }
-    log("click", serde_json::json!({ "tag": tag, "id": current.id, "kind": current.kind, "opened": true }));
-    focus.set(Some(current));
+    let id = current.id.clone();
+    let kind = current.kind.clone();
+    let decision = crate::orgwindows::deliver_notice(current);
+    log("click", serde_json::json!({ "tag": tag, "id": id, "kind": kind, "opened": true, "window": decision.action() }));
 }
 
 /// En la ventana principal: la pasada global con su reloj, los avisos de las
-/// orgs abiertas y los clics. `focus` lleva a la vista el elemento a abrir.
-pub fn use_notifications(focus: Signal<Option<DesktopNotice>>) {
-    let route = use_context::<Signal<crate::Route>>();
-    let client = use_context::<Signal<Option<Client>>>();
+/// orgs abiertas y los clics. El cliente es el del motor en uso (#25: cambia
+/// con cada arranque).
+pub fn use_notifications() {
     use_future(move || async move {
         let (sender, mut clicks) = futures_channel::mpsc::unbounded::<String>();
         *CLICKS.lock().unwrap() = Some(sender);
-        // el cliente llega cuando el motor está listo
-        let client = loop {
-            if let Some(client) = client.peek().clone() {
-                break client;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        };
         use futures_util::StreamExt;
         loop {
+            // el cliente llega cuando el motor está listo, y se renueva tras un reinicio
+            let Some(client) = crate::lifecycle::current_client() else {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            };
             pass(&client).await;
             tokio::select! {
                 _ = BUMP.notified() => {
@@ -585,7 +589,7 @@ pub fn use_notifications(focus: Signal<Option<DesktopNotice>>) {
                 _ = tokio::time::sleep(POLL_EVERY) => {}
                 tag = clicks.next() => {
                     if let Some(tag) = tag {
-                        clicked(&client, &tag, focus, route).await;
+                        clicked(&client, &tag).await;
                     }
                 }
             }

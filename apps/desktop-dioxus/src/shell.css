@@ -60,3 +60,22 @@
 .dx-org-view header .window-controls, .dx-desk header .window-controls { margin-left: auto; }
 .dx-desk header .dx-popout + .window-controls { margin-left: 4px; }
 .welcome-card h1 .window-controls { margin-left: auto; }
+
+/* Ciclo de vida del motor (#25): la pantalla de arranque con sus fases, la
+   conversión y un rechazo con Reintentar y Salir; el aviso dentro de cada
+   ventana mientras el motor no está, y el del mantenimiento. */
+.dx-splash { position: relative; padding: 0 24px; }
+.dx-splash-bar { position: fixed; top: 0; left: 0; right: 0; display: flex; padding: 6px 8px; -webkit-app-region: drag; }
+.dx-splash-bar .window-controls { margin-left: auto; -webkit-app-region: no-drag; }
+.dx-splash .dx-converting { max-width: 520px; margin: 0 auto 6px; opacity: 1; }
+.dx-splash-phase { font-size: 12px; }
+.dx-splash-failure { max-width: 560px; margin: 0 auto; text-align: left; border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  border-radius: 10px; padding: 16px 18px; background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.dx-splash-failure h2 { margin: 0 0 8px; font-size: 16px; }
+.dx-splash-failure p { opacity: 1; }
+.dx-splash-detail { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 160px; overflow: auto; opacity: .8; }
+.dx-splash-failure .row { gap: 8px; justify-content: flex-end; }
+.dx-engine-notice, .dx-maintenance-notice { position: fixed; left: 50%; top: 44px; transform: translateX(-50%); z-index: 2147483000;
+  padding: 10px 16px; border-radius: 8px; max-width: 80vw; font-size: 13px; line-height: 1.4; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+.dx-engine-notice { background: #8a2b2b; color: #fff; }
+.dx-maintenance-notice { top: 92px; background: var(--panel, #2a2d33); color: var(--ink, #e6e6e6); border: 1px solid var(--line, #444); }

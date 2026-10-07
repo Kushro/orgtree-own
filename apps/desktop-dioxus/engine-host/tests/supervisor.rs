@@ -5,7 +5,7 @@
 //! - La prueba con el motor real está marcada `#[ignore]`: se corre con
 //!   `cargo test -- --include-ignored` y `ORGTREE_TEST_ENGINE_PYTHON`.
 
-use orgtree_engine_host::{write_engine_paths, Engine, EngineError, EngineOptions, PostgresRuntime, StopOutcome};
+use orgtree_engine_host::{write_engine_paths, Engine, EngineError, EngineOptions, PostgresRuntime, QuitOutcome, StartupEvent, StopOutcome};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -56,8 +56,8 @@ fn with_mode<T>(mode: &str, body: impl FnOnce() -> T) -> T {
 fn arranca_responde_con_token_y_se_apaga_limpio() {
     with_mode("ready", || {
         let mut phases = Vec::new();
-        let mut engine = Engine::start_with(&fake_options("ready"), &mut |p| phases.push(p.to_string())).expect("ready");
-        assert_eq!(phases, ["starting", "progress"]);
+        let mut engine = Engine::start_with(&fake_options("ready"), &mut |p| phases.push(format!("{p:?}"))).expect("ready");
+        assert_eq!(phases, ["Starting", "Progress(\"lifetime-owned\")"]);
         assert!(engine.is_running());
         assert!(engine.origin().starts_with("http://127.0.0.1:"));
         let (status, _) = engine.get("/api/desktop/identity", Duration::from_secs(5)).unwrap();
@@ -117,6 +117,65 @@ fn los_checkpoints_reinician_el_plazo() {
         options.silence_timeout = Duration::from_millis(1500);
         let engine = Engine::start(&options).expect("los checkpoints mantienen vivo el arranque");
         assert_eq!(engine.stop(), StopOutcome::Graceful);
+    });
+}
+
+/// La conversión (#25): las fases llegan al shell, y su plazo mide el silencio
+/// entre checkpoints, no el total.
+#[test]
+fn la_conversion_avisa_sus_fases_y_mide_el_silencio() {
+    with_mode("convert", || {
+        let mut options = fake_options("convert");
+        // Tres pasos a 0,6 s: el total (1,8 s) supera el plazo de conversión, ninguno solo.
+        options.conversion_timeout = Duration::from_millis(1500);
+        let mut phases = Vec::new();
+        let mut engine = Engine::start_with(&options, &mut |p| {
+            if let StartupEvent::Converting(phase) = p {
+                phases.push(phase.to_string());
+            }
+        })
+        .expect("la conversión llega a ready");
+        assert_eq!(phases, ["database-convert: org 1/3", "database-convert: org 2/3", "database-convert: org 3/3"]);
+        assert_eq!(engine.stop_for_quit(orgtree_engine_host::QUIT_STOP_BUDGET), QuitOutcome::Stopped);
+    });
+}
+
+#[test]
+fn un_paso_de_conversion_que_calla_demasiado_vence_su_plazo() {
+    with_mode("convert-stall", || {
+        let mut options = fake_options("convert-stall");
+        options.conversion_timeout = Duration::from_millis(1500);
+        assert_eq!(Engine::start(&options).unwrap_err(), EngineError::Timeout);
+    });
+}
+
+#[test]
+fn la_conversion_fallida_trae_su_motivo() {
+    with_mode("convert-fail", || {
+        match Engine::start(&fake_options("convert-fail")).unwrap_err() {
+            EngineError::ConversionFailed(reason) => assert!(reason.contains("conversion"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+    });
+}
+
+/// La salida (#25): por las buenas cuando el motor responde, forzada y probada
+/// cuando no, siempre dentro del presupuesto.
+#[test]
+fn la_salida_se_prueba_y_respeta_el_presupuesto() {
+    with_mode("ready", || {
+        let mut engine = Engine::start(&fake_options("quit")).expect("ready");
+        assert_eq!(engine.stop_for_quit(orgtree_engine_host::QUIT_STOP_BUDGET), QuitOutcome::Stopped);
+        assert!(!engine.is_running());
+        assert_eq!(engine.stop_for_quit(orgtree_engine_host::QUIT_STOP_BUDGET), QuitOutcome::Stopped, "dos veces no rompe");
+    });
+    with_mode("ignore-shutdown", || {
+        let mut engine = Engine::start(&fake_options("quit-forced")).expect("ready");
+        let began = std::time::Instant::now();
+        // Con un presupuesto corto, la parte amable deja su reserva a la forzada.
+        assert_eq!(engine.stop_for_quit(Duration::from_secs(6)), QuitOutcome::Forced);
+        assert!(began.elapsed() < Duration::from_secs(7), "{:?}", began.elapsed());
+        assert!(!engine.is_running());
     });
 }
 
@@ -253,8 +312,17 @@ fn motor_real_arranca_y_se_apaga() {
     assert_eq!(status, 401, "sin token el TokenGate rechaza");
     assert!(engine.is_running());
 
-    assert_eq!(engine.stop(), StopOutcome::Graceful, "el motor real responde al apagado autenticado");
+    // Mientras corre, el guardián tiene la raíz (#25: la prueba de la salida).
+    #[cfg(windows)]
+    assert!(!orgtree_engine_host::root_released(engine.data_root()), "el guardián tiene el candado de la raíz");
+    let root = engine.data_root().to_path_buf();
+    assert_eq!(
+        engine.stop_for_quit(orgtree_engine_host::QUIT_STOP_BUDGET),
+        QuitOutcome::Stopped,
+        "el motor real responde al apagado autenticado y suelta la raíz"
+    );
     assert!(!process_alive(pid), "el proceso del motor terminó");
+    assert!(orgtree_engine_host::root_released(&root), "el árbol soltó la raíz");
     let _ = std::fs::remove_dir_all(&data);
 }
 

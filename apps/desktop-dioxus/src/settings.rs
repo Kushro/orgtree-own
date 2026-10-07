@@ -816,6 +816,7 @@ fn RuntimeTab() -> Element {
     let runtime = (panel.runtime)();
     let busy = (panel.busy)();
     rsx! {
+        DesktopGroup {}
         NotificationsGroup {}
         match runtime {
             None => rsx! { p { class: "dim", "loading…" } },
@@ -836,6 +837,31 @@ fn RuntimeTab() -> Element {
                     }
                 }
             },
+        }
+    }
+}
+
+/// El grupo "Desktop" de `DesktopSettings` (#25): arrancar con Windows (el
+/// valor de `Run` de HKCU, con `--background`) y salir al cerrar la última
+/// ventana. Se guardan en `preferences.json`, como el resto.
+#[component]
+fn DesktopGroup() -> Element {
+    let mut prefs = use_signal(crate::notify::prefs);
+    let current = prefs();
+    let flag = |key: &str| current.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut put = move |key: &'static str, value: bool| {
+        let mut patch = serde_json::Map::new();
+        patch.insert(key.into(), Value::Bool(value));
+        prefs.set(crate::notify::set_prefs(&patch));
+    };
+    rsx! {
+        div { class: "set-group dx-desktop-group",
+            div { class: "set-group-head", "Desktop" }
+            SetToggle { key_name: "startAtLogin", label: "start at login", hint: Some("Start quietly in the system tray.".to_string()),
+                checked: flag("startAtLogin"), disabled: false, onchange: move |on: bool| put("startAtLogin", on) }
+            SetToggle { key_name: "exitOnClose", label: "exit when the last window closes",
+                hint: Some("Closing the main window keeps your other windows open.".to_string()),
+                checked: flag("exitOnClose"), disabled: false, onchange: move |on: bool| put("exitOnClose", on) }
         }
     }
 }

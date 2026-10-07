@@ -1326,7 +1326,14 @@ dioxus.send({ done: r });
 "#;
 
 fn installed_mode() -> bool {
-    std::env::var("ORGTREE_DIOXUS_PROBE_MODE").is_ok_and(|mode| mode == "installed")
+    mode().as_deref() == Some("installed")
+}
+
+/// La modalidad de la prueba (`ORGTREE_DIOXUS_PROBE_MODE`): la de la app
+/// instalada (#24), la del ciclo de vida del motor y la de las ventanas por org
+/// (#25). Sin ella, la prueba completa del smoke test.
+pub(crate) fn mode() -> Option<String> {
+    std::env::var("ORGTREE_DIOXUS_PROBE_MODE").ok().filter(|m| !m.is_empty())
 }
 
 async fn installed_probe() {
@@ -1411,7 +1418,7 @@ fn native_shell() -> serde_json::Value {
 }
 
 /// Espera a que el CI termine lo que hace durante una pausa (`<salida>.<nombre>-done`).
-async fn wait_for_ci(name: &str) -> bool {
+pub(crate) async fn wait_for_ci(name: &str) -> bool {
     let Some(out) = report_path() else { return false };
     let mut done = out.into_os_string();
     done.push(format!(".{name}-done"));
@@ -1424,11 +1431,11 @@ async fn wait_for_ci(name: &str) -> bool {
     false
 }
 
-fn report_path() -> Option<std::path::PathBuf> {
+pub(crate) fn report_path() -> Option<std::path::PathBuf> {
     std::env::var_os("ORGTREE_DIOXUS_PROBE").filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
 }
 
-fn record(key: &str, value: serde_json::Value) {
+pub(crate) fn record(key: &str, value: serde_json::Value) {
     let Some(out) = report_path() else { return };
     let mut report = REPORT.lock().unwrap();
     let report = report.get_or_insert_with(Default::default);
@@ -1436,12 +1443,38 @@ fn record(key: &str, value: serde_json::Value) {
     let _ = std::fs::write(out, serde_json::to_vec_pretty(report).unwrap_or_default());
 }
 
-fn marker(name: &str) {
+pub(crate) fn marker(name: &str) {
     let Some(out) = report_path() else { return };
     let mut marker = out.into_os_string();
     marker.push(format!(".{name}"));
     let _ = std::fs::write(marker, b"");
 }
+
+/// Anota un evento del shell en `logs.<nombre>` del reporte (#25: fases de
+/// arranque, estado del motor, cierres, pedidos de org), solo con la prueba.
+pub fn log(name: &str, entry: serde_json::Value) {
+    let Some(out) = report_path() else { return };
+    let mut report = REPORT.lock().unwrap();
+    let report = report.get_or_insert_with(Default::default);
+    let logs = report.entry("logs").or_insert_with(|| serde_json::json!({}));
+    if let Some(logs) = logs.as_object_mut() {
+        let list = logs.entry(name.to_string()).or_insert_with(|| serde_json::json!([]));
+        if let Some(list) = list.as_array_mut() {
+            if list.len() < 500 {
+                list.push(entry);
+            }
+        }
+    }
+    let _ = std::fs::write(out, serde_json::to_vec_pretty(report).unwrap_or_default());
+}
+
+/// Lo anotado en `logs.<nombre>` (para que la prueba lo incluya en una etapa).
+pub fn report_logs(name: &str) -> serde_json::Value {
+    REPORT.lock().unwrap().as_ref().and_then(|r| r.get("logs")).and_then(|l| l.get(name)).cloned().unwrap_or(serde_json::Value::Null)
+}
+
+/// El reporte ya se escribe en cada cambio; queda para la salida.
+pub fn flush() {}
 
 #[component]
 pub fn Probe() -> Element {
@@ -1454,6 +1487,10 @@ pub fn Probe() -> Element {
         }
         if installed_mode() {
             return installed_probe().await;
+        }
+        // #25: las pruebas del ciclo de vida y de las ventanas tienen su director.
+        if mode().is_some() {
+            return;
         }
         let mut eval = document::eval(SCRIPT);
         let report = loop {
@@ -1511,6 +1548,7 @@ pub fn Probe() -> Element {
         }
         // #13: cerrar la principal con el desk abierto en otra ventana.
         if crate::windows::popout_count() == 0 {
+            record("owner_close", serde_json::json!({ "error": "no hay un desk abierto en otra ventana" }));
             return;
         }
         let main = dioxus::desktop::window();

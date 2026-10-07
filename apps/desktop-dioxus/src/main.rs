@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod attention;
+mod autostart;
 mod desk;
 mod docket;
 mod external;
@@ -9,21 +10,26 @@ mod harnesses;
 mod home;
 mod icons;
 mod inbox;
+mod lifecycle;
 mod login;
+mod lprobe;
 mod native;
 mod notify;
 mod org;
 mod orgsettings;
+mod orgwindows;
+mod placement;
 mod probe;
 mod reveal;
 mod settings;
 mod windows;
+mod wprobe;
 
-use dioxus::desktop::tao::event::Event;
+use dioxus::desktop::tao::event::{Event, WindowEvent};
 use dioxus::desktop::{Config, WindowBuilder};
 use dioxus::prelude::*;
 use orgtree_engine_client::Client;
-use orgtree_engine_host::{write_engine_paths, Engine, EngineOptions};
+use orgtree_engine_host::{Engine, EngineOptions};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -35,8 +41,9 @@ pub(crate) const SHELL_CSS: &str = include_str!("shell.css");
 pub(crate) const ATTENTION_CSS: &str = include_str!("../../desktop/renderer/src/attention/attention.css");
 
 /// El motor vive fuera del VirtualDom para poder apagarlo al cerrar el loop.
-/// El token nunca llega al webview: solo lo usa el cliente Rust.
-static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
+/// El token nunca llega al webview: solo lo usa el cliente Rust. Lo maneja
+/// `lifecycle.rs` (#25): arranque, caídas, reinicios y salida.
+pub(crate) static ENGINE: Mutex<Option<Engine>> = Mutex::new(None);
 
 /// El cliente del motor, que la UI recibe por contexto cuando el motor está listo.
 pub fn engine_client() -> Client {
@@ -51,15 +58,14 @@ pub enum Route {
     Desk { org: String, node: String },
 }
 
-/// Lo que el hilo de arranque le cuenta a la UI.
-enum Update {
-    Status(String),
-    Ready(Client),
-}
-
 /// Carpeta propia de la app (nunca la de Orgtree instalado): guarda la raíz de
-/// datos por defecto y el descriptor `engine-paths.json`, como `userData` en Electron.
+/// datos por defecto, el descriptor `engine-paths.json`, las preferencias y el
+/// lugar de las ventanas, como `userData` en Electron. `ORGTREE_DIOXUS_PROFILE`
+/// la cambia (las pruebas usan una carpeta propia por paso).
 pub(crate) fn app_dir() -> Option<PathBuf> {
+    if let Some(profile) = std::env::var_os("ORGTREE_DIOXUS_PROFILE").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(profile));
+    }
     std::env::var_os("LOCALAPPDATA")
         .map(|base| PathBuf::from(base).join("com.kushro.orgtree.dioxus-spike"))
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/orgtree-dioxus-spike")))
@@ -130,47 +136,6 @@ pub fn launch() -> &'static Result<Launch, String> {
     })
 }
 
-/// Arranca el motor en un hilo y manda cada estado por el canal.
-fn start_engine(updates: futures_channel::mpsc::UnboundedSender<Update>) {
-    let launch = match launch() {
-        Ok(launch) => launch,
-        Err(message) => {
-            let _ = updates.unbounded_send(Update::Status(message.clone()));
-            return;
-        }
-    };
-    std::thread::Builder::new()
-        .name("orgtree-engine-start".into())
-        .spawn(move || {
-            let options = &launch.options;
-            if let Some(descriptor) = &launch.descriptor {
-                if let Err(error) = write_engine_paths(descriptor, options) {
-                    let _ = updates.unbounded_send(Update::Status(format!("El motor no arrancó: {error}")));
-                    return;
-                }
-            }
-            let mut notify = |phase: &str| {
-                let text = if phase == "converting" { "Convirtiendo datos…" } else { "Iniciando el motor…" };
-                let _ = updates.unbounded_send(Update::Status(text.to_string()));
-            };
-            match Engine::start_with(options, &mut notify) {
-                Ok(engine) => match Client::new(engine.origin(), engine.token().expose()) {
-                    Ok(client) => {
-                        *ENGINE.lock().unwrap() = Some(engine);
-                        let _ = updates.unbounded_send(Update::Ready(client));
-                    }
-                    Err(error) => {
-                        let _ = updates.unbounded_send(Update::Status(format!("Cliente del motor: {error}")));
-                    }
-                },
-                Err(error) => {
-                    let _ = updates.unbounded_send(Update::Status(format!("El motor no arrancó: {error}")));
-                }
-            }
-        })
-        .expect("no se pudo crear el hilo de arranque del motor");
-}
-
 /// La raíz de datos en uso, para mostrarla en la UI.
 #[component]
 pub fn DataRoot() -> Element {
@@ -186,12 +151,6 @@ pub fn DataRoot() -> Element {
     }
 }
 
-fn stop_engine() {
-    if let Some(engine) = ENGINE.lock().unwrap().take() {
-        let _ = engine.stop();
-    }
-}
-
 fn main() {
     // Instancia única (#14): una segunda ejecución le avisa a la primera y termina.
     if let Ok(launch) = launch() {
@@ -199,89 +158,105 @@ fn main() {
             return;
         }
     }
+    // #25: la principal abre como la primera ventana de la sesión guardada, en su
+    // lugar; las demás se reabren cuando el motor está listo.
+    let (initial, placement) = orgwindows::main_plan();
+    *INITIAL_ROUTE.lock().unwrap() = Some(initial);
     let window = WindowBuilder::new()
         .with_title("Orgtree (Dioxus spike)")
         // Sin marco (#14), como Electron (`frame: false`): botones propios en RSX
         // y arrastre con `-webkit-app-region`, que WebView2 respeta porque wry
         // activa `IsNonClientRegionSupportEnabled`.
         .with_decorations(false)
-        .with_inner_size(dioxus::desktop::LogicalSize::new(1200.0, 800.0))
-        .with_min_inner_size(dioxus::desktop::LogicalSize::new(640.0, 480.0));
+        // Con `--background` (el inicio de Windows) la app arranca en la bandeja.
+        .with_visible(!autostart::background())
+        .with_min_inner_size(dioxus::desktop::LogicalSize::new(orgwindows::MIN_SIZE.0, orgwindows::MIN_SIZE.1));
+    let window = orgwindows::place_builder(window, placement);
 
     // Sin la barra de menú por defecto de Dioxus: la app actual no tiene.
-    let config = Config::new().with_window(window).with_menu(None).with_custom_event_handler(|event, _| {
-        // Último evento del loop antes de que la app salga: apagar el motor.
-        if let Event::LoopDestroyed = event {
+    let config = Config::new().with_window(window).with_menu(None).with_custom_event_handler(|event, _| match event {
+        // Alt+F4 o el menú del sistema en una ventana principal: decide el cierre
+        // (`performClose`) antes de que Dioxus lo aplique.
+        Event::WindowEvent { event: WindowEvent::CloseRequested, window_id, .. } => {
+            orgwindows::native_close_requested(*window_id);
+        }
+        // Último evento del loop antes de que la app salga: por Salir, o por el fin
+        // de la sesión de Windows (tao termina el loop con WM_ENDSESSION). Se guarda
+        // la sesión de ventanas y se apaga el motor en orden.
+        Event::LoopDestroyed => {
+            let path = orgwindows::loop_destroyed();
             // #30: ningún login de proveedor queda vivo (se mata su árbol)
             login::logins().cancel_all();
-            stop_engine();
+            lifecycle::stop_engine_for_exit(path);
+            probe::flush();
         }
+        _ => {}
     });
     dioxus::LaunchBuilder::desktop().with_cfg(config).launch(App);
 }
 
+/// La ruta con la que abre la principal (la primera ventana de la sesión).
+static INITIAL_ROUTE: Mutex<Option<Route>> = Mutex::new(None);
+
 #[component]
 fn App() -> Element {
-    let mut status = use_signal(|| "Iniciando…".to_string());
-    let mut client = use_signal(|| None::<Client>);
-    let route = use_signal(|| Route::Home);
-    use_context_provider(|| route);
-    use_context_provider(|| client);
     use_hook(|| windows::register_main(dioxus::desktop::window()));
     native::use_tray();
     native::use_second_instance();
     // #28: las notificaciones nativas y la barra de tareas corren solo en la
-    // principal; un clic deja acá el elemento que la vista de la org abre.
-    let focus = use_signal(|| None::<orgtree_engine_client::DesktopNotice>);
-    use_context_provider(|| focus);
-    notify::use_notifications(focus);
-    use_hook(move || {
-        let (sender, mut receiver) = futures_channel::mpsc::unbounded();
-        start_engine(sender);
-        spawn(async move {
-            use futures_util::StreamExt;
-            while let Some(update) = receiver.next().await {
-                match update {
-                    Update::Status(text) => {
-                        probe::startup_status(&text);
-                        status.set(text)
-                    }
-                    Update::Ready(ready) => {
-                        // #30: el tema por defecto sigue al primer proveedor instalado
-                        let probe = ready.clone();
-                        spawn(async move {
-                            if let Ok(payload) = probe.providers().await {
-                                settings::providers_known(&payload);
-                            }
-                        });
-                        client.set(Some(ready))
+    // principal; un clic lleva el elemento a la ventana de su org (#25).
+    notify::use_notifications();
+    // #25: el arranque del motor y su pantalla. La vista de la ventana aparece con
+    // el primer cliente del motor y se queda (un reinicio la vuelve a montar).
+    let mut ready = use_signal(|| lifecycle::current_client().is_some());
+    use_hook(lifecycle::start_engine);
+    use_future(move || async move {
+        let mut changes = lifecycle::subscribe_client();
+        loop {
+            if changes.borrow_and_update().is_some() && !*ready.peek() {
+                ready.set(true);
+                // #30: el tema por defecto sigue al primer proveedor instalado
+                if let Some(client) = lifecycle::current_client() {
+                    if let Ok(payload) = client.providers().await {
+                        settings::providers_known(&payload);
                     }
                 }
             }
-        });
-    });
-    let body = match client() {
-        None => rsx! {
-            main { class: "dx-splash",
-                h1 { "Orgtree" }
-                p { id: "status", "{status}" }
-                DataRoot {}
+            if changes.changed().await.is_err() {
+                break;
             }
-        },
-        Some(_) => match route() {
-            Route::Home => rsx! { home::Home {} },
-            Route::Org(slug) => rsx! { org::OrgView { slug } },
-            Route::Desk { org, node } => rsx! { desk::DeskView { org, node } },
-        },
-    };
-    rsx! {
-        style { {RENDERER_CSS} }
-        style { {SHELL_CSS} }
-        style { {ATTENTION_CSS} }
-        settings::ThemeStyle {}
-        {body}
-        if client().is_some() {
-            probe::Probe {}
         }
+    });
+    // Una conversión o un rechazo se muestran aunque la app arrancó en la bandeja
+    // (Electron abre su ventana de conversión y su diálogo igual); la prueba de la
+    // app instalada ve el motivo de un arranque fallido.
+    use_future(|| async move {
+        let mut changes = lifecycle::subscribe_splash();
+        loop {
+            let splash = changes.borrow_and_update().clone();
+            match &splash {
+                lifecycle::Splash::Converting { .. } => orgwindows::reveal(orgwindows::MAIN),
+                lifecycle::Splash::Failed { message, .. } => {
+                    orgwindows::reveal(orgwindows::MAIN);
+                    probe::startup_status(&format!("El motor no arrancó: {message}"));
+                }
+                _ => {}
+            }
+            if changes.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+    let initial = INITIAL_ROUTE.lock().unwrap().clone().unwrap_or(Route::Home);
+    rsx! {
+        if ready() {
+            orgwindows::Shell { win: orgwindows::MAIN, initial }
+        } else {
+            style { {RENDERER_CSS} }
+            style { {SHELL_CSS} }
+            settings::ThemeStyle {}
+            lifecycle::SplashView {}
+        }
+        lprobe::LifecycleProbe {}
     }
 }

@@ -4,9 +4,12 @@
 //! la confirmación de `App.tsx`. Los ajustes de la app y el primer uso
 //! (`canvas/onboarding.tsx`) entraron con #30. Fuera del recorte: uso por
 //! proveedor y el aviso de actualizaciones.
+//!
+//! Una ventana por org (#25): elegir una org pasa por `orgwindows::open_org`.
+//! Desde una ventana de inicio, la ventana se liga a la org; si la org ya está
+//! abierta en otra ventana, esa se enfoca (la fila dice "Already open").
 
 use crate::icons::{BellIcon, DeleteIcon, GitHubIcon, SettingsIcon};
-use crate::Route;
 use dioxus::prelude::*;
 use futures_util::StreamExt;
 use orgtree_engine_client::OrgListEntry;
@@ -19,7 +22,9 @@ const ORG_POLL: Duration = Duration::from_secs(5);
 #[component]
 pub fn Home() -> Element {
     let client = crate::engine_client();
-    let mut route = use_context::<Signal<Route>>();
+    // #25: la ventana que muestra este inicio y las orgs abiertas en otras
+    let win = crate::orgwindows::this_window();
+    let open_orgs = crate::orgwindows::use_open_orgs();
     let mut orgs = use_signal(|| None::<Result<Vec<OrgListEntry>, String>>);
     let mut doomed = use_signal(|| None::<OrgListEntry>);
     let mut notify_settings = use_signal(|| false);
@@ -55,7 +60,7 @@ pub fn Home() -> Element {
                 match client.create_org(&name, &[], true, &[]).await {
                     Ok(made) => {
                         refresh.send(());
-                        route.set(Route::Org(made.slug));
+                        crate::orgwindows::open_org(win, &made.slug);
                     }
                     Err(e) => error.set(Some(format!("error: {e}"))),
                 }
@@ -104,7 +109,8 @@ pub fn Home() -> Element {
                         nav {
                             for org in list.iter() {
                                 OrgRow { key: "{org.slug}", org: org.clone(),
-                                    onpick: move |slug| route.set(Route::Org(slug)),
+                                    open_elsewhere: open_orgs.read().contains(&org.slug),
+                                    onpick: move |slug: String| { crate::orgwindows::open_org(win, &slug); },
                                     ondelete: move |org| doomed.set(Some(org)) }
                             }
                             if list.is_empty() {
@@ -305,7 +311,7 @@ fn NewOrg(oncreate: EventHandler<String>) -> Element {
 }
 
 #[component]
-fn OrgRow(org: OrgListEntry, onpick: EventHandler<String>, ondelete: EventHandler<OrgListEntry>) -> Element {
+fn OrgRow(org: OrgListEntry, #[props(default)] open_elsewhere: bool, onpick: EventHandler<String>, ondelete: EventHandler<OrgListEntry>) -> Element {
     let counts = match org.working {
         Some(working) => format!("{working}/{}", org.live),
         None => org.live.to_string(),
@@ -318,7 +324,12 @@ fn OrgRow(org: OrgListEntry, onpick: EventHandler<String>, ondelete: EventHandle
             onclick: move |_| onpick.call(slug.clone()),
             onkeydown: move |event| if event.key() == Key::Enter { onpick.call(enter.clone()) },
             span { class: "org-activity" }
-            span { class: "org-name", span { class: "org-name-text", "{org.name}" } }
+            span { class: "org-name",
+                span { class: "org-name-text", "{org.name}" }
+                if open_elsewhere {
+                    span { class: "org-open-badge dx-open-elsewhere", "Already open" }
+                }
+            }
             span { class: "org-counts dim", title: "active / hired agents", "{counts}" }
             button { class: "org-del", title: "delete {org.name}",
                 onclick: move |e| {

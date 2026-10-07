@@ -27,6 +27,18 @@ Desk completo (#27), solo en este fixture:
 - ``POST /api/fixture/turn-state`` ``{node, state}`` simula el estado del turno
   (``idle``, ``queued`` detrás del límite de turnos, ``working`` con una
   respuesta en curso) y avisa por el WebSocket, para probar los estados del desk.
+
+Ciclo de vida del motor (#25), como el fixture del spike de Tauri (#19):
+
+- ``ORGTREE_FIXTURE_CONVERT=N`` simula la conversión de la primera ejecución:
+  N checkpoints ``database-convert: …`` separados por
+  ``ORGTREE_FIXTURE_CONVERT_GAP`` segundos (2,5 por defecto), por el mismo
+  reportero de progreso que usa ``engine/pg_process.py``. Con ``fail``, el
+  último paso levanta ``ConversionFailed`` y el motor imprime el rechazo
+  ``conversion-failed``. Solo en Windows (``launch.main``).
+- ``POST /api/fixture/maintenance`` (``{"action": "restart" | "update"}``)
+  crea un pedido de mantenimiento del motor, como lo haría un agente con
+  ``orgtree_self_relaunch``.
 """
 
 from __future__ import annotations
@@ -402,6 +414,47 @@ def _install_docket() -> None:
     api.app.router.routes.insert(0, api.app.router.routes.pop())
 
 
+def _install_maintenance() -> None:
+    """``POST /api/fixture/maintenance`` (#25): un pedido de mantenimiento del
+    motor, por el módulo real (``desktop_maintenance.request``)."""
+    from fastapi import HTTPException
+    from orgtree import api
+
+    def post_maintenance(body: dict) -> dict:
+        from orgtree import desktop_maintenance
+        action = body.get("action")
+        if action not in {"restart", "update"}:
+            raise HTTPException(422, "action must be restart or update")
+        return desktop_maintenance.request(ORG, AGENT, "org", "prueba del ciclo de vida (#25)", action=action)
+
+    api.app.add_api_route("/api/fixture/maintenance", post_maintenance, methods=["POST"])
+    api.app.router.routes.insert(0, api.app.router.routes.pop())
+
+
+def _install_fake_conversion() -> None:
+    """La conversión de la primera ejecución, simulada en el punto donde el
+    motor real la hace (``start_for_engine``, llamado por ``launch.main``)."""
+    spec = os.environ.get("ORGTREE_FIXTURE_CONVERT", "")
+    if not spec:
+        return
+    from engine import pg_process
+    original = pg_process.start_for_engine
+    steps = int(spec) if spec.isdigit() else 2
+    gap = float(os.environ.get("ORGTREE_FIXTURE_CONVERT_GAP", "2.5"))
+
+    def converting(root, env, migrator=None, progress=None):
+        for step in range(1, steps + 1):
+            if progress:
+                progress(f"database-convert: copiando la org {step} de {steps}")
+            time.sleep(gap)
+        if spec == "fail":
+            raise pg_process.ConversionFailed(
+                f"La conversión de prueba se detuvo en la org {steps}. El registro está en {root / 'conversion'}.")
+        return original(root, env, migrator=migrator, progress=progress)
+
+    pg_process.start_for_engine = converting
+
+
 def _live_frames() -> None:
     from orgtree import supervisor
     time.sleep(8)  # supervisor.stream se conecta al hub del WebSocket al arrancar
@@ -421,6 +474,7 @@ def seeded_load_app():
     _install_turn_state()
     _install_attention()
     _install_docket()
+    _install_maintenance()
     _seed()
     if os.environ.get("ORGTREE_FIXTURE_LIVE") == "1":
         threading.Thread(target=_live_frames, name="fixture-live", daemon=True).start()
@@ -457,6 +511,7 @@ def serve_without_lifetime() -> None:
 
 
 if __name__ == "__main__":
+    _install_fake_conversion()
     if os.name == "nt":
         launch.main()
     else:

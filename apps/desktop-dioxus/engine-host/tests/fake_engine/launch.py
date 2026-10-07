@@ -78,7 +78,18 @@ if MODE == "refused":
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 print("texto suelto que el supervisor ignora", flush=True)
-if MODE == "slow":
+if MODE in ("convert", "convert-stall"):
+    # La conversión de la primera ejecución: fases `database-convert…` a 0,6 s.
+    # Con "convert-stall" el último paso calla más que el plazo de conversión.
+    for sequence in range(1, 4):
+        progress(sequence, f"database-convert: org {sequence}/3")
+        time.sleep(3 if MODE == "convert-stall" and sequence == 3 else 0.6)
+    progress(4, "api-loaded")
+elif MODE == "convert-fail":
+    progress(1, "database-convert: org 1/1")
+    emit({"type": "refused", "code": "conversion-failed", "reason": "no se pudo copiar la org 1; ver conversion"})
+    sys.exit(1)
+elif MODE == "slow":
     # Cada checkpoint llega antes del plazo de silencio, pero el total lo supera.
     for sequence in range(1, 5):
         time.sleep(0.6)
