@@ -6,6 +6,7 @@ mod home;
 mod icons;
 mod org;
 mod probe;
+mod windows;
 
 use dioxus::desktop::tao::event::Event;
 use dioxus::desktop::{Config, WindowBuilder};
@@ -16,9 +17,9 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// El CSS del renderer React, sin cambios: la UI en RSX usa sus mismas clases.
-const RENDERER_CSS: &str = include_str!("../../desktop/renderer/src/styles.css");
+pub(crate) const RENDERER_CSS: &str = include_str!("../../desktop/renderer/src/styles.css");
 /// Lo poco que el recorte agrega encima (pantalla de arranque y vista de org).
-const SHELL_CSS: &str = include_str!("shell.css");
+pub(crate) const SHELL_CSS: &str = include_str!("shell.css");
 
 /// El motor vive fuera del VirtualDom para poder apagarlo al cerrar el loop.
 /// El token nunca llega al webview: solo lo usa el cliente Rust.
@@ -126,6 +127,7 @@ fn App() -> Element {
     let route = use_signal(|| Route::Home);
     use_context_provider(|| route);
     use_context_provider(|| client);
+    use_hook(|| windows::register_main(dioxus::desktop::window()));
     use_hook(move || {
         let (sender, mut receiver) = futures_channel::mpsc::unbounded();
         start_engine(sender);

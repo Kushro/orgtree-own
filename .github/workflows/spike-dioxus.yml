@@ -56,7 +56,7 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (engine, home window and live desk in RSX)
+      - name: Smoke test (engine, home window, live desk and desk window in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -85,16 +85,24 @@ jobs:
           }
           $deadline = (Get-Date).AddSeconds(240)
           $shots = @{}
-          while (-not (Test-Path $env:ORGTREE_DIOXUS_PROBE) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
-            # la prueba deja un marcador y espera 3 s: captura del inicio y del desk
-            foreach ($name in 'home', 'desk') {
+          # El reporte termina con la ventana del desk después de cerrar la principal (#13);
+          # entonces la app sale sola.
+          $finished = { (Test-Path $env:ORGTREE_DIOXUS_PROBE) -and (Select-String -Path $env:ORGTREE_DIOXUS_PROBE -Pattern '"popout_after_owner_close"' -Quiet) }
+          while (-not (& $finished) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            # la prueba deja un marcador y espera 3 s: capturas del inicio, del desk y de las dos ventanas
+            foreach ($name in 'home', 'desk', 'popout') {
               if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
                 try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
               }
             }
             Start-Sleep -Milliseconds 500; $p.Refresh()
           }
-          if ($p.HasExited) { throw "app exited early with code $($p.ExitCode)" }
+          if ($p.HasExited -and -not (& $finished)) {
+            if (Test-Path $env:ORGTREE_DIOXUS_PROBE) { Write-Host "Partial probe: $(Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw)" }
+            throw "app exited early with code $($p.ExitCode)"
+          }
+          # Cerrar el último desk con la principal oculta termina la app, y con ella el motor.
+          $exited = $p.WaitForExit(20000)
           $port = Join-Path $env:ORGTREE_DIOXUS_DATA 'engine-port.json'
           if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
           Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
@@ -122,9 +130,30 @@ jobs:
           if ($desk.oldestLoaded -ne 1 -or $desk.domRows -lt 1000) { $failures += "long conversation not fully loaded: oldest $($desk.oldestLoaded), rows $($desk.domRows)" }
           if (-not $desk.scroll -or $desk.scroll.frames -lt 30) { $failures += "scroll was not measured: $($desk.scroll | ConvertTo-Json -Compress)" }
           "### Desk scroll (WebView2, Dioxus, $($desk.domRows) rows)`n$($desk.scroll | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
-          Stop-Process -Id $p.Id -Force
+          # #13: desk en otra ventana nativa, borrador compartido y cierre de la principal
+          $mw = $probe.multiwindow
+          if ($mw.composer -ne $true) { $failures += 'no composer in the desk' }
+          if ($mw.mirroredFromPopout -ne $true) { $failures += "the main window did not get the popout's draft: $($mw.mainDraft)" }
+          $pop = $probe.popout
+          if ($pop.opened -ne $true) { $failures += "the desk window did not open: $($pop | ConvertTo-Json -Compress)" }
+          if (-not ($pop.messages -gt 0)) { $failures += 'the desk window shows no messages' }
+          if ($pop.mirroredFromMain -ne $true) { $failures += "the desk window did not get the main window's draft" }
+          if ($pop.fontFamily -notlike '*Segoe UI*') { $failures += "renderer CSS not applied in the desk window: $($pop.fontFamily)" }
+          if ($pop.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the desk window: $($pop.bridge)" }
+          $oc = $probe.owner_close
+          if ($oc.main_visible -ne $false) { $failures += "main window still visible after close: $($oc.main_visible)" }
+          if ($oc.popouts -ne 1) { $failures += "desk windows after closing the main one: $($oc.popouts)" }
+          $after = $probe.popout_after_owner_close
+          if ($after.alive -ne $true -or $after.draft -ne 'escrito en el popout') { $failures += "the desk window did not survive the main close: $($after | ConvertTo-Json -Compress)" }
+          if (-not $exited) { $failures += 'the app did not exit after its last window closed'; Stop-Process -Id $p.Id -Force }
+          else {
+            Write-Host "App exited by itself with code $($p.ExitCode)"
+            $enginePort = (Get-Content $port -Raw | ConvertFrom-Json).port
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
+          }
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Home window and live desk in RSX verified in WebView2"
+          Write-Host "Home window, live desk and desk window in RSX verified in WebView2"
 
       - name: Report sizes
         shell: pwsh

@@ -59,8 +59,11 @@ fn rows(messages: &[ChatMessage], offset: usize) -> Vec<Row> {
 }
 
 #[component]
-pub fn DeskView(org: String, node: String) -> Element {
+pub fn DeskView(org: String, node: String, #[props(default)] popout: bool) -> Element {
     let client = crate::engine_client();
+    // El borrador del compositor se comparte entre ventanas (#13).
+    let draft_key = format!("{org}/{node}");
+    let composer = crate::windows::use_shared_draft(draft_key.clone());
     let mut route = use_context::<Signal<Route>>();
     let mut history = use_signal(Vec::<Row>::new);
     let mut before = use_signal(|| None::<String>);
@@ -175,12 +178,22 @@ pub fn DeskView(org: String, node: String) -> Element {
     };
 
     let back_org = org.clone();
+    let popout_client = client.clone();
+    let (popout_org, popout_node) = (org.clone(), node.clone());
     rsx! {
         div { class: "dx-desk desk-body",
             header {
-                button { class: "home", onclick: move |_| route.set(Route::Org(back_org.clone())), "← {org}" }
+                if !popout {
+                    button { class: "home", onclick: move |_| route.set(Route::Org(back_org.clone())), "← {org}" }
+                }
                 h2 { "{node}" }
                 if let Some(e) = error() { span { class: "dim", "{e}" } }
+                if !popout {
+                    button { class: "home dx-popout", title: "Abrir el desk en otra ventana",
+                        onclick: move |_| crate::windows::open_desk_window(popout_client.clone(), popout_org.clone(), popout_node.clone()),
+                        "⧉ Pop out"
+                    }
+                }
             }
             div { class: "msgs-wrap",
                 div { class: "msgs",
@@ -196,6 +209,13 @@ pub fn DeskView(org: String, node: String) -> Element {
                         MessageRow { key: "{row.key}", row: row.clone() }
                     }
                     LiveDraft { draft }
+                }
+            }
+            // Compositor mínimo: el borrador compartido. Enviar queda fuera del recorte.
+            div { class: "cc-composer dx-composer",
+                textarea { rows: 2, placeholder: "Borrador para {node} (enviar queda fuera del recorte)",
+                    value: "{composer}",
+                    oninput: move |event| crate::windows::set_draft(&draft_key, event.value()),
                 }
             }
         }

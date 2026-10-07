@@ -20,3 +20,8 @@
 .dx-desk .msgs > .msg { content-visibility: auto; contain-intrinsic-size: auto 48px; flex-shrink: 0; }
 .dx-desk .dx-earlier { text-align: center; padding: 6px; }
 .dx-desk .tooldot { margin-right: 2px; }
+
+/* Compositor (#13): el borrador compartido entre ventanas. */
+.dx-desk .dx-composer { margin: 0 0 12px; }
+.dx-desk .dx-composer textarea { width: 100%; resize: none; background: transparent; color: inherit; border: 0; font: inherit; outline: none; }
+.dx-desk header .dx-popout { margin-left: auto; }

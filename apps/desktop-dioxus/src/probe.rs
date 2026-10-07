@@ -8,13 +8,17 @@
 //!   org muestra a sus agentes;
 //! - #12, desk en RSX: la conversación, la herramienta, el Markdown sanitizado,
 //!   el texto en vivo, la carga de páginas anteriores hasta el primer mensaje y
-//!   los cuadros de un scroll de punta a punta.
+//!   los cuadros de un scroll de punta a punta;
+//! - #13, varias ventanas: el desk en otra ventana nativa, el borrador
+//!   compartido en los dos sentidos y el cierre de la principal con el desk
+//!   abierto (la principal se oculta, el desk sigue; al cerrarlo, la app sale).
 //!
 //! El script avisa por `dioxus.send` cuando el desk está listo para una captura
 //! (Rust deja `<archivo>.desk` para el CI) y al final manda el resultado, que se
 //! escribe en el archivo. El token nunca pasa por el webview.
 
 use dioxus::prelude::*;
+use std::sync::Mutex;
 
 const SCRIPT: &str = r#"
 const timeout = ms => new Promise(done => setTimeout(done, ms));
@@ -110,22 +114,88 @@ if (card) {
     await timeout(3000);
   }
 }
+
+// #13: el desk en otra ventana con el borrador compartido. La otra mitad de
+// esta etapa corre en la ventana del desk (POPOUT_SCRIPT).
+const multi = r.multiwindow = {};
+const ta = document.querySelector('.dx-desk .cc-composer textarea');
+multi.composer = !!ta;
+const button = document.querySelector('.dx-desk .dx-popout');
+if (ta && button) {
+  ta.value = 'escrito en la principal';
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  await timeout(300);
+  button.click();
+  multi.mirroredFromPopout = !!(await waitFor(() => ta.value === 'escrito en el popout', 30000));
+  multi.mainDraft = ta.value;
+  dioxus.send({ pause: 'popout' });
+  await timeout(3000);
+}
 dioxus.send({ done: r });
 "#;
+
+/// La mitad de la etapa #13 que corre en la ventana del desk.
+const POPOUT_SCRIPT: &str = r#"
+const timeout = ms => new Promise(done => setTimeout(done, ms));
+const waitFor = async (test, ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { const value = test(); if (value) return value; await timeout(200) }
+  return null;
+};
+const r = {};
+const ta = await waitFor(() => document.querySelector('.dx-desk .cc-composer textarea'), 15000);
+r.opened = !!ta;
+r.messages = (await waitFor(() => document.querySelectorAll('.dx-desk .msg').length, 15000)) || 0;
+r.fontFamily = getComputedStyle(document.body).fontFamily;
+r.bridge = typeof window.orgtreeDesktop;
+r.mirroredFromMain = !!(await waitFor(() => ta && ta.value === 'escrito en la principal', 15000));
+if (ta) {
+  ta.value = 'escrito en el popout';
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+dioxus.send({ ready: r });
+// Rust avisa cuando ya cerró (ocultó) la ventana principal.
+await dioxus.recv();
+await timeout(500);
+dioxus.send({ afterOwnerClose: { alive: true, draft: ta && ta.value, messages: document.querySelectorAll('.dx-desk .msg').length } });
+"#;
+
+/// Reporte compartido por las dos ventanas.
+static REPORT: Mutex<Option<serde_json::Map<String, serde_json::Value>>> = Mutex::new(None);
+/// La principal ya se cerró (se ocultó): la ventana del desk sigue con su parte.
+static OWNER_CLOSED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+fn report_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("ORGTREE_DIOXUS_PROBE").filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
+}
+
+fn record(key: &str, value: serde_json::Value) {
+    let Some(out) = report_path() else { return };
+    let mut report = REPORT.lock().unwrap();
+    let report = report.get_or_insert_with(Default::default);
+    report.insert(key.to_string(), value);
+    let _ = std::fs::write(out, serde_json::to_vec_pretty(report).unwrap_or_default());
+}
+
+fn marker(name: &str) {
+    let Some(out) = report_path() else { return };
+    let mut marker = out.into_os_string();
+    marker.push(format!(".{name}"));
+    let _ = std::fs::write(marker, b"");
+}
 
 #[component]
 pub fn Probe() -> Element {
     use_future(|| async move {
-        let Some(out) = std::env::var_os("ORGTREE_DIOXUS_PROBE").filter(|v| !v.is_empty()) else { return };
-        let out = std::path::PathBuf::from(out);
+        if report_path().is_none() {
+            return;
+        }
         let mut eval = document::eval(SCRIPT);
         let report = loop {
             match eval.recv::<serde_json::Value>().await {
                 Ok(message) => {
                     if let Some(name) = message.get("pause").and_then(|v| v.as_str()) {
-                        let mut marker = out.clone().into_os_string();
-                        marker.push(format!(".{name}"));
-                        let _ = std::fs::write(marker, b"");
+                        marker(name);
                     } else if let Some(done) = message.get("done") {
                         break done.clone();
                     }
@@ -133,7 +203,48 @@ pub fn Probe() -> Element {
                 Err(error) => break serde_json::json!({ "error": error.to_string() }),
             }
         };
-        let _ = std::fs::write(&out, serde_json::to_vec_pretty(&report).unwrap_or_default());
+        for key in ["home", "desk", "multiwindow", "error"] {
+            if let Some(value) = report.get(key) {
+                record(key, value.clone());
+            }
+        }
+        // #13: cerrar la principal con el desk abierto en otra ventana.
+        if crate::windows::popout_count() == 0 {
+            return;
+        }
+        let main = dioxus::desktop::window();
+        main.close();
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        record("owner_close", serde_json::json!({
+            "main_visible": main.window.is_visible(),
+            "popouts": crate::windows::popout_count(),
+        }));
+        OWNER_CLOSED.notify_one();
+    });
+    rsx! {}
+}
+
+/// La parte de la prueba que corre en la ventana del desk (#13). Al terminar
+/// cierra su ventana: con la principal oculta, la app tiene que salir sola.
+#[component]
+pub fn PopoutProbe() -> Element {
+    use_future(|| async move {
+        if report_path().is_none() {
+            return;
+        }
+        let mut eval = document::eval(POPOUT_SCRIPT);
+        match eval.recv::<serde_json::Value>().await {
+            Ok(message) => record("popout", message.get("ready").cloned().unwrap_or(message)),
+            Err(error) => return record("popout", serde_json::json!({ "error": error.to_string() })),
+        }
+        OWNER_CLOSED.notified().await;
+        let _ = eval.send(serde_json::json!(true));
+        match eval.recv::<serde_json::Value>().await {
+            Ok(message) => record("popout_after_owner_close", message.get("afterOwnerClose").cloned().unwrap_or(message)),
+            Err(error) => record("popout_after_owner_close", serde_json::json!({ "error": error.to_string() })),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        dioxus::desktop::window().close();
     });
     rsx! {}
 }
