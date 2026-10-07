@@ -333,8 +333,19 @@ pub fn desktop_popout_focus(webview: Webview, name: String) -> Result<bool, Stri
 // ------------------------------------------------------------------ informe
 
 /// Para la prueba: cada popout con su dueña, su nombre, lo pedido y lo real.
+///
+/// El registro se copia y se suelta antes de preguntarle nada a las ventanas:
+/// desde otro hilo, cada consulta espera al hilo principal, que a su vez toma
+/// el registro en los eventos de los popouts. Con el candado tomado, el primer
+/// run del CI se trabó así al cerrarse la primitiva.
 pub fn report(app: &AppHandle) -> Value {
-    let entries = popouts(app).entries.lock().unwrap();
+    let entries: HashMap<String, (String, String, Requested)> = popouts(app)
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(label, e)| (label.clone(), (e.owner.clone(), e.name.clone(), e.requested)))
+        .collect();
     let rows: Vec<Value> = app
         .webview_windows()
         .into_iter()
@@ -347,11 +358,11 @@ pub fn report(app: &AppHandle) -> Value {
             let outer_size = window.outer_size().ok();
             json!({
                 "label": label,
-                "owner": entry.map(|e| e.owner.clone()),
-                "name": entry.map(|e| e.name.clone()),
+                "owner": entry.map(|e| e.0.clone()),
+                "name": entry.map(|e| e.1.clone()),
                 "requested": entry.map(|e| json!({
-                    "x": e.requested.position.map(|p| p.0), "y": e.requested.position.map(|p| p.1),
-                    "width": e.requested.size.map(|s| s.0), "height": e.requested.size.map(|s| s.1),
+                    "x": e.2.position.map(|p| p.0), "y": e.2.position.map(|p| p.1),
+                    "width": e.2.size.map(|s| s.0), "height": e.2.size.map(|s| s.1),
                 })),
                 "client": { "x": inner.map(|p| p.x), "y": inner.map(|p| p.y), "width": size.map(|s| s.width), "height": size.map(|s| s.height) },
                 "outer": { "x": outer.map(|p| p.x), "y": outer.map(|p| p.y), "width": outer_size.map(|s| s.width), "height": outer_size.map(|s| s.height) },

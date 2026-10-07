@@ -618,6 +618,8 @@ jobs:
           if (-not (Test-Path $out)) { throw "no report: $($failures -join '; ')" }
           $raw = Get-Content $out -Raw
           "### Popouts, pins and temporary desks`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # También en el log, para diagnosticar un paso que no llega.
+          Write-Host $raw
           $r = $raw | ConvertFrom-Json
           $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
           function Popout($native, $name) { @($native.popouts | Where-Object { $_.name -eq $name }) | Select-Object -First 1 }
