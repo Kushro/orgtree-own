@@ -151,7 +151,61 @@ pub fn DataRoot() -> Element {
     }
 }
 
+/// Dónde queda el registro de panics: `<datos>/diagnostics/desktop-panic.log`,
+/// junto a los diagnósticos del motor. Sin raíz de datos válida, en la carpeta
+/// propia de la app; nunca dentro de una raíz prohibida (la de Orgtree instalado).
+fn panic_log_path() -> Option<PathBuf> {
+    match launch() {
+        Ok(launch) => {
+            let root = &launch.options.data_root;
+            if launch.options.forbidden_roots.iter().any(|forbidden| root.starts_with(forbidden)) {
+                return None;
+            }
+            Some(root.join("diagnostics").join("desktop-panic.log"))
+        }
+        Err(_) => app_dir().map(|dir| dir.join("desktop-panic.log")),
+    }
+}
+
+/// Deja registrado cualquier panic (mensaje, hilo y ubicación) antes del
+/// handler por defecto. El perfil release usa `panic = "abort"` y la app no
+/// tiene consola: sin esto, un panic solo se ve como el código 0xC0000409.
+fn install_panic_log() {
+    let Some(path) = panic_log_path() else { return };
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(panic sin mensaje de texto)".into());
+        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
+        let thread = std::thread::current();
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+        let line = serde_json::json!({
+            "atMs": at_ms as u64,
+            "pid": std::process::id(),
+            "thread": thread.name().unwrap_or("<sin nombre>"),
+            "message": message,
+            "location": location,
+        });
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+        previous(info);
+    }));
+}
+
 fn main() {
+    install_panic_log();
     // Instancia única (#14): una segunda ejecución le avisa a la primera y termina.
     if let Ok(launch) = launch() {
         if let native::Instance::Second = native::single_instance(&launch.options.data_root) {

@@ -765,6 +765,8 @@ jobs:
           $root = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-lifecycle'
           $out = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-lifecycle.json'
           $exitReport = "$out.exit.jsonl"
+          $panicLog = Join-Path $root 'diagnostics\desktop-panic.log'
+          $codes = @()
           Remove-Item $exitReport -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $root | Out-Null
           # Corre la app en una modalidad, atiende los marcadores (capturas y acciones) y
@@ -776,8 +778,11 @@ jobs:
             $env:ORGTREE_DIOXUS_PROBE = $out
             $env:ORGTREE_DIOXUS_LIFECYCLE_RUN = $run
             $env:ORGTREE_DIOXUS_EXIT_REPORT = $exitReport
+            Remove-Item $panicLog -ErrorAction SilentlyContinue
             $started = Get-Date
             $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+            # Tomar el handle ya: sin él, ExitCode puede quedar vacío al salir.
+            $null = $p.Handle
             $script:tree = @()
             $deadline = $started.AddSeconds(720)
             while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
@@ -797,6 +802,22 @@ jobs:
               taskkill /PID $p.Id /T /F 2>&1 | Out-Null
             }
             Write-Host "Run $run exited with $($p.ExitCode) after $seconds s"
+            # Las tres salidas son ordenadas y terminan en 0, también el fin de sesión: la
+            # app sale sola tras WM_ENDSESSION (en una sesión real Windows la terminaría
+            # igual, pero la simulación no). Un código >= 0xC0000000 es una excepción
+            # NTSTATUS: 0xC0000409 es un panic con panic = "abort" (fail-fast).
+            $code = $p.ExitCode
+            if ($null -eq $code) { $script:failures += "run ${run}: no exit code" }
+            elseif ($code -ne 0) {
+              $u = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$code), 0)
+              $kind = if ($u -ge 3221225472) { 'an NTSTATUS exception (crash or fail-fast)' } else { 'not 0' }
+              $script:failures += "run ${run}: the app exited with $code ($('0x{0:X8}' -f $u)), $kind"
+            }
+            $script:codes += "${run}: $code"
+            if (Test-Path $panicLog) {
+              Write-Host "===== run ${run}: desktop-panic.log"; Get-Content $panicLog | Write-Host
+              $script:failures += "run ${run}: the app panicked: $((Get-Content $panicLog -Raw).Trim())"
+            }
             $report = if (Test-Path $out) { Get-Content $out -Raw } else { $null }
             if ($report) {
               Copy-Item $out "$out.run-$run.json" -Force
@@ -903,6 +924,7 @@ jobs:
           $last = @(& $exits)[-1]
           & $check ($last.path -eq 'session-end' -and $last.outcome -eq 'stopped') "exit at the end of the Windows session: $($last | ConvertTo-Json -Compress)"
           "- exits: $((& $exits | ForEach-Object { "$($_.path)/$($_.trigger): $($_.outcome) in $($_.ms) ms" }) -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- exit codes: $($codes -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           if ($failures) { throw ($failures -join '; ') }
           Write-Host 'Engine lifecycle verified: refusal and retry, conversion phases, crash notice and recovery, maintenance, and three orderly exits without orphans'
 
@@ -1106,6 +1128,17 @@ jobs:
             throw ($failures -join '; ')
           }
           Write-Host "Installed app verified: packaged engine on PostgreSQL, RSX UI loaded, own data root shown"
+
+      # Ningún paso deja un panic de la app registrado (`<datos>\diagnostics\desktop-panic.log`):
+      # todas las raíces de datos de las pruebas están bajo RUNNER_TEMP.
+      - name: No desktop panics in any run
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $logs = @(Get-ChildItem $env:RUNNER_TEMP -Recurse -Filter desktop-panic.log -ErrorAction SilentlyContinue)
+          foreach ($log in $logs) { Write-Host "===== $($log.FullName)"; Get-Content $log.FullName | Write-Host }
+          if ($logs.Count) { throw "the app panicked in $($logs.Count) run(s)" }
+          Write-Host 'No desktop-panic.log under RUNNER_TEMP'
 
       - name: Report sizes
         shell: pwsh
