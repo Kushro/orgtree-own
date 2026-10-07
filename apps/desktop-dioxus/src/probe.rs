@@ -637,7 +637,7 @@ if (home.agentShown) {
   };
   setValue(field('[data-setting="compact_at"] input'), '70');
   setValue(field('[data-setting="default_top_grant"] input'), '7');
-  setValue(field('[data-setting="default_effort"] select'), 'low', 'change');
+  setValue(field('[data-setting="default_effort"] select'), 'medium', 'change');
   const md = await waitFor(() => field('textarea.orgmd-editor'), 10000);
   if (md) setValue(md, '# Charter de prueba\n\nEl equipo del spike de Dioxus.');
   field('[data-tab="policies"]').click();
@@ -765,9 +765,10 @@ if (home.agentShown) {
     await timeout(200);
     limit.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
     for (let i = 0; i < 20; i++) { st.runtimeAfter = await rpc({ runtimeState: true }); if (st.runtimeAfter.max_concurrent_turns === 8) break; await timeout(300) }
-    toggle('working_checkups_enabled')?.click();
-    await timeout(600);
-    toggle('wait_for_mcp_tools_enabled')?.click();
+    // los interruptores se deshabilitan mientras viaja un cambio: esperar a que se liberen
+    const flip = async key => { await waitFor(() => toggle(key) && !toggle(key).disabled, 5000); toggle(key)?.click(); await timeout(300) };
+    await flip('working_checkups_enabled');
+    await flip('wait_for_mcp_tools_enabled');
     for (let i = 0; i < 20; i++) {
       st.runtimeAfter = await rpc({ runtimeState: true });
       if (st.runtimeAfter.working_checkups_enabled === false && st.runtimeAfter.wait_for_mcp_tools_enabled === true) break;
@@ -793,10 +794,9 @@ if (home.agentShown) {
     setValue(back, String(st.runtimeBefore.max_concurrent_turns || 16));
     back.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
     await timeout(600);
-    toggle('working_checkups_enabled')?.click();
-    await timeout(600);
-    toggle('wait_for_mcp_tools_enabled')?.click();
-    await timeout(600);
+    await flip('working_checkups_enabled');
+    await flip('wait_for_mcp_tools_enabled');
+    await waitFor(() => toggle('wait_for_mcp_tools_enabled') && !toggle('wait_for_mcp_tools_enabled').disabled, 5000);
     st.runtimeRestored = await rpc({ runtimeState: true });
   }
 

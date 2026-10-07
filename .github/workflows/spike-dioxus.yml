@@ -399,11 +399,11 @@ jobs:
             }
             # ajustes de la org: lo guardado está en el motor y el panel lo relee
             $os = $su.orgAfter.settings
-            if ($su.orgShown.compact -ne '80' -or $os.compact_at -ne 70 -or $os.default_top_grant -ne 7 -or $os.default_effort -ne 'low' -or $os.cascade_hire -ne $false -or $su.orgAfter.orgmd -notlike '# Charter de prueba*') { $failures += "org settings in the engine: $($su.orgAfter | ConvertTo-Json -Compress)" }
+            if ($su.orgShown.compact -ne '80' -or $os.compact_at -ne 70 -or $os.default_top_grant -ne 7 -or $os.default_effort -ne 'medium' -or $os.cascade_hire -ne $false -or $su.orgAfter.orgmd -notlike '# Charter de prueba*') { $failures += "org settings in the engine: $($su.orgAfter | ConvertTo-Json -Compress)" }
             # headless se guarda en el acto; el motor lo rechaza con las políticas de Fable en 'halt'
             if ($su.headlessToast -notlike "error:*headless refuses while*") { $failures += "headless: $($su.headlessToast)" }
             $rr = $su.orgReread
-            if ($rr.compact -ne '70' -or $rr.grant -ne '7' -or $rr.effort -ne 'low' -or $rr.cascadeHire -ne $false -or $rr.orgmd -notlike '# Charter de prueba*') { $failures += "org settings reread: $($rr | ConvertTo-Json -Compress)" }
+            if ($rr.compact -ne '70' -or $rr.grant -ne '7' -or $rr.effort -ne 'medium' -or $rr.cascadeHire -ne $false -or $rr.orgmd -notlike '# Charter de prueba*') { $failures += "org settings reread: $($rr | ConvertTo-Json -Compress)" }
             # contratar: el fixture solo tiene Claude instalado; los tiers de Codex y Antigravity no aparecen
             $pe = $su.providersEngine
             if ($pe.claude.offer -ne 'Offer' -or $pe.openai.offer -ne 'Hide' -or $pe.google.offer -ne 'Hide') { $failures += "providers in the engine: $($pe | ConvertTo-Json -Compress)" }
