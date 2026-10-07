@@ -18,6 +18,7 @@ Se reemplaza solo la capa de escritorio (`apps/desktop/main` y `preload`). El re
 | 8 | #18 Instalador autónomo con motor, runtime y PostgreSQL | Instalador que se usa sin preparar nada |
 | 9 | #21 Integraciones: harnesses, login de proveedores, notificaciones y archivos | Contratar agentes con el instalador |
 | 10 | #20 Una ventana por organización, creación de orgs y preferencias persistentes | Paridad con el manejo de ventanas de Electron |
+| 11 | #19 Ciclo de vida completo del motor | Progreso, rechazos, caídas, mantenimiento y salida ordenada |
 
 ## Decisiones de diseño ya tomadas
 
@@ -374,3 +375,69 @@ Además, `cargo test` corre las pruebas unitarias del registro (las reglas de `r
 - el cierre de la última ventana con `exitOnClose` (ocultar o salir) y el menú nuevo de la bandeja no los maneja la prueba;
 - un arranque real con `--background` desde el inicio de Windows, que necesita cerrar la sesión;
 - la restauración con varios monitores o con escalas distintas: el runner tiene un solo monitor de 1024x768 al 100 %. El monitor ausente se simula con una posición fuera de todos los monitores.
+
+### Ciclo de vida del motor (#19)
+
+Paridad con `engine.ts`, `conversion-window.ts`, `maintenance.ts` y `window-load-recovery.ts` de Electron, sobre el renderer sin cambios y el instalador de #18. El supervisor (`engine-host`) da las piezas sin Tauri y `src-tauri/src/lifecycle.rs` las une al shell.
+
+**Arranque y conversión.** El supervisor avisa cada checkpoint (`StartupEvent`) y la ventana de arranque lo muestra:
+
+- las fases comunes aparecen debajo de "Iniciando el motor…";
+- las de conversión (`database-convert…`) muestran el mensaje de la ventana de conversión de Electron ("Orgtree está convirtiendo tus datos…") con el paso en curso, y la ventana se muestra aunque la app haya arrancado en la bandeja (`--background`);
+- el plazo mide el silencio entre checkpoints, no el total: 60 s entre fases comunes y 900 s mientras la fase es de conversión, el `CONVERSION_WINDOW_MS` de Electron y del host de arranque. `AGENTS.md` habla de una ventana de una hora, pero el código de upstream usa 900 s y se respetó el código. Los dos plazos se pueden acortar por entorno (`ORGTREE_TAURI_STARTUP_SILENCE_S`, `ORGTREE_TAURI_CONVERSION_SILENCE_S`) para la prueba.
+
+**Rechazos.** Electron muestra un diálogo y termina. Acá la ventana de arranque muestra el motivo con **Reintentar** y **Salir**:
+
+- `root-owned`: otro motor tiene la raíz. Dice cuál es la carpeta y que puede ser otra copia de la app o un motor que se está cerrando;
+- `conversion-failed`: los datos anteriores quedaron como estaban, con el motivo y la carpeta del registro que da el motor;
+- un plazo vencido, una configuración inválida o un motor que termina antes de `ready`.
+
+Los botones llaman `splash_retry` y `splash_quit`, dos comandos que solo concede la capability de la ventana de arranque (`default`) y que además verifican en Rust la etiqueta `splash` y la página local. Una org `unavailable` con su Retry es del renderer y no cambió.
+
+**Estado del motor en el puente.** `getStatus` devuelve el `EngineStatus` del contrato (`starting`, `ready`, `stopped` o `unavailable` con su mensaje), y cada cambio llega a todas las ventanas principales como evento `engine-status`. El renderer no tiene una vista para ese evento (en Electron la bandeja es la única superficie), así que el shell suma dos avisos:
+
+- un cartel fijo dentro de cada ventana mientras el motor no está ("El motor de Orgtree se detuvo inesperadamente. Reiniciándolo…"), que la recarga con el motor de vuelta se lleva;
+- en la bandeja, una línea de estado ("Motor: listo", "reiniciando…") y "Reiniciar motor", siempre visible y sin confirmación, como decidió el usuario para Electron. El tooltip también lleva el estado.
+
+**Caídas y cuelgues.** El vigilante de #5 sigue siendo el único, con tres cambios:
+
+- un presupuesto de 3 reinicios en 10 minutos (el `RECOVERY_LIMIT` de las ventanas de Electron): una caída en cada arranque deja de reiniciarse y lo dice;
+- el vigilante de cuelgues de Electron (`LIVENESS`): una sonda a `/api/desktop/alive` cada 30 s, y colgado con 3 sondas fallidas y 5 minutos sin respuesta. Se termina el árbol, se prueba que soltó la raíz, se anota en `diagnostics/engine-liveness.jsonl` y se relanza, a lo sumo 3 veces por hora. No se prueba en el CI (hacen falta 5 minutos de cuelgue), sí sus reglas en `cargo test`;
+- al volver, cada ventana principal **navega** a su ruta en lugar de `location.reload()`.
+
+Lo último es la recuperación de cargas (`window-load-recovery.ts`). Si una ventana se recarga con el motor caído, WebView2 deja su página de error y ahí ya no corre ningún script. El shell anota la carga que termina con el motor caído, y el relanzamiento la vuelve a navegar.
+
+**Mantenimiento.** Un sondeo de `/api/desktop/status` cada 5 s atiende el pedido de mantenimiento del motor como `MaintenanceController`: con el motor y el usuario quietos (60 s sin teclado ni mouse, `GetLastInputInfo`).
+
+- `restart` se acusa (`/api/desktop/maintenance/ack`) y reinicia el motor por el mismo camino que "Reiniciar motor". Electron relanza la app entera; acá alcanza con el motor, porque el shell no tiene estado que refrescar;
+- `update` se reporta `unavailable`, lo que contesta el `check` de Electron sin updater, y no se consume;
+- un acuse incierto o un reinicio que falla se reportan `failed` al motor.
+
+Lo reportado sale por `getMaintenanceStatus` (que da `null` hasta el primer reporte) y por el evento `maintenance`. Los fallos pendientes viven en memoria, no en `maintenance-failures.json`.
+
+**Salida ordenada.** Todos los caminos terminan en `lifecycle::stop_engine_for_exit`, con el presupuesto de `QUIT_DEADLINES` (26 s) repartido como `stopForQuit`: primero el pedido de apagado, después la espera, y recién entonces `taskkill /T`, siempre con una reserva para la parte forzada. Detenido quiere decir el proceso terminado **y** el candado del guardián (`.desktop-engine.lock`) liberado, que el guardián tiene hasta que muere el árbol entero (PostgreSQL y los CLIs incluidos). Los caminos:
+
+- "Salir" de la bandeja, `quit` del renderer, Salir de la ventana de arranque y cerrar la última ventana con `exitOnClose`: pasan por `mainwin::shutdown`, que guarda la sesión, oculta las ventanas y apaga el motor antes de `app.exit`;
+- el fin de la sesión de Windows: tao no atiende `WM_QUERYENDSESSION`, pero con `WM_ENDSESSION` termina el bucle (`RunEvent::Exit`) y llama `exit` al volver. El shell guarda la sesión y apaga el motor en ese evento, antes de que termine el proceso. tao recibe `WM_ENDSESSION` en su ventana oculta de eventos, no en las de la app;
+- el instalador: el NSIS de Tauri 2.12 cierra la app con el Restart Manager (`RmShutdown`), que manda los mismos mensajes. Pasa por el camino anterior, así que no hizo falta el pedido aparte de Electron (`INSTALLER_UPGRADE_STOP_BUDGET_MS`).
+
+Si la app muere de golpe, el guardián del motor ve morir a su padre y termina el árbol (job de Windows), como con Electron.
+
+**Engancharse a un motor de arranque de Windows** (`engine-attach.json`): fuera del recorte. La app del spike no instala la tarea programada (ver "Fuera del alcance"), así que nunca hay un motor al que engancharse, y el attach trae su propio protocolo: la verificación de confianza del descriptor, la identidad, la espera de una conversión ajena y la salida forzada por PID. Si se adopta Tauri, las piezas del supervisor (`root_released`, `stop_for_quit`) sirven para hacerlo.
+
+**Verificado en WebView2 y el CI** (paso "Engine lifecycle", run 37605539649). Un director de prueba (`lprobe.rs` y `lprobe.js`, activo solo con `ORGTREE_TAURI_LIFECYCLE_PROBE`) maneja la app compilada sobre el motor de fixture, que simula la conversión (`ORGTREE_FIXTURE_CONVERT`) y crea pedidos de mantenimiento (`POST /api/fixture/maintenance`). Son tres arranques. El primero:
+
+- el CI lanza antes otro motor sobre la misma raíz. La ventana de arranque muestra "Otra instancia está usando estos datos" con Reintentar y `getStatus` da `unavailable` (captura `lifecycle-refused`). El CI termina ese motor, espera el candado libre, y la prueba toca el botón real;
+- la conversión simulada son 4 pasos a 2,5 s con un plazo de silencio de 6 s: el total (10,7 s) supera el plazo y ningún paso solo (el mayor, 3,2 s). La ventana de arranque muestra el mensaje y "copiando la org 1 de 4" (captura `lifecycle-converting`);
+- ya en la Homepage, `getStatus` da `ready` y `getMaintenanceStatus` da `null`;
+- la prueba mata el motor. La página recibe `engine-status` `stopped`, el cartel aparece (captura `lifecycle-engine-down`), y la ventana se recarga con el motor caído y queda en la página de error de WebView2 (captura `lifecycle-load-failed`). El vigilante relanza el motor y la ventana vuelve sola: `fetch` 200, WebSocket abierto, la org listada, sin cartel y con otro PID (captura `lifecycle-recovered`);
+- un pedido `restart` reinicia el motor (otro PID) y la ventana vuelve; un pedido `update` llega como `maintenance` `unavailable`, por el evento y por `getMaintenanceStatus`;
+- sale por el camino de "Salir" de la bandeja.
+
+El segundo arranque cierra la última ventana con `exitOnClose` prendido, y el tercero recibe `WM_QUERYENDSESSION` y `WM_ENDSESSION` en todas sus ventanas, como en un cierre de sesión. En los tres, el CI anota el árbol de procesos de la app antes de la salida y confirma que no queda ninguno y que el candado de la raíz está libre. El registro de salida de la app (`ORGTREE_TAURI_EXIT_REPORT`) dice `stopped` en los tres: la bandeja en 411 ms, la última ventana en 386 ms y el fin de sesión en 334 ms. En cada uno, los 12 procesos del árbol de la app (el motor, el guardián, el hub y los de WebView2) terminaron.
+
+**En la app instalada** (paso del instalador, con PostgreSQL), con la app abierta, el mismo usuario corre el instalador otra vez, como una actualización. El Restart Manager cerró la app y la app detuvo su motor en orden: el instalador terminó en 9 s con código 0, la salida de la app dice `session-end` y `stopped` en 637 ms, y de los 17 procesos de la carpeta instalada (la app, el Python embebido del motor, el guardián y el hub, y los de PostgreSQL) no quedó ninguno. La app actualizada vuelve a arrancar sobre el mismo cluster con la org `instalado` (captura `installed-after-upgrade`), y el fin de sesión la cierra igual, sin huérfanos.
+
+`cargo test` de `engine-host` suma las fases de conversión, un paso de conversión que calla más que su plazo, el rechazo `conversion-failed`, la salida por las buenas y forzada dentro del presupuesto, y las reglas de cuelgue y de reinicios. Con el motor real en Windows confirma que el guardián tiene el candado mientras el motor corre y lo suelta en la salida.
+
+**Lo que el CI no cubre:** un cuelgue real (5 minutos), el clic en "Reiniciar motor" de la bandeja (comparte el camino con el mantenimiento, que sí se prueba), un fin de sesión real de Windows (se simula con los mensajes) y la conversión real de una raíz 2.x, que es del motor y no cambió.
