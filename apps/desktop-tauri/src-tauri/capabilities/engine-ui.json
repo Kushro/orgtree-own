@@ -22,6 +22,7 @@
     "allow-desktop-window-minimize",
     "allow-desktop-window-toggle-maximize",
     "allow-desktop-window-close",
-    "allow-desktop-harnesses"
+    "allow-desktop-harnesses",
+    "allow-desktop-notify"
   ]
 }

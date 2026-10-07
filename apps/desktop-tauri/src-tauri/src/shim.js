@@ -35,8 +35,7 @@
     toggleMaximizeWindow: () => call('desktop_window_toggle_maximize'),
     closeWindow: () => call('desktop_window_close'),
     getHarnesses: () => call('desktop_harnesses'),
-    // Notificaciones nativas: #7.
-    notify: () => Promise.resolve(false),
+    notify: notification => call('desktop_notify', { notification }),
     openHarnessLink: outside('openHarnessLink'),
     getUpdateStatus: () => Promise.resolve({ state: 'unavailable' }),
     checkForUpdates: () => Promise.resolve({ state: 'unavailable' }),

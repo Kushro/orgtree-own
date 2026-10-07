@@ -79,7 +79,7 @@ jobs:
       - name: Build installer
         run: npx tauri build --ci
 
-      - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery)
+      - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery, native window)
         shell: pwsh
         env:
           ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -188,9 +188,61 @@ jobs:
             if ($close.page.childOpen -ne $true) { $failures += "popout closed with the owner: $($close.page | ConvertTo-Json -Compress)" }
             if ($close.page.draft -ne 'escrito en el popout') { $failures += "popout draft lost after closing the owner: $($close.page.draft)" }
           }
+          # #7: ventana sin marco, controles, bandeja, notificación, instancia única y arrastre
+          $nat = $rc.page.native
+          $sn = $rc.shell.native
+          if ($sn.decorated -ne $false) { $failures += "main window is decorated: $($sn.decorated)" }
+          if ($sn.tray -ne $true) { $failures += 'no tray icon' }
+          if ($nat.controls -ne $true -or $nat.controlButtons -lt 3) { $failures += "renderer window controls not shown: $($nat | ConvertTo-Json -Compress)" }
+          foreach ($check in 'maximized', 'maximizedIcon', 'restored') {
+            if ($nat.$check -ne $true) { $failures += "native.$check was $($nat.$check)" }
+          }
+          if ($nat.notify -ne $true) { $failures += "notify via invoke: $($nat.notify)" }
+          if ($nat.notifyAgain -ne $false) { $failures += "the same notification was shown twice: $($nat.notifyAgain)" }
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Win {
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+            [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, IntPtr e);
+          }
+          '@
+          $hwnd = [IntPtr][long]$sn.hwnd
+          $style = [Win]::GetWindowLong($hwnd, -16)
+          if ($style -band 0x00C00000) { $failures += ('main window has a caption (style 0x{0:X8})' -f $style) }
+          # Segunda ejecución: tiene que terminar sola y enfocar la ventana existente.
+          $second = Start-Process -FilePath $exe.FullName -ArgumentList '--second' -PassThru
+          if (-not $second.WaitForExit(20000)) { $second.Kill(); $failures += 'the second instance did not exit' }
+          $marker = "$($env:ORGTREE_TAURI_PROBE).second-instance"
+          if (-not (Test-Path $marker)) { $failures += 'the running app was not told about the second instance' }
+          else { Write-Host "Second instance: $(Get-Content $marker -Raw)" }
+          Start-Sleep -Seconds 1
+          $foreground = [Win]::GetForegroundWindow() -eq $hwnd
+          Write-Host "Main window in the foreground after the second instance: $foreground"
+          if (-not $nat.drag) { $failures += 'no visible -webkit-app-region: drag area in the renderer' }
+          else {
+            $before = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$before)
+            $pt = New-Object Win+POINT; $pt.X = [int]($nat.drag.x * $nat.drag.dpr); $pt.Y = [int]($nat.drag.y * $nat.drag.dpr)
+            [void][Win]::ClientToScreen($hwnd, [ref]$pt)
+            [void][Win]::SetCursorPos($pt.X, $pt.Y); Start-Sleep -Milliseconds 200
+            [Win]::mouse_event(0x2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 200
+            for ($i = 1; $i -le 10; $i++) { [void][Win]::SetCursorPos($pt.X + 12 * $i, $pt.Y + 6 * $i); Start-Sleep -Milliseconds 40 }
+            [Win]::mouse_event(0x4, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 500
+            $after = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$after)
+            $moved = "dx $($after.L - $before.L), dy $($after.T - $before.T) (dragged $($nat.drag.cls) at $($pt.X),$($pt.Y))"
+            Write-Host "Drag: $moved"
+            "### Native window (#7)`n- drag: $moved`n- foreground after second instance: $foreground`n- scale: $($sn.scale)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            if (($after.L - $before.L) -lt 60 -or ($after.T - $before.T) -lt 30) { $failures += "dragging the header did not move the window: $moved" }
+          }
+          try { Save-Screen 'native' } catch { Write-Host "screenshot: $_" }
           Stop-Process -Id $p.Id -Force
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Cookie auth, bridge, home, live desk, popouts and engine recovery verified in WebView2"
+          Write-Host "Cookie auth, bridge, home, live desk, popouts, engine recovery and native window verified in WebView2"
 
       - name: Report sizes
         shell: pwsh

@@ -26,6 +26,8 @@ struct Shell {
     options: Mutex<Option<EngineOptions>>,
     restarts: AtomicU32,
     quitting: AtomicBool,
+    /// Notificaciones ya mostradas (`org` + `id`), como `NotificationGate`.
+    notified: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for Shell {
@@ -39,6 +41,7 @@ impl Default for Shell {
             options: Mutex::new(None),
             restarts: AtomicU32::new(0),
             quitting: AtomicBool::new(false),
+            notified: Mutex::new(Default::default()),
         }
     }
 }
@@ -122,6 +125,10 @@ fn open_engine(app: &tauri::AppHandle, engine: &Engine) -> Result<(), String> {
         .title("Orgtree (Tauri spike)")
         .inner_size(1200.0, 800.0)
         .min_inner_size(640.0, 480.0)
+        // Sin marco (#7), como Electron (`frame: false`): el renderer dibuja sus
+        // botones (`WindowControls`) y marca el arrastre con `-webkit-app-region`,
+        // que WebView2 respeta porque wry activa `IsNonClientRegionSupportEnabled`.
+        .decorations(false)
         .initialization_script(shim)
         .on_navigation(move |url| navigation_allowed(&navigation, url))
         .on_new_window(move |url, features| open_popout(&popouts, &url, features))
@@ -279,6 +286,7 @@ fn open_popout(app: &tauri::AppHandle, url: &Url, features: NewWindowFeatures) -
     let navigation = app.clone();
     let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External("about:blank".parse().unwrap()))
         .window_features(features)
+        .decorations(false)
         .title("Orgtree")
         .on_navigation(move |url| navigation_allowed(&navigation, url))
         // El renderer pone el título en el documento del hijo (`d.title`).
@@ -293,9 +301,10 @@ fn open_popout(app: &tauri::AppHandle, url: &Url, features: NewWindowFeatures) -
             let app = app.clone();
             window.on_window_event(move |event| {
                 if let WindowEvent::Destroyed = event {
-                    // Con la ventana dueña oculta y sin popouts, no queda nada visible.
+                    // Con la ventana dueña oculta, sin popouts y sin quedarse en la
+                    // bandeja (`exitOnClose`), no queda nada: la app termina.
                     let main_hidden = main_window(&app).map(|w| !w.is_visible().unwrap_or(true)).unwrap_or(true);
-                    if main_hidden && popout_labels(&app, Some(&label)).is_empty() {
+                    if main_hidden && exit_on_close(&app) && popout_labels(&app, Some(&label)).is_empty() {
                         app.exit(0);
                     }
                 }
@@ -348,14 +357,77 @@ fn webview_container_gone(_window: &tauri::WebviewWindow) -> bool {
 /// Cerrar la ventana dueña con popouts abiertos la oculta en lugar de
 /// destruirla: los popouts viven en el contexto de JavaScript del dueño, y
 /// Electron también los conserva ("Main close preserves all popouts").
+/// Sin popouts, con `exitOnClose` apagado (el valor por defecto) la ventana
+/// también se oculta y la app sigue en la bandeja, como en Electron.
 fn on_main_event(app: &tauri::AppHandle, event: &WindowEvent) {
-    if let WindowEvent::CloseRequested { api, .. } = event {
-        if !popout_labels(app, None).is_empty() {
-            api.prevent_close();
-            if let Some(window) = main_window(app) {
-                let _ = window.hide();
+    match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            if !popout_labels(app, None).is_empty() || !exit_on_close(app) {
+                api.prevent_close();
+                if let Some(window) = main_window(app) {
+                    let _ = window.hide();
+                }
             }
         }
+        // Los botones propios de la ventana sin marco siguen el estado real
+        // (maximizar con doble clic en la zona de arrastre, Win+flechas…).
+        WindowEvent::Resized(_) | WindowEvent::Focused(_) => {
+            if let Some(window) = main_window(app) {
+                dispatch_event(app, serde_json::json!({ "type": "window-state", "data": desktop::controls_state(&window) }));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn exit_on_close(app: &tauri::AppHandle) -> bool {
+    app.state::<Shell>().preferences.lock().unwrap().get("exitOnClose") == Some(&serde_json::Value::Bool(true))
+}
+
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(window) = main_window(app) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Ícono en la bandeja (#7) con el menú mínimo: abrir y salir. Un clic en el
+/// ícono también abre la ventana.
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let open = MenuItem::with_id(app, "open", "Abrir Orgtree", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Orgtree (Tauri spike)")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+/// Una segunda ejecución (#7) no abre otra app: el plugin la termina y le
+/// avisa a esta, que enfoca su ventana.
+fn on_second_instance(app: &tauri::AppHandle, args: Vec<String>) {
+    show_main(app);
+    if let Some(probe) = app.state::<Shell>().probe.lock().unwrap().as_ref() {
+        let focused = main_window(app).and_then(|w| w.is_focused().ok());
+        probe.record_marker("second-instance", serde_json::json!({ "args": args.len(), "focused": focused }));
     }
 }
 
@@ -382,6 +454,8 @@ fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
         probe.record_reconnect(title, serde_json::json!({
             "restarts": state.restarts.load(Ordering::SeqCst),
             "engine_pid": pid,
+            // #7: el CI arrastra la ventana con el mouse real a partir de estos datos.
+            "native": native_report(app, window),
         }));
     }
 }
@@ -422,8 +496,25 @@ fn probe_owner_close(app: tauri::AppHandle) {
     });
 }
 
+/// Lo que el CI necesita para verificar la ventana nativa (#7).
+fn native_report(app: &tauri::AppHandle, window: &WebviewWindow) -> serde_json::Value {
+    #[cfg(windows)]
+    let hwnd = window.hwnd().ok().map(|h| h.0 as isize);
+    #[cfg(not(windows))]
+    let hwnd: Option<isize> = None;
+    serde_json::json!({
+        "hwnd": hwnd,
+        "decorated": window.is_decorated().ok(),
+        "scale": window.scale_factor().ok(),
+        "tray": app.tray_by_id("main").is_some(),
+    })
+}
+
 fn main() {
     let app = tauri::Builder::default()
+        // Primero: una segunda ejecución termina acá, antes de crear ventanas o motor.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| on_second_instance(app, args)))
+        .plugin(tauri_plugin_notification::init())
         .manage(Shell::default())
         .invoke_handler(tauri::generate_handler![
             desktop::desktop_app_version,
@@ -438,6 +529,7 @@ fn main() {
             desktop::desktop_window_toggle_maximize,
             desktop::desktop_window_close,
             desktop::desktop_harnesses,
+            desktop::desktop_notify,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -457,6 +549,7 @@ fn main() {
                     }
                 })
                 .build()?;
+            build_tray(&handle)?;
             reap_closed_popouts(handle.clone());
             start_engine(handle);
             Ok(())

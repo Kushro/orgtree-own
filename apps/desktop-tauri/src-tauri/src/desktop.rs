@@ -59,16 +59,21 @@ pub fn desktop_window_state(webview: Webview) -> Result<Value, String> {
     Ok(json!({ "visible": visible, "restoreWindows": false }))
 }
 
-#[tauri::command]
-pub fn desktop_window_controls_state(webview: Webview) -> Result<Value, String> {
-    authorize(&webview)?;
-    let window = main_window(webview.app_handle()).ok_or("sin ventana principal")?;
-    Ok(json!({
+/// `DesktopControlsState`: lo que dibujan los botones propios de la ventana sin marco.
+pub(crate) fn controls_state(window: &tauri::WebviewWindow) -> Value {
+    json!({
         "visible": window.is_visible().unwrap_or(true),
         "restoreWindows": false,
         "minimized": window.is_minimized().unwrap_or(false),
         "maximized": window.is_maximized().unwrap_or(false),
-    }))
+    })
+}
+
+#[tauri::command]
+pub fn desktop_window_controls_state(webview: Webview) -> Result<Value, String> {
+    authorize(&webview)?;
+    let window = main_window(webview.app_handle()).ok_or("sin ventana principal")?;
+    Ok(controls_state(&window))
 }
 
 #[tauri::command]
@@ -129,6 +134,34 @@ pub fn desktop_window_toggle_maximize(webview: Webview) -> Result<(), String> {
 pub fn desktop_window_close(webview: Webview) -> Result<(), String> {
     authorize(&webview)?;
     main_window(webview.app_handle()).ok_or("sin ventana principal")?.close().map_err(|e| e.to_string())
+}
+
+/// Notificación nativa (#7), con el filtro mínimo de `NotificationGate` de
+/// Electron: campos obligatorios, notificaciones activadas en las preferencias
+/// y una sola vez por `org` + `id`. Las preferencias por tipo, el filtro con la
+/// ventana enfocada, el clic que abre el elemento y `syncNotifications` quedan
+/// fuera del recorte. En Windows, el plugin usa el AppUserModelID de la app
+/// instalada; desde `target/release` usa el de PowerShell.
+#[tauri::command]
+pub fn desktop_notify(webview: Webview, notification: Map<String, Value>) -> Result<bool, String> {
+    use tauri_plugin_notification::NotificationExt;
+    authorize(&webview)?;
+    let text = |key: &str, max: usize| match notification.get(key).and_then(Value::as_str) {
+        Some(value) if !value.is_empty() && value.chars().count() <= max => Ok(value.to_string()),
+        _ => Err(format!("notificación inválida: {key}")),
+    };
+    let (id, title, body, org) = (text("id", 200)?, text("title", 200)?, text("body", 2000)?, text("org", 128)?);
+    text("kind", 30)?;
+    let app = webview.app_handle();
+    let state = app.state::<Shell>();
+    if state.preferences.lock().unwrap().get("notificationsEnabled") != Some(&Value::Bool(true)) {
+        return Ok(false);
+    }
+    if !state.notified.lock().unwrap().insert(format!("{org}\u{0}{id}")) {
+        return Ok(false);
+    }
+    app.notification().builder().title(title).body(body).show().map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Presencia de los harnesses: fuera del recorte, se informan como no detectados.

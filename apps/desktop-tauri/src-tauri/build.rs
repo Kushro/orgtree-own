@@ -13,6 +13,7 @@ const COMMANDS: &[&str] = &[
     "desktop_window_toggle_maximize",
     "desktop_window_close",
     "desktop_harnesses",
+    "desktop_notify",
 ];
 
 fn main() {

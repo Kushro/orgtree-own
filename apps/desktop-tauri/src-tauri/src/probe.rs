@@ -183,6 +183,14 @@ impl Probe {
         true
     }
 
+    /// Un evento fuera de la página (segunda instancia): queda en
+    /// `<salida>.<nombre>` como JSON.
+    pub fn record_marker(&self, name: &str, value: serde_json::Value) {
+        let mut marker = self.out.clone().into_os_string();
+        marker.push(format!(".{name}"));
+        let _ = std::fs::write(marker, serde_json::to_vec_pretty(&value).unwrap_or_default());
+    }
+
     /// Cierra el reporte con la etapa de reconexión y lo escribe completo.
     pub fn record_reconnect(&self, title: &str, shell: serde_json::Value) {
         let Some(json) = title.strip_prefix(RECONNECT_PREFIX) else { return };
