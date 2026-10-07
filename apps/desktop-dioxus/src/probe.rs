@@ -287,7 +287,8 @@ pub fn Probe() -> Element {
                 Err(error) => break serde_json::json!({ "error": error.to_string() }),
             }
         };
-        for key in ["home", "desk", "native", "multiwindow", "error"] {
+        // `native` ya quedó guardado con la parte del shell durante la pausa.
+        for key in ["home", "desk", "multiwindow", "error"] {
             if let Some(value) = report.get(key) {
                 record(key, value.clone());
             }

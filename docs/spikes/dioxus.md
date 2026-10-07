@@ -171,7 +171,7 @@ El CI sube la captura `popout` con las dos ventanas.
 
 **Verificado en WebView2** con la prueba y el CI:
 
-- la ventana no tiene marco (el área cliente ocupa la ventana entera);
+- la ventana no tiene barra de título. Queda el borde de redimensionado invisible de Windows, 8 px por lado, que el tao de Dioxus cuenta dentro del rectángulo de la ventana; el de Tauri no lo cuenta. Es lo mismo que `AGENTS.md` describe para Electron con escalados fraccionarios;
 - los botones RSX maximizan y restauran;
 - la notificación se muestra y el ícono de la bandeja existe;
 - el CI arrastra la ventana con el mouse real desde el header del desk, y se mueve;

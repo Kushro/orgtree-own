@@ -101,12 +101,13 @@ jobs:
             $probe = Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw | ConvertFrom-Json
             $nat = $probe.native
             $hwnd = [IntPtr][long]$nat.shell.hwnd
-            # tao deja WS_CAPTION (snap, animaciones) y quita el área no cliente: sin marco,
-            # el área cliente ocupa la ventana entera.
+            # tao deja WS_CAPTION (snap, animaciones) y quita la barra de título. Queda el borde
+            # de redimensionado invisible de Windows (8 px por lado, dentro del rectángulo de la
+            # ventana en el tao de Dioxus); una barra de título real suma unos 30 px de alto.
             $wr = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$wr)
             $cr = New-Object Win+RECT; [void][Win]::GetClientRect($hwnd, [ref]$cr)
             $ci.frame = "window $($wr.R - $wr.L)x$($wr.B - $wr.T), client $($cr.R)x$($cr.B)"
-            $ci.framed = (($wr.R - $wr.L) - $cr.R -gt 2) -or (($wr.B - $wr.T) - $cr.B -gt 2)
+            $ci.framed = (($wr.B - $wr.T) - $cr.B) -ge 20
             $drag = $nat.page.drag
             if (-not $drag) { return }
             $before = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$before)
