@@ -16,6 +16,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 | 6 | #13 Multi-ventana nativa | Ventanas separadas con estado compartido |
 | 7 | #14 Ventana sin marco, bandeja y notificación | Integración nativa básica |
 | 8 | #24 Instalador autónomo con motor, runtime y PostgreSQL | Instalar y usar sin preparar nada |
+| 9 | #26 Organigrama y operaciones sobre agentes en RSX | Una vista con estado, menú y operaciones reales |
 
 ## Decisiones de diseño ya tomadas
 
@@ -25,7 +26,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 
 ## Fuera del alcance
 
-Canvas del organigrama, docket, mail y demás vistas; tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, updater. El empaquetado del runtime de Python y PostgreSQL entró con #24.
+El lienzo WebGL del organigrama (con pan y zoom), docket, mail y demás vistas; tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, updater. El empaquetado del runtime de Python y PostgreSQL entró con #24.
 
 ## Cómo compilar
 
@@ -73,8 +74,8 @@ El crate `apps/desktop-dioxus/engine-client` es el cliente HTTP (`reqwest`, sin 
 La página de inicio está reescrita en RSX (`src/home.rs`): la tarjeta con la versión, la lista de organizaciones y los botones. Usa **las mismas clases que el renderer** (`welcome`, `welcome-card`, `nav > .org`, `org-counts`…) y su `styles.css` **sin cambios**, incluido en el binario con `include_str!`. La decisión de estilos que quedó abierta en #8 se resolvió así: reutilizar el CSS actual y escribir en RSX solo el marcado.
 
 - Los datos vienen del cliente Rust de #10 (`GET /api/orgs`, cada 5 s como `orgstatus.ts`). El webview no tiene token ni puente.
-- Abrir una org muestra sus agentes (`src/org.rs`, una vista mínima: el lienzo del organigrama queda fuera del recorte).
-- Crear y borrar orgs, uso por proveedor, ajustes de la app y actualizaciones quedan fuera del recorte; sus botones aparecen deshabilitados para que el diseño coincida.
+- Abrir una org muestra su organigrama (`src/org.rs`, desde #26).
+- Crear y borrar orgs entró con #26. Uso por proveedor, ajustes de la app y actualizaciones quedan fuera del recorte; sus botones aparecen deshabilitados para que el diseño coincida.
 - Sin la barra de menú por defecto de Dioxus (`with_menu(None)`).
 
 **Verificado en WebView2** con `ORGTREE_DIOXUS_PROBE` (`src/probe.rs`, con `document::eval`) y el motor de fixture (`fixture-engine/launch.py`, copia del de `spike/tauri`):
@@ -242,7 +243,52 @@ Así corre como una persona real, sin elevación. Quien use Orgtree con la cuent
 
 `makensis` con LZMA sólido tarda unos 90 s en el runner. El primer arranque, con `initdb`, el clúster, las migraciones y el hub de mail, tarda unos 14 s hasta la UI; con la pausa de la captura, la app sale sola a los 18 s.
 
-El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture, instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
+### Organigrama (#26)
+
+`src/org.rs` reemplaza la lista mínima de #11 por el organigrama, sin el lienzo WebGL ni el pan/zoom de `OrgCanvas.tsx`: un árbol indentado por `parent` con las clases `.node`, `.card`, `.kids` y `.badge` del CSS del renderer, que ya las tenía para la vista de árbol.
+
+- **Cada agente:** la letra del tier, el nombre, el estado, el último resumen de estado, el modelo con el color del proveedor y los créditos (asiento, grant y libre). El estado sigue la precedencia de `TrayStatus` y `deriveTurnState`: detenido (`halt`), congelado, compactando, en cola por el límite de turnos (`waiting` o `queued_for_slot`), activo e inactivo.
+- **Retirados:** plegados por defecto, con el botón "show N archived" de la lista de agentes (`agenttray.tsx`).
+- **Barra de la org (`orgbar`):** el nombre, los agentes vivos y activos por tier (`ActiveAgentSummary`), el gasto, los créditos (`circulation · seats · free`, los de la barra del ojo en `cards.tsx`), la autoauditoría si encuentra algo y el killswitch trabado.
+- **Menú de agente:** clic derecho en la tarjeta o el botón `⋯`, con las clases de `contextmenu.tsx` y el orden de `agentmenu.tsx`. La raíz ("you") ofrece contratar en el primer nivel.
+
+| Operación | Endpoint (igual que `api.ts`) | Como en el renderer |
+|---|---|---|
+| Contratar | `POST /ops` `{op:'hire', parent, tier, grant, name, charter}` | El borrador de `cards.tsx`, como un diálogo con tier, nombre, grant y charter |
+| Mover | `POST /ops` `{op:'move', node, new_parent}` | El renderer arrastra; acá se elige el superior. Mismo aviso con deshacer |
+| Retirar o disolver | `POST /ops` `{op:'retire'\|'dissolve', node}` | La confirmación de `AgentRetireConfirm`, palabra por palabra, y el aviso con deshacer (`rehire`) |
+| Recontratar | `POST /ops` `{op:'rehire', node}` | En los retirados |
+| Detener y reanudar | `POST /nodes/{nid}/halt` y `/unhalt` | `HaltControl`: sin confirmación, el estado como aviso |
+| Interrumpir | `POST /nodes/{nid}/interrupt` | El STOP del desk: solo con un turno en curso |
+| Crear org | `POST /api/orgs` `{name, dirs}` | `NewOrg` en la página de inicio, sin las opciones avanzadas |
+| Borrar org | `DELETE /api/orgs/{slug}` | La confirmación de `App.tsx` (`doomedOrg`) |
+
+El cliente Rust suma `create_org`, `delete_org`, `op` (con `OpRequest`), `halt`, `unhalt` e `interrupt`. `tests/ops.rs` los prueba contra un servidor HTTP falso: verbo, ruta, cuerpo JSON y token de cada pedido, más un rechazo del ledger (422 con su `detail`).
+
+**Actualización sin sondeo.** El árbol se pide al abrir y después solo cuando el WebSocket de la org trae un `changed`, un `node_event` o una reconexión, como `refreshTree` en `App.tsx`. Varios frames que llegan juntos piden una sola vez. Una operación hecha desde la vista tampoco pide el árbol: el cambio llega por el mismo frame que vería otra ventana. La lista de orgs de la página de inicio sigue cada 5 s, como `orgstatus.ts` (no hay un WebSocket de la lista), y se relee en el acto tras crear o borrar.
+
+**Trampa de Dioxus.** `spawn` ata la tarea al componente que la lanza. El menú y los diálogos se desmontan apenas se elige la acción, así que una operación lanzada desde ahí se cancelaba antes de llegar al motor. Las tareas de la vista se lanzan en el scope del organigrama (`Runtime::spawn(scope, …)`), y los avisos usan `try_write` por si la vista ya se cerró.
+
+**Proveedor stub.** La puerta de contratación (`provider_hire_gate`) pide el CLI de Claude instalado y una cuenta iniciada. El motor de fixture los declara presentes (`claude_install_state` y `accounts.live_identity`), sin tocar `engine/`. Ningún turno corre: `send_message` y el pool de procesos calientes ya estaban apagados.
+
+**Verificado en WebView2** con la prueba y el motor de fixture (run [37586696948](https://github.com/Kushro/orgtree-own/actions/runs/37586696948)):
+
+- crear "Prueba Dioxus" desde la página de inicio abre su organigrama vacío;
+- en 8 s con la org quieta, cada relectura del árbol vino de un frame del WebSocket (2 frames, 2 lecturas); en toda la etapa hubo 17 lecturas: la inicial y una por cada uno de los 16 frames;
+- contratar `jefe` en el primer nivel y `ayudante` bajo él desde el menú, y el árbol los anida;
+- una contratación hecha por fuera de la UI (el cliente Rust directo) aparece sola, por el WebSocket;
+- la barra muestra `3 live H3` y `circulation 7 · seats 3 · free 4`, y el modelo `claude-haiku-4-5` con el color de Claude;
+- el menú de `ayudante` trae Open desk, Hire a subordinate…, Move to…, Interrupt (deshabilitado sin turno), Halt y Retire…;
+- detenerlo muestra la insignia "Halted" y el aviso del motor, y reanudarlo vuelve a "Idle";
+- moverlo al primer nivel y deshacer desde el aviso lo devuelve bajo `jefe`;
+- retirarlo pide la confirmación del renderer, lo pliega, "show 1 archived" lo muestra y recontratarlo lo vuelve a "Idle";
+- borrar la org con la confirmación de `App.tsx` la saca de la lista.
+
+El CI sube las capturas `chart-hire` (el diálogo de contratación), `chart-menu` (el menú de agente) y `chart` (el árbol con un agente detenido).
+
+**Líneas** (sin comentarios ni líneas en blanco): `org.rs` 826 y la parte nueva de `home.rs` (crear y borrar) unas 100. Los archivos TSX equivalentes suman 852: `agentmenu.tsx` 232, `contextmenu.tsx` 338, `agenttray.tsx` 116, `treeinfo.tsx` 72, `orgrows.tsx` 55 y `haltcontrol.tsx` 39. A eso se suman las partes dentro de archivos grandes (la barra de la org en `App.tsx`, `NewOrg`, `ConfirmModal`, el borrador y el arrastre de `OrgCanvas.tsx` y `cards.tsx`), que no se pueden aislar. El TSX hace bastante más: submenús, navegación por teclado, pins y popouts, compactación, cuentas y filtros. El RSX es más largo por línea de marcado (cada atributo en su línea) y no comparte tipos con el motor: los toma del cliente Rust.
+
+El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluido el organigrama de #26), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
 
