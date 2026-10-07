@@ -414,9 +414,10 @@ jobs:
             # Diagnóstico: los registros de la raíz y el motor empaquetado lanzado a mano
             # con el mismo entorno que le da el shell (el shell descarta su stderr).
             Write-Host "Files in the data root: $((Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($data.Length) }) -join ', ')"
-            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, *.json, *.txt -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 2MB } | Select-Object -First 20) {
+            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, *.json, *.txt -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 2MB -and $_.FullName -notlike "*\secrets\*" } | Select-Object -First 20) {
               Write-Host "----- $($log.FullName)"; Get-Content $log.FullName -Tail 40
             }
+            Get-ChildItem Env:PG* | ForEach-Object { Remove-Item "Env:$($_.Name)" }  # como hace el shell (engine-host)
             $env:ORGTREE_DATA = $data
             $env:ORGTREE_V2_TOKEN = [guid]::NewGuid().ToString('N')
             $env:ORGTREE_PG_BOOTSTRAP = '1'

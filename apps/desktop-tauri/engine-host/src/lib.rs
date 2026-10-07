@@ -43,6 +43,16 @@ pub const CONVERSION_SILENCE: Duration = Duration::from_secs(900);
 const READY_BUFFER_LIMIT: usize = 65536;
 const CONVERSION_PHASE: &str = "database-convert";
 
+/// Variables de libpq que no se heredan: el motor se conecta a su propio
+/// PostgreSQL con un `passfile`, y libpq prefiere `PGPASSWORD` (y el resto)
+/// a lo que no figura en la cadena de conexión. Un entorno con un PostgreSQL
+/// ajeno (como los runners de GitHub, con `PGPASSWORD=root`) hacía fallar
+/// la autenticación SCRAM del motor empaquetado.
+pub const LIBPQ_ENV: [&str; 14] = [
+    "PGPASSWORD", "PGPASSFILE", "PGUSER", "PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE",
+    "PGSERVICEFILE", "PGOPTIONS", "PGSSLMODE", "PGREQUIREAUTH", "PGCHANNELBINDING", "PGTARGETSESSIONATTRS",
+];
+
 /// Presupuesto de apagado, con los mismos números que `QUIT_DEADLINES` en Electron.
 const SHUTDOWN_REQUEST: Duration = Duration::from_secs(3);
 const SHUTDOWN_EXIT_WAIT: Duration = Duration::from_secs(5);
@@ -394,6 +404,9 @@ impl Engine {
         }
         if options.bootstrap_postgres {
             command.env("ORGTREE_PG_BOOTSTRAP", "1");
+        }
+        for key in LIBPQ_ENV {
+            command.env_remove(key);
         }
         hide_console(&mut command);
         notify("starting");

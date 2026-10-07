@@ -153,17 +153,23 @@ fn bootstrap_y_rutas_de_postgres_solo_si_se_piden() {
         };
         std::env::set_var("ORGTREE_PG_BOOTSTRAP", "1");
         std::env::set_var("ORGTREE_PG_CUSTODIAN", "heredado");
+        // Un PostgreSQL ajeno en el entorno (los runners de GitHub traen PGPASSWORD=root).
+        std::env::set_var("PGPASSWORD", "root");
+        std::env::set_var("PGUSER", "postgres");
         let plain = reported(&fake_options("env-plain"));
         assert!(plain["ORGTREE_PG_BOOTSTRAP"].is_null(), "{plain}");
         assert!(plain["ORGTREE_PG_CUSTODIAN"].is_null(), "{plain}");
+        assert!(plain["PGPASSWORD"].is_null() && plain["PGUSER"].is_null(), "{plain}");
 
         let mut options = fake_options("env-packaged");
         options.bootstrap_postgres = true;
         options.ui_dir = Some(PathBuf::from("ui-empaquetada"));
         options.env = vec![("ORGTREE_PG_CUSTODIAN".into(), "custodio".into()), ("ORGTREE_P03_PG_BIN".into(), "bin".into())];
         let packaged = reported(&options);
-        std::env::remove_var("ORGTREE_PG_BOOTSTRAP");
-        std::env::remove_var("ORGTREE_PG_CUSTODIAN");
+        for key in ["ORGTREE_PG_BOOTSTRAP", "ORGTREE_PG_CUSTODIAN", "PGPASSWORD", "PGUSER"] {
+            std::env::remove_var(key);
+        }
+        assert!(packaged["PGPASSWORD"].is_null(), "{packaged}");
         assert_eq!(packaged["ORGTREE_PG_BOOTSTRAP"], "1");
         assert_eq!(packaged["ORGTREE_PG_CUSTODIAN"], "custodio");
         assert_eq!(packaged["ORGTREE_P03_PG_BIN"], "bin");

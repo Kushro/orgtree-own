@@ -74,7 +74,8 @@ if MODE == "refused":
     sys.exit(1)
 
 # Lo que el supervisor le pasó al motor, para las pruebas del modo empaquetado.
-REPORTED = ("ORGTREE_PG_BOOTSTRAP", "ORGTREE_PG_CUSTODIAN", "ORGTREE_P03_PG_BIN", "ORGTREE_V2_UI_DIR")
+REPORTED = ("ORGTREE_PG_BOOTSTRAP", "ORGTREE_PG_CUSTODIAN", "ORGTREE_P03_PG_BIN", "ORGTREE_V2_UI_DIR",
+            "PGPASSWORD", "PGUSER")
 (Path(ROOT) / "fake-env.json").write_text(json.dumps({k: os.environ.get(k) for k in REPORTED}), encoding="utf-8")
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
