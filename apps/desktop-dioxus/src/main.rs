@@ -243,6 +243,18 @@ fn main() {
             login::logins().cancel_all();
             lifecycle::stop_engine_for_exit(path);
             probe::flush();
+            // Fin de sesión: tao (0.34, `thread_event_target_callback`) atiende
+            // WM_ENDSESSION llevando su runner a `Destroyed` y emite este evento
+            // DENTRO del wndproc, pero el loop sigue vivo. El próximo mensaje del
+            // hilo (un evento de usuario, un WM_PAINT) intenta salir de
+            // `Destroyed` y tao entra en pánico ("cannot move state from
+            // Destroyed"); con `panic = "abort"` el proceso moría con 0xC0000409.
+            // Todo está guardado y el motor apagado: se sale acá, en orden y con 0,
+            // antes de devolver el control al loop. Por "Salir" (`quit`), el loop
+            // ya terminó y tao llama a `process::exit` solo.
+            if path == "session-end" {
+                std::process::exit(0);
+            }
         }
         _ => {}
     });
