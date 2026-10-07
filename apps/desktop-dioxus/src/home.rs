@@ -59,6 +59,7 @@ pub fn Home() -> Element {
                     SettingsIcon {}
                     " Default org settings"
                 }
+                crate::DataRoot {}
             }
         }
     }

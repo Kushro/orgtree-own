@@ -12,3 +12,12 @@ short_description = "Orgtree desktop app on Dioxus (migration spike)"
 # dx embebe por defecto el instalador offline de WebView2 (~180 MB). Tauri usa
 # el bootstrapper que lo descarga solo si falta; igualamos para comparar tamaños.
 webview_install_mode = { DownloadBootstrapper = { silent = true } }
+
+[bundle.windows.nsis]
+# #24: el motor, el runtime de Python y PostgreSQL van en <instalación>\resources.
+# `[bundle] resources` de dx 0.7.10 copia cada entrada como un archivo suelto
+# en la raíz (sin carpetas), así que una plantilla propia (la de dx con LZMA)
+# incluye installer/resources.nsh, que instala lo que arma
+# installer/stage_resources.py en target/bundle-resources.
+template = "installer/template.nsi"
+installer_hooks = "installer/resources.nsh"

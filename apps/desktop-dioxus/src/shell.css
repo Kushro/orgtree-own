@@ -1,6 +1,9 @@
 /* Lo que el shell Dioxus agrega encima del CSS del renderer. */
 .dx-splash { min-height: 100vh; display: grid; place-content: center; text-align: center; }
 .dx-splash p { opacity: .75; }
+/* La raíz de datos en uso (#24), en el inicio y en la pantalla de arranque. */
+.dx-data-root { font-size: 11px; margin: 12px 0 0; overflow-wrap: anywhere; }
+.dx-data-root code { font-size: 11px; }
 .dx-org-view { padding: 16px 24px; }
 .dx-org-view header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .dx-org-view header h2 { margin: 0; }

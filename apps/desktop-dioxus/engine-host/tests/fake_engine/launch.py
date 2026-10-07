@@ -49,7 +49,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._authorized():
             return self._reply(401, {"detail": "missing authentication"})
-        self._reply(200, {"protocol": 1, "pid": PID, "dataRootId": ROOT})
+        # Lo que el motor real lee para PostgreSQL (pg_process.py), para las pruebas.
+        pg = {key: os.environ.get(key) for key in ("ORGTREE_PG_BOOTSTRAP", "ORGTREE_PG_CUSTODIAN", "ORGTREE_P03_PG_BIN")}
+        self._reply(200, {"protocol": 1, "pid": PID, "dataRootId": ROOT, "pg": pg})
 
     def do_POST(self):
         if not self._authorized():

@@ -9,7 +9,10 @@
 //!   el plazo de silencio, `refused` aborta, y `ready` se verifica contra el
 //!   PID del hijo, la raíz de datos, el puerto y el protocolo;
 //! - al salir pide `POST /api/desktop/shutdown` con el token y, si el motor no
-//!   termina, mata el árbol de procesos.
+//!   termina, mata el árbol de procesos;
+//! - en una app instalada (`EngineOptions::packaged`) usa el runtime, el
+//!   PostgreSQL y el custodio empaquetados, pide `ORGTREE_PG_BOOTSTRAP=1` y
+//!   deja el descriptor `engine-paths.json` (`write_engine_paths`).
 //!
 //! El token nunca se escribe en logs: `Token` no expone su valor en `Debug` y
 //! stderr del motor se descarta, como en Electron.
@@ -79,6 +82,15 @@ pub struct EngineOptions {
     pub ui_dir: Option<PathBuf>,
     /// Plazo de silencio entre checkpoints; `STARTUP_SILENCE` por defecto.
     pub silence_timeout: Duration,
+    /// PostgreSQL empaquetado (`ORGTREE_PG_CUSTODIAN` y `ORGTREE_P03_PG_BIN`),
+    /// como `postgresRuntimeEnvironment` en `postgres-runtime.ts`.
+    pub postgres: Option<PostgresRuntime>,
+    /// `ORGTREE_PG_BOOTSTRAP=1`: una raíz nueva nace en PostgreSQL. Solo la app
+    /// instalada lo pide; nunca se hereda del entorno.
+    pub bootstrap_postgres: bool,
+    /// Raíces que el motor nunca debe usar (la de Orgtree instalado), ni por
+    /// dentro ni por fuera, como `validateDataRoot` en Electron.
+    pub forbidden_roots: Vec<PathBuf>,
 }
 
 impl EngineOptions {
@@ -89,8 +101,117 @@ impl EngineOptions {
             data_root: data_root.into(),
             ui_dir: None,
             silence_timeout: STARTUP_SILENCE,
+            postgres: None,
+            bootstrap_postgres: false,
+            forbidden_roots: Vec::new(),
         }
     }
+
+    /// El motor de una app instalada: todo sale de la carpeta de recursos
+    /// (`<recursos>/engine`, con `runtime/python.exe`, `pg-custodian.exe` y
+    /// `postgresql/bin`, y `<recursos>/tools/pypg`), con PostgreSQL y bootstrap.
+    /// Falta un archivo: error, como `writeEnginePaths` en Electron.
+    pub fn packaged(resources: &Path, data_root: impl Into<PathBuf>) -> Result<EngineOptions, EngineError> {
+        if !resources.is_absolute() {
+            return Err(EngineError::Config("la carpeta de recursos debe ser absoluta".into()));
+        }
+        let engine_dir = resources.join("engine");
+        let python = engine_dir.join("runtime").join(PYTHON_EXE);
+        for file in [python.clone(), engine_dir.join("launch.py"), importer_for(&engine_dir)] {
+            if !file.is_file() {
+                return Err(EngineError::Config(format!("falta un archivo empaquetado: {}", file.display())));
+            }
+        }
+        let mut options = EngineOptions::new(python, &engine_dir, data_root);
+        options.postgres = Some(PostgresRuntime::locate(&engine_dir)?);
+        options.bootstrap_postgres = true;
+        Ok(options)
+    }
+}
+
+#[cfg(windows)]
+const PYTHON_EXE: &str = "python.exe";
+#[cfg(not(windows))]
+const PYTHON_EXE: &str = "python";
+
+/// El importador de la primera conversión, junto al motor (`resources/tools/pypg`).
+pub fn importer_for(engine_dir: &Path) -> PathBuf {
+    engine_dir.parent().unwrap_or(engine_dir).join("tools").join("pypg").join("pgimport.py")
+}
+
+/// PostgreSQL y su custodio dentro de `engine/`, como los deja
+/// `tools/provision-postgres.py`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresRuntime {
+    pub custodian: PathBuf,
+    pub bin: PathBuf,
+}
+
+impl PostgresRuntime {
+    /// Igual que `PgBin::locate` en `pg-custodian/src/cluster.rs`.
+    pub const TOOLS: [&'static str; 5] = ["postgres", "pg_ctl", "initdb", "psql", "pg_controldata"];
+
+    pub fn locate(engine_dir: &Path) -> Result<PostgresRuntime, EngineError> {
+        if !engine_dir.is_absolute() {
+            return Err(EngineError::Config("PostgreSQL empaquetado necesita un motor con ruta absoluta".into()));
+        }
+        let custodian = engine_dir.join("pg-custodian.exe");
+        let bin = engine_dir.join("postgresql").join("bin");
+        let tools = Self::TOOLS.iter().map(|name| bin.join(format!("{name}.exe")));
+        for file in std::iter::once(custodian.clone()).chain(tools) {
+            if !file.is_file() {
+                return Err(EngineError::Config(format!("falta un ejecutable de PostgreSQL empaquetado: {}", file.display())));
+            }
+        }
+        Ok(PostgresRuntime { custodian, bin })
+    }
+}
+
+/// Escribe `engine-paths.json` (esquema `orgtree.engine-paths/v1`) de forma
+/// atómica, con los mismos campos que `writeEnginePaths` en Electron: dónde
+/// están el motor, el runtime, la raíz de datos, PostgreSQL y el importador.
+pub fn write_engine_paths(file: &Path, options: &EngineOptions) -> Result<(), EngineError> {
+    let postgres = match &options.postgres {
+        Some(postgres) => postgres.clone(),
+        None => PostgresRuntime::locate(&options.engine_dir)?,
+    };
+    let importer = importer_for(&options.engine_dir);
+    for target in [&options.python, &importer] {
+        if !target.is_absolute() || !target.is_file() {
+            return Err(EngineError::Config(format!("falta un archivo empaquetado: {}", target.display())));
+        }
+    }
+    if !options.data_root.is_absolute() {
+        return Err(EngineError::Config("la raíz de datos debe ser absoluta".into()));
+    }
+    let descriptor = serde_json::json!({
+        "schema": "orgtree.engine-paths/v1",
+        "engine": options.engine_dir,
+        "python": options.python,
+        "data": options.data_root,
+        "custodian": postgres.custodian,
+        "pgBin": postgres.bin,
+        "importer": importer,
+    });
+    let io = |e: std::io::Error| EngineError::Config(format!("no se pudo escribir {}: {e}", file.display()));
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(io)?;
+    }
+    let mut tmp = file.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let mut text = serde_json::to_string_pretty(&descriptor).expect("JSON serializable");
+    text.push('\n');
+    std::fs::write(&tmp, text).map_err(io)?;
+    std::fs::rename(&tmp, file).map_err(io)
+}
+
+/// ¿`a` y `b` se pisan (una dentro de la otra o iguales)? Compara texto
+/// canónico, sin mayúsculas en Windows.
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let a = canonical_text(a);
+    let b = canonical_text(b);
+    let sep = |s: &str, base: &str| s.len() > base.len() && s.starts_with(base) && matches!(s.as_bytes()[base.len()], b'/' | b'\\');
+    a == b || sep(&a, &b) || sep(&b, &a)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,11 +416,25 @@ impl Engine {
         if !options.data_root.is_absolute() {
             return Err(EngineError::Config("la raíz de datos debe ser absoluta".into()));
         }
+        let forbidden = |root: &Path| {
+            options
+                .forbidden_roots
+                .iter()
+                .find(|f| overlaps(root, f))
+                .map(|f| EngineError::Config(format!("{} se pisa con {}, que nunca se usa", root.display(), f.display())))
+        };
+        if let Some(error) = forbidden(&options.data_root) {
+            return Err(error);
+        }
         std::fs::create_dir_all(&options.data_root)
             .map_err(|e| EngineError::Config(format!("no se pudo crear la raíz de datos: {e}")))?;
         let data_root = std::fs::canonicalize(&options.data_root)
             .map_err(|e| EngineError::Config(format!("raíz de datos ilegible: {e}")))?;
         let data_root = PathBuf::from(canonical_display(&data_root));
+        // Otra vez con la ruta real: un enlace no esquiva la regla.
+        if let Some(error) = forbidden(&data_root) {
+            return Err(error);
+        }
         let token = Token::generate()?;
 
         let mut command = Command::new(&options.python);
@@ -319,6 +454,12 @@ impl Engine {
             .stderr(Stdio::null());
         if let Some(ui) = &options.ui_dir {
             command.env("ORGTREE_V2_UI_DIR", ui);
+        }
+        if let Some(postgres) = &options.postgres {
+            command.env("ORGTREE_PG_CUSTODIAN", &postgres.custodian).env("ORGTREE_P03_PG_BIN", &postgres.bin);
+        }
+        if options.bootstrap_postgres {
+            command.env("ORGTREE_PG_BOOTSTRAP", "1");
         }
         hide_console(&mut command);
         notify("starting");
@@ -607,6 +748,16 @@ mod tests {
         assert_eq!(token.expose().len(), 64);
         assert!(!format!("{token:?}").contains(token.expose()));
         assert_ne!(token, Token::generate().unwrap());
+    }
+
+    #[test]
+    fn raices_que_se_pisan() {
+        let base = root();
+        assert!(overlaps(&base, &base));
+        assert!(overlaps(&base.join("sub"), &base));
+        assert!(overlaps(&base, &base.join("sub")));
+        let sibling = PathBuf::from(format!("{}-otra", base.display()));
+        assert!(!overlaps(&sibling, &base), "un prefijo de texto no es una carpeta adentro");
     }
 
     #[cfg(windows)]

@@ -13,9 +13,9 @@ use dioxus::desktop::tao::event::Event;
 use dioxus::desktop::{Config, WindowBuilder};
 use dioxus::prelude::*;
 use orgtree_engine_client::Client;
-use orgtree_engine_host::{Engine, EngineOptions};
+use orgtree_engine_host::{write_engine_paths, Engine, EngineOptions};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// El CSS del renderer React, sin cambios: la UI en RSX usa sus mismas clases.
 pub(crate) const RENDERER_CSS: &str = include_str!("../../desktop/renderer/src/styles.css");
@@ -45,43 +45,103 @@ enum Update {
     Ready(Client),
 }
 
-/// Configuración del spike. El empaquetado del runtime de Python queda fuera
-/// del recorte, así que el intérprete se indica por entorno.
-fn engine_options() -> Result<EngineOptions, String> {
-    let python = std::env::var_os("ORGTREE_DIOXUS_PYTHON")
-        .map(PathBuf::from)
-        .ok_or("Falta ORGTREE_DIOXUS_PYTHON: la ruta absoluta de un Python con las dependencias del motor.")?;
-    let engine_dir = std::env::var_os("ORGTREE_DIOXUS_ENGINE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../engine")));
-    // Nunca la raíz real de Orgtree: por defecto, una carpeta del identificador del spike.
-    let data_root = match std::env::var_os("ORGTREE_DIOXUS_DATA") {
-        Some(root) => PathBuf::from(root),
-        None => std::env::var_os("LOCALAPPDATA")
-            .map(|base| PathBuf::from(base).join("com.kushro.orgtree.dioxus-spike").join("data"))
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/orgtree-dioxus-spike/data")))
-            .ok_or("No hay LOCALAPPDATA ni HOME para la raíz de datos; definir ORGTREE_DIOXUS_DATA.")?,
-    };
-    Ok(EngineOptions::new(python, engine_dir, data_root))
+/// Carpeta propia de la app (nunca la de Orgtree instalado): guarda la raíz de
+/// datos por defecto y el descriptor `engine-paths.json`, como `userData` en Electron.
+fn app_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|base| PathBuf::from(base).join("com.kushro.orgtree.dioxus-spike"))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/orgtree-dioxus-spike")))
+}
+
+/// Recursos empaquetados por el instalador, junto al ejecutable (`<instalación>\resources`).
+fn resources_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|dir| dir.join("resources"))
+}
+
+/// Las raíces que la app nunca usa, como el `forbiddenRoot` de Electron: la de
+/// Orgtree instalado y la de v1, más un `ORGTREE_DATA` heredado.
+fn forbidden_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        roots.push(PathBuf::from(appdata).join("Orgtree v2"));
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        roots.push(PathBuf::from(home).join("orgtree"));
+    }
+    if let Some(data) = std::env::var_os("ORGTREE_DATA").filter(|d| !d.is_empty()) {
+        roots.push(PathBuf::from(data));
+    }
+    roots
+}
+
+/// Cómo arranca el motor en esta ejecución.
+pub struct Launch {
+    pub options: EngineOptions,
+    /// Instalada: runtime, motor y PostgreSQL empaquetados. Si no, desarrollo.
+    pub packaged: bool,
+    /// Dónde se escribe `engine-paths.json` (solo instalada).
+    pub descriptor: Option<PathBuf>,
+}
+
+/// Configuración, calculada una vez. Con `ORGTREE_DIOXUS_PYTHON` es el modo de
+/// desarrollo (un Python con las dependencias y el `engine/` del checkout o
+/// `ORGTREE_DIOXUS_ENGINE_DIR`). Sin él, la app instalada usa sus recursos,
+/// como `app.isPackaged` en `apps/desktop/main/index.ts`.
+pub fn launch() -> &'static Result<Launch, String> {
+    static LAUNCH: OnceLock<Result<Launch, String>> = OnceLock::new();
+    LAUNCH.get_or_init(|| {
+        // Nunca la raíz real de Orgtree: por defecto, una carpeta del identificador del spike.
+        let data_root = match std::env::var_os("ORGTREE_DIOXUS_DATA").filter(|d| !d.is_empty()) {
+            Some(root) => PathBuf::from(root),
+            None => app_dir()
+                .map(|dir| dir.join("data"))
+                .ok_or("No hay LOCALAPPDATA ni HOME para la raíz de datos; definir ORGTREE_DIOXUS_DATA.")?,
+        };
+        let mut launch = match std::env::var_os("ORGTREE_DIOXUS_PYTHON").filter(|p| !p.is_empty()) {
+            Some(python) => {
+                let engine_dir = std::env::var_os("ORGTREE_DIOXUS_ENGINE_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../engine")));
+                Launch { options: EngineOptions::new(PathBuf::from(python), engine_dir, data_root), packaged: false, descriptor: None }
+            }
+            None => {
+                let resources = resources_dir().filter(|r| r.join("engine").join("launch.py").is_file()).ok_or(
+                    "No hay un motor instalado junto al ejecutable. Para desarrollo, definir ORGTREE_DIOXUS_PYTHON \
+                     con la ruta absoluta de un Python con las dependencias del motor.",
+                )?;
+                let options = EngineOptions::packaged(&resources, data_root).map_err(|e| e.to_string())?;
+                Launch { options, packaged: true, descriptor: app_dir().map(|dir| dir.join("engine-paths.json")) }
+            }
+        };
+        launch.options.forbidden_roots = forbidden_roots();
+        Ok(launch)
+    })
 }
 
 /// Arranca el motor en un hilo y manda cada estado por el canal.
 fn start_engine(updates: futures_channel::mpsc::UnboundedSender<Update>) {
-    let options = match engine_options() {
-        Ok(options) => options,
+    let launch = match launch() {
+        Ok(launch) => launch,
         Err(message) => {
-            let _ = updates.unbounded_send(Update::Status(message));
+            let _ = updates.unbounded_send(Update::Status(message.clone()));
             return;
         }
     };
     std::thread::Builder::new()
         .name("orgtree-engine-start".into())
         .spawn(move || {
+            let options = &launch.options;
+            if let Some(descriptor) = &launch.descriptor {
+                if let Err(error) = write_engine_paths(descriptor, options) {
+                    let _ = updates.unbounded_send(Update::Status(format!("El motor no arrancó: {error}")));
+                    return;
+                }
+            }
             let mut notify = |phase: &str| {
                 let text = if phase == "converting" { "Convirtiendo datos…" } else { "Iniciando el motor…" };
                 let _ = updates.unbounded_send(Update::Status(text.to_string()));
             };
-            match Engine::start_with(&options, &mut notify) {
+            match Engine::start_with(options, &mut notify) {
                 Ok(engine) => match Client::new(engine.origin(), engine.token().expose()) {
                     Ok(client) => {
                         *ENGINE.lock().unwrap() = Some(engine);
@@ -99,6 +159,21 @@ fn start_engine(updates: futures_channel::mpsc::UnboundedSender<Update>) {
         .expect("no se pudo crear el hilo de arranque del motor");
 }
 
+/// La raíz de datos en uso, para mostrarla en la UI.
+#[component]
+pub fn DataRoot() -> Element {
+    let Ok(launch) = launch() else { return rsx! {} };
+    let root = launch.options.data_root.display().to_string();
+    let mode = if launch.packaged { "app instalada" } else { "desarrollo" };
+    rsx! {
+        p { class: "dim dx-data-root", title: "Raíz de datos propia de esta app ({mode}); nunca la de Orgtree instalado",
+            "Datos: "
+            code { "{root}" }
+            span { class: "dx-launch-mode", " · {mode}" }
+        }
+    }
+}
+
 fn stop_engine() {
     if let Some(engine) = ENGINE.lock().unwrap().take() {
         let _ = engine.stop();
@@ -107,8 +182,8 @@ fn stop_engine() {
 
 fn main() {
     // Instancia única (#14): una segunda ejecución le avisa a la primera y termina.
-    if let Ok(options) = engine_options() {
-        if let native::Instance::Second = native::single_instance(&options.data_root) {
+    if let Ok(launch) = launch() {
+        if let native::Instance::Second = native::single_instance(&launch.options.data_root) {
             return;
         }
     }
@@ -148,7 +223,10 @@ fn App() -> Element {
             use futures_util::StreamExt;
             while let Some(update) = receiver.next().await {
                 match update {
-                    Update::Status(text) => status.set(text),
+                    Update::Status(text) => {
+                        probe::startup_status(&text);
+                        status.set(text)
+                    }
                     Update::Ready(ready) => client.set(Some(ready)),
                 }
             }
@@ -159,6 +237,7 @@ fn App() -> Element {
             main { class: "dx-splash",
                 h1 { "Orgtree" }
                 p { id: "status", "{status}" }
+                DataRoot {}
             }
         },
         Some(_) => match route() {

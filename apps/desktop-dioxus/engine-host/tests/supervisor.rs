@@ -5,7 +5,7 @@
 //! - La prueba con el motor real está marcada `#[ignore]`: se corre con
 //!   `cargo test -- --include-ignored` y `ORGTREE_TEST_ENGINE_PYTHON`.
 
-use orgtree_engine_host::{Engine, EngineError, EngineOptions, StopOutcome};
+use orgtree_engine_host::{write_engine_paths, Engine, EngineError, EngineOptions, PostgresRuntime, StopOutcome};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -127,6 +127,101 @@ fn configuracion_invalida() {
     assert!(matches!(Engine::start(&options).unwrap_err(), EngineError::Config(_)));
     let mut options = fake_options("config2");
     options.engine_dir = std::env::temp_dir().join("orgtree-no-existe");
+    assert!(matches!(Engine::start(&options).unwrap_err(), EngineError::Config(_)));
+}
+
+/// Una carpeta de recursos como la de la app instalada, con archivos vacíos.
+fn fake_resources(name: &str, skip: Option<&str>) -> PathBuf {
+    let resources = scratch(name);
+    let engine = resources.join("engine");
+    let python = if cfg!(windows) { "runtime/python.exe" } else { "runtime/python" };
+    let mut files = vec![python.to_string(), "launch.py".into(), "pg-custodian.exe".into(), "../tools/pypg/pgimport.py".into()];
+    files.extend(PostgresRuntime::TOOLS.iter().map(|tool| format!("postgresql/bin/{tool}.exe")));
+    for file in files.iter().filter(|f| Some(f.as_str()) != skip) {
+        let path = engine.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"").unwrap();
+    }
+    resources
+}
+
+#[test]
+fn modo_empaquetado_usa_los_recursos_y_pide_bootstrap() {
+    let resources = fake_resources("packaged", None);
+    let data = scratch("packaged-data");
+    let options = EngineOptions::packaged(&resources, &data).expect("disposición completa");
+    let engine = resources.join("engine");
+    assert_eq!(options.engine_dir, engine);
+    assert!(options.python.starts_with(engine.join("runtime")));
+    assert!(options.bootstrap_postgres);
+    let postgres = options.postgres.clone().unwrap();
+    assert_eq!(postgres.custodian, engine.join("pg-custodian.exe"));
+    assert_eq!(postgres.bin, engine.join("postgresql").join("bin"));
+
+    let descriptor = resources.join("app").join("engine-paths.json");
+    write_engine_paths(&descriptor, &options).expect("descriptor");
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&descriptor).unwrap()).unwrap();
+    assert_eq!(value["schema"], "orgtree.engine-paths/v1");
+    assert_eq!(Path::new(value["data"].as_str().unwrap()), data);
+    assert_eq!(Path::new(value["custodian"].as_str().unwrap()), postgres.custodian);
+    assert_eq!(Path::new(value["pgBin"].as_str().unwrap()), postgres.bin);
+    assert!(value["importer"].as_str().unwrap().ends_with("pgimport.py"));
+    assert!(!resources.join("app").join("engine-paths.json.tmp").exists());
+    let _ = std::fs::remove_dir_all(&resources);
+}
+
+#[test]
+fn modo_empaquetado_incompleto_se_rechaza() {
+    for missing in ["launch.py", "pg-custodian.exe", "postgresql/bin/initdb.exe", "../tools/pypg/pgimport.py"] {
+        let resources = fake_resources("incomplete", Some(missing));
+        let error = EngineOptions::packaged(&resources, scratch("incomplete-data")).unwrap_err();
+        assert!(matches!(error, EngineError::Config(_)), "{missing}: {error:?}");
+        let _ = std::fs::remove_dir_all(&resources);
+    }
+    assert!(matches!(EngineOptions::packaged(Path::new("relativa"), scratch("x")).unwrap_err(), EngineError::Config(_)));
+}
+
+#[test]
+fn postgres_y_bootstrap_llegan_al_motor_y_no_se_heredan() {
+    with_mode("ready", || {
+        // Un bootstrap del entorno (por ejemplo, de la app instalada) nunca se hereda.
+        std::env::set_var("ORGTREE_PG_BOOTSTRAP", "1");
+        let engine = Engine::start(&fake_options("pg-plain")).expect("ready");
+        let (_, body) = engine.get("/api/desktop/identity", Duration::from_secs(5)).unwrap();
+        std::env::remove_var("ORGTREE_PG_BOOTSTRAP");
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(value["pg"]["ORGTREE_PG_BOOTSTRAP"].is_null(), "{body}");
+        assert_eq!(engine.stop(), StopOutcome::Graceful);
+
+        let resources = fake_resources("pg-runtime", None);
+        let mut options = fake_options("pg-packaged");
+        options.postgres = Some(PostgresRuntime::locate(&resources.join("engine")).unwrap());
+        options.bootstrap_postgres = true;
+        let engine = Engine::start(&options).expect("ready");
+        let (_, body) = engine.get("/api/desktop/identity", Duration::from_secs(5)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["pg"]["ORGTREE_PG_BOOTSTRAP"], "1");
+        let postgres = options.postgres.as_ref().unwrap();
+        assert_eq!(Path::new(value["pg"]["ORGTREE_PG_CUSTODIAN"].as_str().unwrap()), postgres.custodian);
+        assert_eq!(Path::new(value["pg"]["ORGTREE_P03_PG_BIN"].as_str().unwrap()), postgres.bin);
+        assert_eq!(engine.stop(), StopOutcome::Graceful);
+        let _ = std::fs::remove_dir_all(&resources);
+    });
+}
+
+#[test]
+fn una_raiz_prohibida_no_se_usa_ni_se_crea() {
+    let installed = scratch("installed-orgtree");
+    for data in [installed.join("data"), installed.clone()] {
+        let mut options = fake_options("forbidden");
+        options.data_root = data.clone();
+        options.forbidden_roots = vec![installed.clone()];
+        assert!(matches!(Engine::start(&options).unwrap_err(), EngineError::Config(_)), "{}", data.display());
+        assert!(!data.exists(), "no se crea nada adentro de la raíz prohibida");
+    }
+    // Una raíz que contiene a la prohibida también se rechaza.
+    let mut options = fake_options("forbidden-parent");
+    options.forbidden_roots = vec![options.data_root.join("orgtree")];
     assert!(matches!(Engine::start(&options).unwrap_err(), EngineError::Config(_)));
 }
 

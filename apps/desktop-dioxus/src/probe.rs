@@ -44,6 +44,8 @@ home.orgListed = !!row;
 home.counts = row ? (row.querySelector('.org-counts') || {}).textContent : null;
 home.fontFamily = row ? getComputedStyle(row).fontFamily : null;
 home.bridge = typeof window.orgtreeDesktop;
+// #24: la raíz de datos en uso, a la vista en el inicio
+home.dataRoot = (document.querySelector('.welcome-card .dx-data-root code') || {}).textContent || null;
 if (row) {
   // pausa para la captura del CI: el inicio con la lista cargada
   dioxus.send({ pause: 'home' });
@@ -190,6 +192,75 @@ await timeout(500);
 dioxus.send({ afterOwnerClose: { alive: true, draft: ta && ta.value, messages: document.querySelectorAll('.dx-desk .msg').length } });
 "#;
 
+/// #24, la app instalada (`ORGTREE_DIOXUS_PROBE_MODE=installed`): el motor
+/// empaquetado sobre una raíz nueva, sin orgs. La UI RSX carga con el CSS del
+/// renderer, la lista de orgs llega (vacía) y la raíz de datos está a la vista.
+const INSTALLED_SCRIPT: &str = r#"
+const timeout = ms => new Promise(done => setTimeout(done, ms));
+const waitFor = async (test, ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { const value = test(); if (value) return value; await timeout(200) }
+  return null;
+};
+const r = {};
+const card = await waitFor(() => document.querySelector('.welcome-card'), 30000);
+r.card = !!card;
+r.version = (document.querySelector('.welcome-card .build-badge') || {}).textContent || null;
+r.fontFamily = card ? getComputedStyle(card).fontFamily : null;
+r.bridge = typeof window.orgtreeDesktop;
+// la lista viene del motor por el cliente Rust: en una raíz nueva no hay orgs
+r.orgList = !!(await waitFor(() => document.querySelector('.welcome-card nav'), 30000));
+r.orgs = document.querySelectorAll('.welcome-card nav .org').length;
+r.empty = !!(await waitFor(() => [...document.querySelectorAll('.welcome-card .dim')].find(el => el.textContent.includes('no organizations')), 5000));
+r.listError = (document.querySelector('.welcome-card .org-freshness') || {}).textContent || null;
+r.dataRoot = (document.querySelector('.welcome-card .dx-data-root code') || {}).textContent || null;
+r.mode = (document.querySelector('.welcome-card .dx-launch-mode') || {}).textContent || null;
+// pausa para la captura del CI: la app instalada con la raíz a la vista
+dioxus.send({ pause: 'installed' });
+await timeout(3000);
+dioxus.send({ done: r });
+"#;
+
+fn installed_mode() -> bool {
+    std::env::var("ORGTREE_DIOXUS_PROBE_MODE").is_ok_and(|mode| mode == "installed")
+}
+
+async fn installed_probe() {
+    let mut eval = document::eval(INSTALLED_SCRIPT);
+    let page = loop {
+        match eval.recv::<serde_json::Value>().await {
+            Ok(message) => {
+                if let Some(name) = message.get("pause").and_then(|v| v.as_str()) {
+                    marker(name);
+                } else if let Some(done) = message.get("done") {
+                    break done.clone();
+                }
+            }
+            Err(error) => break serde_json::json!({ "error": error.to_string() }),
+        }
+    };
+    record("installed", page);
+    if let Ok(launch) = crate::launch() {
+        let engine = crate::ENGINE.lock().unwrap().as_ref().map(|e| e.data_root().display().to_string());
+        record("launch", serde_json::json!({
+            "packaged": launch.packaged,
+            "data_root": launch.options.data_root,
+            "engine_data_root": engine,
+            "python": launch.options.python,
+            "bootstrap_postgres": launch.options.bootstrap_postgres,
+            "descriptor": launch.descriptor,
+        }));
+    }
+    // Salir, como desde la bandeja: cierra todo y apaga el motor.
+    crate::native::quit();
+}
+
+/// El último estado de arranque (por ejemplo, por qué el motor no arrancó),
+/// para que el CI lo vea aunque la UI no llegue a montarse.
+pub fn startup_status(text: &str) {
+    record("startup_status", serde_json::json!(text));
+}
+
 /// Reporte compartido por las dos ventanas.
 static REPORT: Mutex<Option<serde_json::Map<String, serde_json::Value>>> = Mutex::new(None);
 /// La principal ya se cerró (se ocultó): la ventana del desk sigue con su parte.
@@ -266,6 +337,9 @@ pub fn Probe() -> Element {
     use_future(|| async move {
         if report_path().is_none() {
             return;
+        }
+        if installed_mode() {
+            return installed_probe().await;
         }
         let mut eval = document::eval(SCRIPT);
         let report = loop {

@@ -8,6 +8,11 @@ on:
       - apps/desktop/renderer/src/styles.css
       - .github/workflows/spike-dioxus.yml
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Publicar el instalador como pre-release de GitHub (tag dioxus-preview-<run_number>)'
+        type: boolean
+        default: false
 
 concurrency:
   group: spike-dioxus-${{ github.ref }}
@@ -19,21 +24,26 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: apps/desktop-dioxus
     steps:
+      # El submódulo engine/mailhub va en el instalador (#24).
       - uses: actions/checkout@v4
+        with:
+          submodules: true
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop-dioxus
+          workspaces: |
+            apps/desktop-dioxus
+            engine/native/pg-custodian -> ../../../artifacts/postgres-provision/cargo
 
-      # Python para el motor real (sin el submódulo mailhub: el motor arranca igual
-      # y lo informa como caído). Raíz de datos descartable, nunca datos reales.
+      # Python para el motor real en modo de desarrollo (pruebas y smoke test) y para
+      # aprovisionar el runtime embebido. Raíz de datos descartable, nunca datos reales.
       - uses: actions/setup-python@v5
         id: python
         with:
@@ -47,6 +57,36 @@ jobs:
           FAKE_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
           ORGTREE_TEST_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo test -p orgtree-engine-host -p orgtree-engine-client -- --include-ignored --nocapture
+
+      # #24: el runtime embebido y PostgreSQL 18, como el instalador de Electron.
+      # El ZIP de PostgreSQL (~380 MB) queda en caché por el pin.
+      - uses: actions/cache@v4
+        with:
+          path: .runtime-cache/*.zip
+          key: runtime-cache-${{ hashFiles('tools/postgres-runtime-pin.json', 'tools/provision-runtime.py') }}
+
+      - name: Provision the embedded Python runtime (engine/runtime)
+        working-directory: .
+        run: python tools/provision-runtime.py
+
+      - name: Provision PostgreSQL and pg-custodian (engine/postgresql, engine/pg-custodian.exe)
+        working-directory: .
+        run: python tools/provision-postgres.py
+
+      - name: Stage the installer resources
+        working-directory: .
+        run: python apps/desktop-dioxus/installer/stage_resources.py
+
+      # Las mismas verificaciones de disposición que tools/package-preflight.mjs,
+      # sobre lo que va al instalador.
+      - name: Verify the staged runtime and PostgreSQL layout
+        working-directory: .
+        run: >-
+          node --input-type=module -e "import { assertRuntimeLayout } from './tools/runtime-layout.mjs';
+          import { assertPostgresRuntime } from './tools/postgres-layout.mjs';
+          const engine = 'apps/desktop-dioxus/target/bundle-resources/engine';
+          assertRuntimeLayout(engine + '/runtime', { label: 'staged runtime' });
+          console.log('runtime ok', JSON.stringify(assertPostgresRuntime(engine, { sourceRoot: process.cwd() })))"
 
       - uses: cargo-bins/cargo-binstall@main
 
@@ -167,6 +207,8 @@ jobs:
           if ($hp.version -ne '0.0.1') { $failures += "version badge: $($hp.version)" }
           if ($hp.fontFamily -notlike '*Segoe UI*') { $failures += "renderer CSS not applied: $($hp.fontFamily)" }
           if ($hp.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the webview: $($hp.bridge)" }
+          # #24: la raíz de datos en uso, a la vista en el inicio
+          if ($hp.dataRoot -ne $env:ORGTREE_DIOXUS_DATA) { $failures += "data root not shown on the home card: $($hp.dataRoot)" }
           # #12: desk en RSX
           $desk = $probe.desk
           foreach ($check in 'opened', 'toolShown', 'markdownBold', 'markdownList', 'injectionBlocked') {
@@ -221,14 +263,142 @@ jobs:
           if ($failures) { throw ($failures -join '; ') }
           Write-Host "Home window, live desk, desk window and native integration in RSX verified in WebView2"
 
+      # #24: el instalador generado, instalado en silencio en una carpeta descartable
+      # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y
+      # PostgreSQL empaquetados, sobre una raíz de datos nueva y descartable.
+      - name: Install the NSIS installer and start the installed app (packaged engine on PostgreSQL)
+        shell: pwsh
+        env:
+          ORGTREE_DIOXUS_DATA: ${{ runner.temp }}\orgtree-dioxus-installed-data
+          ORGTREE_DIOXUS_PROBE: ${{ runner.temp }}\orgtree-dioxus-installed-probe.json
+          ORGTREE_DIOXUS_PROBE_MODE: installed
+        run: |
+          $installer = Get-ChildItem dist -Recurse -Filter *-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw "no NSIS installer in dist" }
+          $target = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-installed'
+          # /D= va último y sin comillas (NSIS).
+          $setup = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$target" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "the installer exited with $($setup.ExitCode)" }
+          $exe = Join-Path $target 'orgtree-dioxus.exe'
+          $resources = Join-Path $target 'resources'
+          foreach ($file in $exe, "$resources\engine\launch.py", "$resources\engine\runtime\python.exe", "$resources\engine\pg-custodian.exe",
+                   "$resources\engine\postgresql\bin\postgres.exe", "$resources\engine\mailhub\__init__.py", "$resources\tools\pypg\pgimport.py",
+                   "$resources\tools\pypg\cutover_verify.py", "$resources\build-info.json") {
+            if (-not (Test-Path $file -PathType Leaf)) { throw "not installed: $file" }
+          }
+          if (Test-Path "$resources\ui") { throw "the React renderer should not be in the installer" }
+          $installedMb = (Get-ChildItem $target -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+          Write-Host ("Installed to {0}: {1:N1} MB" -f $target, $installedMb)
+          # La disposición instalada, con las verificaciones del preflight de Electron.
+          Push-Location $env:GITHUB_WORKSPACE
+          $engineDir = ("$resources\engine" -replace '\\', '/')
+          node --input-type=module -e "import { assertRuntimeLayout, runtimeTreeDigest } from './tools/runtime-layout.mjs'; import { assertPostgresRuntime } from './tools/postgres-layout.mjs'; assertRuntimeLayout('$engineDir/runtime', { label: 'installed runtime' }); const installed = runtimeTreeDigest('$engineDir/runtime'), staged = runtimeTreeDigest('apps/desktop-dioxus/target/bundle-resources/engine/runtime'); if (installed.sha256 !== staged.sha256) throw new Error('installed runtime differs from the staged one'); console.log('installed runtime ok', JSON.stringify(installed), JSON.stringify(assertPostgresRuntime('$engineDir')))"
+          if ($LASTEXITCODE -ne 0) { throw "installed layout check failed" }
+          Pop-Location
+
+          # Sin el modo de desarrollo: la app tiene que encontrar sus recursos sola.
+          Remove-Item Env:ORGTREE_DIOXUS_PYTHON, Env:ORGTREE_DIOXUS_ENGINE_DIR -ErrorAction SilentlyContinue
+          $data = $env:ORGTREE_DIOXUS_DATA
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host "Runner shell elevated: $elevated"
+          $started = Get-Date
+          $p = Start-Process -FilePath $exe -WorkingDirectory $target -PassThru
+          $deadline = (Get-Date).AddSeconds(420)
+          $shot = $false; $splash = $false
+          while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
+            if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) {
+              try { Save-Screen 'installed-splash' } catch { Write-Host "screenshot: $_" }; $splash = $true
+            }
+            if (-not $shot -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).installed")) {
+              try { Save-Screen 'installed' } catch { Write-Host "screenshot: $_" }; $shot = $true
+            }
+            Start-Sleep -Milliseconds 300; $p.Refresh()
+          }
+          $seconds = [int]((Get-Date) - $started).TotalSeconds
+          $exited = $p.HasExited
+          if (-not $exited) { try { Save-Screen 'installed-timeout' } catch {}; Stop-Process -Id $p.Id -Force }
+
+          $failures = @()
+          $raw = if (Test-Path $env:ORGTREE_DIOXUS_PROBE) { Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw } else { '{}' }
+          Write-Host "Installed app probe: $raw"
+          "### Installed app (#24, Dioxus)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $probe = $raw | ConvertFrom-Json
+          if (-not $probe.installed) { $failures += "the installed app did not load its UI (startup status: $($probe.startup_status))" }
+          $ui = $probe.installed
+          foreach ($check in 'card', 'orgList', 'empty') {
+            if ($ui.$check -ne $true) { $failures += "installed.$check was $($ui.$check)" }
+          }
+          if ($ui.orgs -ne 0) { $failures += "a fresh data root should have no orgs: $($ui.orgs)" }
+          if ($ui.version -ne '0.0.1') { $failures += "version badge: $($ui.version)" }
+          if ($ui.fontFamily -notlike '*Segoe UI*') { $failures += "renderer CSS not applied: $($ui.fontFamily)" }
+          if ($ui.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the webview: $($ui.bridge)" }
+          if ($ui.dataRoot -ne $data) { $failures += "the UI does not show the data root in use: $($ui.dataRoot)" }
+          if ($ui.mode -notlike '*app instalada*') { $failures += "the UI does not say it is the installed app: $($ui.mode)" }
+          $launch = $probe.launch
+          if ($launch.packaged -ne $true -or $launch.bootstrap_postgres -ne $true) { $failures += "not the packaged launch: $($launch | ConvertTo-Json -Compress)" }
+          if ($launch.python -ne "$resources\engine\runtime\python.exe") { $failures += "not the bundled runtime: $($launch.python)" }
+
+          # El motor empaquetado levantó sobre PostgreSQL en la raíz descartable.
+          $backend = Join-Path $data 'store-backend.json'
+          if (Test-Path $backend) {
+            $record = Get-Content $backend -Raw | ConvertFrom-Json
+            Write-Host "store-backend.json: $($record | ConvertTo-Json -Compress)"
+            if ($record.backend -ne 'postgres') { $failures += "store-backend.json chose $($record.backend)" }
+          } else { $failures += "no store-backend.json in $data" }
+          foreach ($path in "$data\pg\cluster\PG_VERSION", "$data\orgtree-product-root.json", "$data\engine-port.json") {
+            if (-not (Test-Path $path)) { $failures += "missing $path" }
+          }
+          if (Test-Path "$data\pg\cluster\PG_VERSION") { Write-Host "PostgreSQL cluster version: $(Get-Content "$data\pg\cluster\PG_VERSION")" }
+          # El descriptor engine-paths.json, en la carpeta propia de la app.
+          $paths = Join-Path $env:LOCALAPPDATA 'com.kushro.orgtree.dioxus-spike\engine-paths.json'
+          if (Test-Path $paths) {
+            $descriptor = Get-Content $paths -Raw | ConvertFrom-Json
+            Write-Host "engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
+            if ($descriptor.schema -ne 'orgtree.engine-paths/v1' -or $descriptor.data -ne $data -or $descriptor.custodian -ne "$resources\engine\pg-custodian.exe" -or $descriptor.pgBin -ne "$resources\engine\postgresql\bin") {
+              $failures += "unexpected engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
+            }
+          } else { $failures += "no engine-paths.json at $paths" }
+          if (Test-Path "$env:APPDATA\Orgtree v2") { $failures += "something was written to the installed Orgtree's data folder" }
+
+          # Salir (como desde la bandeja) apaga el motor y PostgreSQL con la app.
+          if (-not $exited) { $failures += "the installed app did not exit after the probe ($seconds s)" }
+          else { Write-Host "Installed app exited by itself with code $($p.ExitCode) after $seconds s" }
+          Start-Sleep -Seconds 3
+          $left = @(Get-Process postgres, python, pg-custodian -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$target*" })
+          if ($left) { $failures += "processes left from the installed app: $(($left | ForEach-Object { "$($_.Name) $($_.Id)" }) -join ', ')" }
+          "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start to exit: $seconds s`n- runner elevated: $elevated" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          if ($failures) {
+            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.txt, *.jsonl -ErrorAction SilentlyContinue | Select-Object -First 15) {
+              Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
+            }
+            throw ($failures -join '; ')
+          }
+          Write-Host "Installed app verified: packaged engine on PostgreSQL, RSX UI loaded, own data root shown"
+
       - name: Report sizes
         shell: pwsh
         run: |
           $app = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
             Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
+          "### Sizes (Dioxus)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           @(Get-ChildItem dist -Recurse -Filter *.exe) + @($app) |
-            ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
+            ForEach-Object { "- {0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $staged = 'target\bundle-resources'
+          foreach ($part in 'engine\runtime', 'engine\postgresql', 'engine') {
+            $mb = (Get-ChildItem "$staged\$part" -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+            "- resources\{0} (uncompressed): {1:N1} MB" -f $part, $mb | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -238,7 +408,61 @@ jobs:
           if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: orgtree-dioxus-installed-logs
+          path: |
+            ${{ runner.temp }}/orgtree-dioxus-installed-data/**/*.log
+            ${{ runner.temp }}/orgtree-dioxus-installed-data/**/*.txt
+            ${{ runner.temp }}/orgtree-dioxus-installed-data/**/*.jsonl
+            ${{ runner.temp }}/orgtree-dioxus-installed-data/*.json
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
         with:
           name: orgtree-dioxus-installer
           path: apps/desktop-dioxus/dist/*.exe
           if-no-files-found: error
+
+  # #24: solo a mano (workflow_dispatch con prerelease), nunca en un push. Un
+  # pre-release de la rama con su propio tag; main y los releases normales no se tocan.
+  prerelease:
+    needs: windows
+    if: github.event_name == 'workflow_dispatch' && inputs.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: orgtree-dioxus-installer
+          path: installer
+
+      - name: Publish the installer as a GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: dioxus-preview-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          installer=$(ls installer/*.exe | head -n 1)
+          size=$(du -m "$installer" | cut -f1)
+          short=$(echo "$GITHUB_SHA" | cut -c1-7)
+          cat > notes.md <<EOF
+          Vista previa del spike de migración a **Dioxus** (rama \`spike/dioxus\`, commit \`$short\`, [run $GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)).
+
+          **No es un release oficial de Orgtree.** Es un pre-release para probar el spike a mano en Windows.
+
+          ## Qué incluye
+          - La app de escritorio en Dioxus 0.7 (UI en RSX con el CSS del renderer de Orgtree).
+          - El motor Python de Orgtree (\`engine/\`, con el submódulo \`engine/mailhub\`) y su runtime de Python 3.13 embebido.
+          - PostgreSQL 18 y \`pg-custodian\`: en el primer arranque la raíz de datos nace en PostgreSQL.
+          - El instalador baja WebView2 solo si falta.
+
+          ## Datos
+          La app usa su propia raíz de datos, \`%LOCALAPPDATA%\\com.kushro.orgtree.dioxus-spike\\data\`, y la muestra en la pantalla de inicio. Nunca usa ni toca la de Orgtree instalado (\`%APPDATA%\\Orgtree v2\\data\`). Desinstalar la app no borra esa carpeta.
+
+          Instalador: \`$(basename "$installer")\` ($size MB). Se instala por usuario, sin permisos de administrador.
+          EOF
+          gh release create "$TAG" "$installer" --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+            --title "Orgtree Dioxus (vista previa $GITHUB_RUN_NUMBER)" --notes-file notes.md
+          echo "Pre-release $TAG: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
