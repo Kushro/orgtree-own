@@ -81,7 +81,7 @@ def main() -> None:
         require([engine / "runtime" / "python.exe", engine / "runtime" / "python313._pth"], "el runtime embebido (python tools/provision-runtime.py)")
         require([engine / "pg-custodian.exe", *(engine / "postgresql" / "bin" / t for t in PG_TOOLS)],
                 "PostgreSQL empaquetado (python tools/provision-postgres.py)")
-        require([engine / "mailhub" / "__init__.py"], "el submódulo engine/mailhub")
+        require([engine / "mailhub" / "mailhub" / "serve.py", engine / "mailhub" / "hubtool.py"], "el submódulo engine/mailhub")
     if OUT.exists():
         shutil.rmtree(OUT)
     OUT.mkdir(parents=True)

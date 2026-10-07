@@ -282,7 +282,7 @@ jobs:
           $exe = Join-Path $target 'orgtree-dioxus.exe'
           $resources = Join-Path $target 'resources'
           foreach ($file in $exe, "$resources\engine\launch.py", "$resources\engine\runtime\python.exe", "$resources\engine\pg-custodian.exe",
-                   "$resources\engine\postgresql\bin\postgres.exe", "$resources\engine\mailhub\__init__.py", "$resources\tools\pypg\pgimport.py",
+                   "$resources\engine\postgresql\bin\postgres.exe", "$resources\engine\mailhub\mailhub\serve.py", "$resources\tools\pypg\pgimport.py",
                    "$resources\tools\pypg\cutover_verify.py", "$resources\build-info.json") {
             if (-not (Test-Path $file -PathType Leaf)) { throw "not installed: $file" }
           }
