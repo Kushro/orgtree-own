@@ -1,5 +1,6 @@
 // Solo los comandos listados existen para el ACL: cada ventana los recibe
 // únicamente si una capability se los concede (ver capabilities/engine-ui.json).
+// Los de ventanas por organización (#20) van al final.
 const COMMANDS: &[&str] = &[
     "desktop_app_version",
     "desktop_status",
@@ -23,6 +24,16 @@ const COMMANDS: &[&str] = &[
     "desktop_provider_login_status",
     "desktop_provider_login_code",
     "desktop_provider_login_cancel",
+    "desktop_set_effective_theme",
+    "desktop_window_identity",
+    "desktop_open_homepage_window",
+    "desktop_open_create_window",
+    "desktop_cancel_creation",
+    "desktop_request_org",
+    "desktop_bind_created_org",
+    "desktop_set_unsaved_creation",
+    "desktop_open_orgs",
+    "desktop_take_pending_events",
 ];
 
 fn main() {

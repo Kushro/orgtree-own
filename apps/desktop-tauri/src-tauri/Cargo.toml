@@ -23,6 +23,8 @@ orgtree-engine-host = { path = "../engine-host" }
 # Toasts de WinRT con tag y clic (#21); la misma versión que ya traen Tauri y wry.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
+# La clave Run de HKCU para `startAtLogin` (#20); la misma versión que ya está en el lockfile.
+winreg = "0.56"
 
 [profile.release]
 codegen-units = 1

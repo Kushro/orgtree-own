@@ -394,6 +394,182 @@ jobs:
           if ($failures) { throw ($failures -join '; ') }
           Write-Host "Cookie auth, bridge, home, live desk, popouts, engine recovery, native window and integrations verified in WebView2"
 
+      # #20: una ventana por organización. La app arranca dos veces sobre la misma raíz y
+      # el mismo perfil descartables. La primera recorre Homepage, creación (con la
+      # confirmación de cambios sin guardar, que este paso responde "Cancel" = seguir
+      # editando), dos y tres orgs en ventanas propias, reabrir que enfoca, el clic de una
+      # notificación, preferencias y el registro de inicio, y sale. Entre las dos se agrega a
+      # la sesión una org que no existe, guardada fuera de la pantalla. La segunda verifica
+      # que las ventanas vuelvan en sus posiciones y que esa org abra como ventana de error.
+      - name: Windows per organization (two orgs, refocus, creation, preferences, restore, error window)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-windows
+          ORGTREE_TAURI_PROFILE: ${{ runner.temp }}\orgtree-tauri-windows-profile
+          ORGTREE_TAURI_WINDOWS_PROBE: ${{ runner.temp }}\orgtree-tauri-windows.json
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          $out = $env:ORGTREE_TAURI_WINDOWS_PROBE
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $runName = 'com.kushro.orgtree.tauri-spike'
+          Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Dlg {
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+            [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+          }
+          '@
+          Write-Host "Primary screen: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds) work area $([System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea)"
+          # Arranca la app y atiende sus pedidos hasta que sale sola: capturas por marcador
+          # (<salida>.<nombre>) y la confirmación de descarte, que se responde "Cancel".
+          function Run-App($run) {
+            $env:ORGTREE_TAURI_WINDOWS_RUN = "$run"
+            Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Remove-Item -Force
+            $p = Start-Process -FilePath $exe.FullName -PassThru
+            $deadline = (Get-Date).AddSeconds(480)
+            $dialogs = 0
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+              foreach ($name in 'create-window', 'two-orgs', 'refocus', 'click-reopened', 'restored', 'error-window') {
+                if (Test-Path "$out.$name") { Start-Sleep -Milliseconds 400; try { Save-Screen "windows-$name" } catch { Write-Host "screenshot: $_" }; Remove-Item "$out.$name" -Force }
+              }
+              if (Test-Path "$out.dialog-shown") {
+                Start-Sleep -Milliseconds 1200
+                $dlg = [Dlg]::FindWindow('#32770', 'Orgtree')
+                if ($dlg -ne [IntPtr]::Zero) {
+                  try { Save-Screen "windows-confirm-dialog" } catch { Write-Host "screenshot: $_" }
+                  # WM_COMMAND IDCANCEL: "Cancel" = seguir editando.
+                  [void][Dlg]::PostMessage($dlg, 0x111, [IntPtr]2, [IntPtr]::Zero)
+                  $dialogs++
+                  Remove-Item "$out.dialog-shown" -Force
+                }
+              }
+              Start-Sleep -Milliseconds 300; $p.Refresh()
+            }
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $script:failures += "run ${run}: the app did not finish and quit within 480 s" }
+            else { Write-Host "Run $run exited with $($p.ExitCode); confirmation dialogs answered: $dialogs" }
+            # El motor del fixture muere con la app (guardián); se espera que suelte la raíz.
+            Start-Sleep -Seconds 3
+            if (-not (Test-Path $out)) { $script:failures += "run ${run}: no report"; return $null }
+            $raw = Get-Content $out -Raw
+            Copy-Item $out "$out.run$run.json" -Force
+            "### Windows per organization, run $run`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            return ($raw | ConvertFrom-Json)
+          }
+          $failures = @()
+          $profileDir = $env:ORGTREE_TAURI_PROFILE
+          # ---------------------------------------------------------------- primera ejecución
+          $r1 = Run-App 1
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          if ($r1) {
+            $h = $r1.home
+            & $check ($h.bridge -eq $true -and $h.requestOrg -eq 'function') "home: bridge $($h.bridge), requestOrg $($h.requestOrg)"
+            & $check ($h.identity.sync.windowId -eq 'win-1' -and $h.identity.sync.kind -eq 'homepage' -and $h.identity.live.notificationOwner -eq $true) "home identity: $($h.identity | ConvertTo-Json -Compress)"
+            & $check ($h.listed -eq $true -and $h.homepage -eq $true) "the Homepage did not list spike-fixture: $($h | ConvertTo-Json -Compress)"
+            & $check ($h.createTercera -eq 200) "creating tercera through the API: $($h.createTercera)"
+            $cs = $r1.createSwitch
+            & $check ($cs.form -eq $true -and $cs.during.live.kind -eq 'create' -and $cs.back -eq $true -and $cs.after.live.kind -eq 'homepage' -and $cs.after.live.windowId -eq 'win-1') "Homepage -> creation -> Cancel: $($cs | ConvertTo-Json -Compress)"
+            $bh = $r1.bindHome
+            & $check ($bh.path -eq '/o/spike-fixture' -and $bh.agentShown -eq $true -and $bh.identity.live.kind -eq 'org' -and $bh.identity.live.org -eq 'spike-fixture' -and $bh.identity.live.windowId -eq 'win-1') "the Homepage did not bind itself to spike-fixture: $($bh | ConvertTo-Json -Compress)"
+            $oc = $r1.openCreate.created
+            & $check ($oc.kind -eq 'create' -and $oc.windowId -and $oc.windowId -ne 'win-1') "openCreateOrgWindow from an org window: $($r1.openCreate | ConvertTo-Json -Compress)"
+            & $check ($r1.createType.value -eq 'segunda' -and $r1.createType.identity.live.kind -eq 'create') "creation form: $($r1.createType | ConvertTo-Json -Compress)"
+            $cf = $r1.confirm
+            $answers = @($cf.dialog | Where-Object { $_.phase -eq 'answered' })
+            & $check ($cf.answered -eq $true -and $answers.Count -ge 1 -and $answers[0].discard -eq $false -and $cf.stillOpen -eq $true) "unsaved creation close confirmation: $($cf | ConvertTo-Json -Compress -Depth 5)"
+            & $check (@($cf.unsaved | Where-Object { $_.dirty -eq $true }).Count -ge 1) "the renderer never reported unsaved creation input: $($cf.unsaved | ConvertTo-Json -Compress)"
+            $sb = $r1.createSubmit
+            & $check ($sb.kept -eq 'segunda' -and $sb.path -eq '/o/segunda' -and $sb.identity.live.kind -eq 'org' -and $sb.identity.live.org -eq 'segunda' -and $sb.identity.live.windowId -eq $oc.windowId -and $sb.titleShown -eq $true) "creating segunda from the creation window: $($sb | ConvertTo-Json -Compress)"
+            $rt = $r1.requestTercera
+            & $check ($rt.outcome.action -eq 'opened' -and $rt.outcome.org -eq 'tercera' -and $rt.identity.live.org -eq 'spike-fixture') "requestOrg(tercera) from spike-fixture: $($rt | ConvertTo-Json -Compress)"
+            $dt = $r1.describeTercera
+            & $check ($dt.path -eq '/o/tercera' -and $dt.identity.live.kind -eq 'org' -and $dt.identity.live.org -eq 'tercera' -and $dt.identity.live.notificationOwner -eq $false) "the tercera window: $($dt | ConvertTo-Json -Compress)"
+            $orgs = @($r1.placed.windows | ForEach-Object { $_.identity.org })
+            & $check (($orgs -join ',') -eq 'spike-fixture,segunda,tercera') "open org windows: $($orgs -join ',')"
+            $rf = $r1.refocus
+            & $check ($rf.step.outcome.action -eq 'focused' -and $rf.step.outcome.windowId -eq 'win-1' -and $rf.windowsAfter -eq $rf.windowsBefore -and $rf.win1Focused -eq $true) "reopening spike-fixture did not focus its window: $($rf | ConvertTo-Json -Compress -Depth 5)"
+            & $check ($r1.ownerSegunda.identity.live.notificationOwner -eq $false -and $null -eq $r1.ownerSegunda.notify -and $r1.ownerWin1.identity.notificationOwner -eq $true) "notification owner: $($r1.ownerSegunda | ConvertTo-Json -Compress) / $($r1.ownerWin1 | ConvertTo-Json -Compress)"
+            $co = $r1.clickOpen
+            & $check (@($co.page.clicks).Count -eq 1 -and $co.page.clicks[0].id -eq 'wprobe-click-1' -and $co.focused -eq $true) "notification click to the segunda window: $($co | ConvertTo-Json -Compress -Depth 5)"
+            $cc = $r1.clickClosed
+            $held = @($cc.held | Where-Object { $_.window -eq $cc.window -and @($_.delivered) -contains 'notification-click' })
+            & $check ($cc.closed -eq $true -and @($cc.openOrgsAfterClose) -notcontains 'tercera' -and $cc.reopened -eq $true -and $held.Count -ge 1) "notification click for a closed org window: $($cc | ConvertTo-Json -Compress -Depth 5)"
+            $pf = $r1.prefs
+            & $check ($pf.get.startAtLogin -eq $true -and $pf.get.visualTheme -eq 'codex' -and $pf.get.visualThemeExplicit -eq $true -and $pf.get.notifyAllMail -eq $true) "preferences after setPreferences: $($pf.get | ConvertTo-Json -Compress)"
+            & $check ($pf.badTheme -like '*Unknown visual theme*' -and $pf.badKey -like '*Invalid preference*' -and $pf.badType -like '*Invalid preference*') "invalid preferences were not refused: $($pf | ConvertTo-Json -Compress)"
+            & $check ($r1.effectiveTheme -eq 'codex') "setEffectiveTheme: $($r1.effectiveTheme)"
+            & $check ($r1.files.autostart -like "*orgtree-tauri.exe*--background") "Run value reported by the shell: $($r1.files.autostart)"
+            & $check ($r1.done -eq $true) 'run 1 did not finish its steps'
+          }
+          # Lo que quedó en disco al salir: preferencias, sesión y el registro de inicio.
+          $prefsFile = Join-Path $profileDir 'preferences.json'
+          $placementFile = Join-Path $profileDir 'window-placement.json'
+          $prefs = if (Test-Path $prefsFile) { Get-Content $prefsFile -Raw | ConvertFrom-Json } else { $null }
+          & $check ($prefs -and $prefs.startAtLogin -eq $true -and $prefs.visualTheme -eq 'codex') "preferences.json after run 1: $($prefs | ConvertTo-Json -Compress)"
+          $run = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+          Write-Host "HKCU Run after run 1: $run"
+          & $check ($run -like "*$($exe.Name)*--background") "HKCU Run value after enabling startAtLogin: $run"
+          $layout = if (Test-Path $placementFile) { Get-Content $placementFile -Raw | ConvertFrom-Json } else { $null }
+          Write-Host "window-placement.json after run 1: $($layout | ConvertTo-Json -Compress -Depth 6)"
+          & $check ($layout -and (@($layout.session) -join ',') -eq 'org:spike-fixture,org:segunda,org:tercera') "saved session: $(@($layout.session) -join ',')"
+          # Una ventana guardada de una org que ya no existe, en un monitor que ya no está.
+          if ($layout) {
+            $layout.geometry = @($layout.geometry) + [pscustomobject]@{ key = 'org:ya-no-existe'; placement = [pscustomobject]@{ bounds = [pscustomobject]@{ x = 40000; y = 30000; width = 800; height = 600 }; maximized = $false } }
+            $layout.session = @($layout.session) + 'org:ya-no-existe'
+            $layout | ConvertTo-Json -Depth 8 | Set-Content -Path $placementFile -Encoding utf8
+          }
+          # ---------------------------------------------------------------- segunda ejecución
+          $r2 = Run-App 2
+          if ($r2) {
+            $rs = $r2.restored
+            $wins = @($rs.shell.windows)
+            & $check ($rs.ready -eq $true -and $wins.Count -eq 4) "restored windows: $($wins.Count) ($($rs | ConvertTo-Json -Compress -Depth 6))"
+            $byOrg = @{}; foreach ($w in $wins) { $byOrg[$w.identity.org] = $w }
+            $before = @{}; foreach ($w in @($r1.final.windows)) { $before[$w.identity.org] = $w }
+            foreach ($org in 'spike-fixture', 'segunda', 'tercera') {
+              $a = $before[$org]; $b = $byOrg[$org]
+              if (-not $a -or -not $b) { $failures += "no window for $org before ($([bool]$a)) or after ($([bool]$b)) the restart"; continue }
+              $same = [math]::Abs($a.x - $b.x) -le 2 -and [math]::Abs($a.y - $b.y) -le 2 -and [math]::Abs($a.width - $b.width) -le 2 -and [math]::Abs($a.height - $b.height) -le 2
+              & $check $same "$org was not restored in place: before $($a.x),$($a.y) $($a.width)x$($a.height), after $($b.x),$($b.y) $($b.width)x$($b.height)"
+              & $check ($b.visible -eq $true) "$org restored hidden"
+            }
+            "- restored: $(($wins | ForEach-Object { "$($_.identity.org) at $($_.x),$($_.y) $($_.width)x$($_.height)" }) -join '; ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            $lost = $byOrg['ya-no-existe']
+            $areas = @($rs.shell.areas)
+            $inside = $lost -and @($areas | Where-Object { $lost.x -ge $_.x -and $lost.y -ge $_.y -and ($lost.x + $lost.width) -le ($_.x + $_.width) -and ($lost.y + $lost.height) -le ($_.y + $_.height) }).Count -ge 1
+            & $check $inside "the window saved off-screen was not brought back: $($lost | ConvertTo-Json -Compress) in $($areas | ConvertTo-Json -Compress)"
+            $pages = $r2.pages
+            $errorPage = $pages.($lost.id)
+            & $check ($errorPage.path -eq '/o/ya-no-existe' -and $errorPage.identity.live.org -eq 'ya-no-existe' -and -not $errorPage.title -and $errorPage.error) "the window of a deleted org is not an error window: $($errorPage | ConvertTo-Json -Compress)"
+            $fixturePage = $pages.($byOrg['spike-fixture'].id)
+            & $check ($fixturePage.agentShown -eq $true -and $fixturePage.theme -eq 'codex' -and $fixturePage.identity.sync.org -eq 'spike-fixture') "restored spike-fixture window: $($fixturePage | ConvertTo-Json -Compress)"
+            & $check ($pages.($byOrg['segunda'].id).title -like '*segunda*') "restored segunda window: $($pages.($byOrg['segunda'].id) | ConvertTo-Json -Compress)"
+            $pb = $r2.prefsBefore.get
+            & $check ($pb.startAtLogin -eq $true -and $pb.visualTheme -eq 'codex' -and $pb.notifyAllMail -eq $true -and $pb.startupMode -eq 'restore') "preferences after the restart: $($pb | ConvertTo-Json -Compress)"
+            & $check ($r2.prefsOff.get.startAtLogin -eq $false -and $null -eq $r2.files.autostart) "turning startAtLogin off: $($r2.prefsOff.get.startAtLogin), Run $($r2.files.autostart)"
+            & $check ($r2.done -eq $true) 'run 2 did not finish its steps'
+          }
+          $run = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+          & $check (-not $run) "HKCU Run value left after disabling startAtLogin: $run"
+          Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Windows per organization verified: Homepage, creation, two orgs, refocus, notification routing, preferences, restore and error window'
+
       # #18: el instalador en una carpeta descartable, arrancado desde ahí con su
       # motor empaquetado (sin ORGTREE_TAURI_PYTHON) sobre una raíz descartable.
       #

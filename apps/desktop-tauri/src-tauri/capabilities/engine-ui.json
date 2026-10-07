@@ -1,9 +1,9 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "engine-ui",
-  "description": "The engine UI window (main) at http://127.0.0.1. It renders agent-written HTML and Markdown, so it gets only the orgtreeDesktop bridge commands: no core plugins, shell, fs or process. Each command also checks the exact engine origin in Rust.",
+  "description": "The engine UI windows (win-*: the Homepage, creation and one per organization) at http://127.0.0.1. It renders agent-written HTML and Markdown, so it gets only the orgtreeDesktop bridge commands: no core plugins, shell, fs or process. Each command also checks the exact engine origin in Rust.",
   "windows": [
-    "main"
+    "win-*"
   ],
   "remote": {
     "urls": [
@@ -32,6 +32,16 @@
     "allow-desktop-provider-login-start",
     "allow-desktop-provider-login-status",
     "allow-desktop-provider-login-code",
-    "allow-desktop-provider-login-cancel"
+    "allow-desktop-provider-login-cancel",
+    "allow-desktop-set-effective-theme",
+    "allow-desktop-window-identity",
+    "allow-desktop-open-homepage-window",
+    "allow-desktop-open-create-window",
+    "allow-desktop-cancel-creation",
+    "allow-desktop-request-org",
+    "allow-desktop-bind-created-org",
+    "allow-desktop-set-unsaved-creation",
+    "allow-desktop-open-orgs",
+    "allow-desktop-take-pending-events"
   ]
 }
