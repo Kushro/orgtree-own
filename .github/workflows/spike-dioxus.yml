@@ -395,10 +395,19 @@ jobs:
             Write-Host "store-backend.json: $($record | ConvertTo-Json -Compress)"
             if ($record.backend -ne 'postgres') { $failures += "store-backend.json chose $($record.backend)" }
           } else { $failures += "no store-backend.json in $data" }
-          foreach ($path in "$data\pg\cluster\PG_VERSION", "$data\orgtree-product-root.json", "$data\engine-port.json") {
+          foreach ($path in "$data\pg\cluster\data\PG_VERSION", "$data\pg\cluster\instance.json", "$data\orgtree-product-root.json", "$data\engine-port.json") {
             if (-not (Test-Path $path)) { $failures += "missing $path" }
           }
-          if (Test-Path "$data\pg\cluster\PG_VERSION") { Write-Host "PostgreSQL cluster version: $(Get-Content "$data\pg\cluster\PG_VERSION")" }
+          $pgVersion = if (Test-Path "$data\pg\cluster\data\PG_VERSION") { (Get-Content "$data\pg\cluster\data\PG_VERSION").Trim() } else { $null }
+          Write-Host "PostgreSQL cluster version: $pgVersion"
+          # El servidor del clúster propio arrancó y se apagó con la app.
+          $pgLog = "$data\pg\cluster\log\postgres.log"
+          if (Test-Path $pgLog) {
+            Write-Host "===== postgres.log"; Get-Content $pgLog | Where-Object { $_ -notmatch 'skipping missing configuration file' } | Write-Host
+            $pgText = Get-Content $pgLog -Raw
+            if ($pgText -notmatch 'database system is ready to accept connections') { $failures += 'the bundled PostgreSQL never accepted connections' }
+            if ($pgText -notmatch 'database system is shut down') { $failures += 'the bundled PostgreSQL did not shut down with the app' }
+          } else { $failures += "missing $pgLog" }
           # El descriptor engine-paths.json, en la carpeta propia de la app.
           $paths = Join-Path $userVars.LOCALAPPDATA 'com.kushro.orgtree.dioxus-spike\engine-paths.json'
           if (Test-Path $paths) {
@@ -416,12 +425,12 @@ jobs:
           Start-Sleep -Seconds 3
           $left = @(Get-Process postgres, python, pg-custodian -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$target*" })
           if ($left) { $failures += "processes left from the installed app: $(($left | ForEach-Object { "$($_.Name) $($_.Id)" }) -join ', ')" }
-          "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start (PostgreSQL init) to exit: $seconds s`n- run as the standard local user $user" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start (PostgreSQL $pgVersion init) to exit: $seconds s`n- run as the standard local user $user" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           if ($failures) {
             Write-Host "===== files under $data"
             Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\pg\\cluster\\data\\' } | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
             # Nunca los secretos del clúster (contraseñas de sus roles).
-            foreach ($log in Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt', '.jsonl', '.json' -and $_.FullName -notmatch '\\secrets\\' } | Select-Object -First 25) {
+            foreach ($log in Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt', '.jsonl', '.json' -and $_.FullName -notmatch '\\secrets\\' -and $_.Length -lt 65536 } | Select-Object -First 25) {
               Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
             }
             # La app descarta stdout y stderr del motor (pueden traer secretos). Para
