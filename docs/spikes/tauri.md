@@ -39,6 +39,26 @@ npx tauri dev     # ventana de desarrollo
 npx tauri build   # instalador NSIS en src-tauri/target/release/bundle/nsis/
 ```
 
+### Motor Python (#2)
+
+La app lanza `engine/launch.py` al abrir y lo apaga al salir. El supervisor vive en el crate `apps/desktop-tauri/engine-host`, sin dependencia de Tauri, para poder probarlo solo y reutilizarlo en el spike de Dioxus. Como el empaquetado del runtime queda fuera del spike, el intérprete se indica por entorno:
+
+| Variable | Qué es | Por defecto |
+|---|---|---|
+| `ORGTREE_TAURI_PYTHON` | Python absoluto con `tools/runtime-requirements.in` instalado | obligatoria |
+| `ORGTREE_TAURI_ENGINE_DIR` | Carpeta con `launch.py` | `engine/` del checkout donde se compiló |
+| `ORGTREE_TAURI_DATA` | Raíz de datos | `%LOCALAPPDATA%\com.kushro.orgtree.tauri-spike\data` |
+
+Nunca apuntar `ORGTREE_TAURI_DATA` a la raíz real de Orgtree (`%APPDATA%\Orgtree v2\data`).
+
+```powershell
+python -m pip install -r tools/runtime-requirements.in
+$env:ORGTREE_TAURI_PYTHON = (Get-Command python).Source
+cd apps/desktop-tauri/engine-host
+$env:ORGTREE_TEST_ENGINE_PYTHON = $env:ORGTREE_TAURI_PYTHON
+cargo test -- --include-ignored   # motor falso y motor real
+```
+
 El workflow `.github/workflows/spike-tauri.yml` hace lo mismo en `windows-latest` en cada push a `spike/tauri`: compila, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-tauri-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.tauri-spike`), así que no pisa una instalación de Orgtree existente.
