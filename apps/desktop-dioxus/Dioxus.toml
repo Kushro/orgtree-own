@@ -7,3 +7,8 @@ identifier = "com.kushro.orgtree.dioxus-spike"
 publisher = "Kushro"
 icon = ["icons/icon.ico"]
 short_description = "Orgtree desktop app on Dioxus (migration spike)"
+
+[bundle.windows]
+# dx embebe por defecto el instalador offline de WebView2 (~180 MB). Tauri usa
+# el bootstrapper que lo descarga solo si falta; igualamos para comparar tamaños.
+webview_install_mode = { DownloadBootstrapper = { silent = true } }
