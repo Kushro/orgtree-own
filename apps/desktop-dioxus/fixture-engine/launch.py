@@ -60,7 +60,8 @@ def _records(sid: str) -> list[dict]:
                       "content": "# Orgtree\nUna app de escritorio para equipos de agentes."}]})
     answer = rec("assistant", result["uuid"], "2026-10-07T10:00:06Z",
                  {"id": "msg_fixture_2", "role": "assistant", "content": [
-                     {"type": "text", "text": "Orgtree organiza agentes de código en un organigrama."}]})
+                     {"type": "text", "text": "Orgtree organiza agentes de código en un **organigrama**.\n\n"
+                      "- desk en vivo\n- `README.md` leído\n\n<img src=x onerror=\"document.title='inyectado'\">"}]})
     records = [ask, tool, result, answer]
     # Conversación larga para medir el scroll del desk (#5): N pares extra.
     extra = int(os.environ.get("ORGTREE_FIXTURE_MESSAGES", "0") or 0)

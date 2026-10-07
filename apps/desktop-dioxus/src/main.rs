@@ -1,6 +1,7 @@
 // Release builds run without a console window on Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desk;
 mod home;
 mod icons;
 mod org;
@@ -148,7 +149,7 @@ fn App() -> Element {
         Some(_) => match route() {
             Route::Home => rsx! { home::Home {} },
             Route::Org(slug) => rsx! { org::OrgView { slug } },
-            Route::Desk { org, node } => rsx! { org::DeskView { org, node } },
+            Route::Desk { org, node } => rsx! { desk::DeskView { org, node } },
         },
     };
     rsx! {

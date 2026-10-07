@@ -57,18 +57,3 @@ fn agents(payload: &TreePayload, slug: &str, mut route: Signal<Route>) -> Elemen
         }
     }
 }
-
-/// El desk del agente: llega completo en #12.
-#[component]
-pub fn DeskView(org: String, node: String) -> Element {
-    let mut route = use_context::<Signal<Route>>();
-    rsx! {
-        div { class: "dx-org-view",
-            header {
-                button { class: "home", onclick: { let org = org.clone(); move |_| route.set(Route::Org(org.clone())) }, "← {org}" }
-                h2 { "{node}" }
-            }
-            p { class: "dim", "El desk llega en #12." }
-        }
-    }
-}

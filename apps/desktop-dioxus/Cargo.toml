@@ -18,6 +18,8 @@ futures-util = "0.3"
 orgtree-engine-host = { path = "engine-host" }
 orgtree-engine-client = { path = "engine-client" }
 serde_json = "1"
+ammonia = "4"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 tokio = { version = "1", features = ["time"] }
 
 [profile.release]

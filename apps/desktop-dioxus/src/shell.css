@@ -9,3 +9,14 @@
   background: var(--panel, #252525); cursor: pointer; }
 .dx-agent .dx-agent-title { font-weight: 600; }
 .dx-agent .dx-agent-meta { font-size: 11px; }
+
+/* Desk (#12): la ventana entera, con la lista como único scroll. */
+.dx-desk { height: 100vh; display: flex; flex-direction: column; padding: 0 16px; box-sizing: border-box; }
+.dx-desk header { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+.dx-desk header h2 { margin: 0; }
+.dx-desk .msgs-wrap { flex: 1; min-height: 0; display: flex; }
+.dx-desk .msgs { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; }
+/* Lista larga: el webview no pinta ni maqueta las filas fuera de la vista. */
+.dx-desk .msgs > .msg { content-visibility: auto; contain-intrinsic-size: auto 48px; flex-shrink: 0; }
+.dx-desk .dx-earlier { text-align: center; padding: 6px; }
+.dx-desk .tooldot { margin-right: 2px; }
