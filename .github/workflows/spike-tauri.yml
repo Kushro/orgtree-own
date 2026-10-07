@@ -213,13 +213,14 @@ jobs:
           }
           '@
           $hwnd = [IntPtr][long]$sn.hwnd
-          # tao deja WS_CAPTION (snap, animaciones) y quita el área no cliente: sin marco,
-          # el área cliente ocupa la ventana entera.
+          # tao deja WS_CAPTION (snap, animaciones) y quita la barra de título. Queda el borde
+          # de redimensionado invisible de Windows (8 px por lado, dentro del rectángulo de la
+          # ventana); una barra de título real suma unos 30 px de alto.
           $wr = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$wr)
           $cr = New-Object Win+RECT; [void][Win]::GetClientRect($hwnd, [ref]$cr)
           $frame = "window $($wr.R - $wr.L)x$($wr.B - $wr.T), client $($cr.R)x$($cr.B)"
           Write-Host "Frame: $frame"
-          if (($wr.R - $wr.L) - $cr.R -gt 2 -or ($wr.B - $wr.T) - $cr.B -gt 2) { $failures += "main window has a native frame: $frame" }
+          if ((($wr.B - $wr.T) - $cr.B) -ge 20) { $failures += "main window has a native title bar: $frame" }
           # Segunda ejecución: tiene que terminar sola y enfocar la ventana existente.
           $second = Start-Process -FilePath $exe.FullName -ArgumentList '--second' -PassThru
           if (-not $second.WaitForExit(20000)) { $second.Kill(); $failures += 'the second instance did not exit' }

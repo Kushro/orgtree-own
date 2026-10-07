@@ -178,7 +178,7 @@ La app se instala por usuario con su propio identificador (`com.kushro.orgtree.t
 - El renderer ya dibuja sus botones (`WindowControls`), que llegan por el shim (`minimizeWindow`, `toggleMaximizeWindow`, `closeWindow`, `getWindowControlsState`).
 - El shell manda eventos `window-state` al cambiar el tamaño o el foco, para que el ícono de maximizar y restaurar siga el estado real.
 - El arrastre usa el `-webkit-app-region` del CSS del renderer **sin cambios**. WebView2 lo respeta porque wry activa `IsNonClientRegionSupportEnabled`, así que no hizo falta `data-tauri-drag-region` ni `startDragging`.
-- tao deja `WS_CAPTION` en la ventana sin marco (para el snap y las animaciones de Windows) y quita el área no cliente. Por eso la prueba compara el área cliente con la ventana, en lugar de mirar el estilo.
+- tao deja `WS_CAPTION` en la ventana sin marco (para el snap y las animaciones de Windows) y quita la barra de título. Queda el borde de redimensionado invisible de Windows, 8 px por lado, dentro del rectángulo de la ventana (1044x788 contra 1028x779 de área cliente). Por eso la prueba busca una barra de título real, de unos 30 px, en lugar de mirar el estilo.
 
 **Bandeja.** Feature `tray-icon`, con el menú Abrir Orgtree / Salir. Un clic en el ícono abre la ventana.
 
