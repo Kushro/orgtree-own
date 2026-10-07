@@ -15,6 +15,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 | 5 | #12 Desk de agente en vivo en RSX | **Riesgo principal**: costo de reescribir la pieza más pesada |
 | 6 | #13 Multi-ventana nativa | Ventanas separadas con estado compartido |
 | 7 | #14 Ventana sin marco, bandeja y notificación | Integración nativa básica |
+| 8 | #24 Instalador autónomo con motor, runtime y PostgreSQL | Instalar y usar sin preparar nada |
 
 ## Decisiones de diseño ya tomadas
 
@@ -24,7 +25,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 
 ## Fuera del alcance
 
-Canvas del organigrama, docket, mail y demás vistas; tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, empaquetado del runtime de Python y PostgreSQL, updater.
+Canvas del organigrama, docket, mail y demás vistas; tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, updater. El empaquetado del runtime de Python y PostgreSQL entró con #24.
 
 ## Cómo compilar
 
@@ -45,7 +46,7 @@ La app lanza `engine/launch.py` al abrir y lo apaga al salir (`Event::LoopDestro
 
 | Variable | Qué es | Por defecto |
 |---|---|---|
-| `ORGTREE_DIOXUS_PYTHON` | Python absoluto con `tools/runtime-requirements.in` instalado | obligatoria |
+| `ORGTREE_DIOXUS_PYTHON` | Python absoluto con `tools/runtime-requirements.in` instalado (modo de desarrollo) | sin ella, el motor instalado (#24) |
 | `ORGTREE_DIOXUS_ENGINE_DIR` | Carpeta con `launch.py` | `engine/` del checkout donde se compiló |
 | `ORGTREE_DIOXUS_DATA` | Raíz de datos | `%LOCALAPPDATA%\com.kushro.orgtree.dioxus-spike\data` |
 
@@ -181,7 +182,67 @@ El CI sube la captura `popout` con las dos ventanas.
 
 Escalado a 125 % y 150 %: el runner de CI corre al 100 % y no se puede cambiar sin cerrar la sesión. Lo prueba una persona en Windows, con las métricas de tamaño, RAM y arranque.
 
-El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
+### Instalador autónomo (#24)
+
+El instalador NSIS trae todo lo que el motor necesita, como el de Electron: se instala y se usa sin preparar nada. La app instalada no necesita `ORGTREE_DIOXUS_PYTHON`.
+
+**Qué lleva.** Lo mismo que `build.extraResources` de `package.json`, menos el renderer React, que la UI en RSX no usa. Va en `<instalación>\resources`, con la misma disposición que `resources` en Electron:
+
+- `engine/` con el submódulo `engine/mailhub` (el CI hace checkout con `submodules: true`);
+- el runtime de Python 3.13 embebido con sus dependencias en `engine/runtime` (`tools/provision-runtime.py`);
+- PostgreSQL 18.6 (`bin`, `lib` y `share`) en `engine/postgresql` y `engine/pg-custodian.exe` (`tools/provision-postgres.py`; el ZIP de ~380 MB queda en caché de `actions/cache` por el pin);
+- `tools/pypg/pgimport.py` y `cutover_verify.py`, que la conversión de la primera ejecución busca junto a `engine/`;
+- `build-info.json` con el commit, para que el motor sepa qué artefacto corre.
+
+`installer/stage_resources.py` arma todo eso en `target/bundle-resources`. Deja afuera `__pycache__`, `*.pyc`, `native/**/target` y los archivos de desarrollo: `engine/docs` y las fuentes de `engine/native`, salvo `prototype-guard/live-locations.json`, que `pg_process.py` lee al correr. Antes de compilar, el CI verifica lo armado con `assertRuntimeLayout` y `assertPostgresRuntime`, las mismas funciones que usa `tools/package-preflight.mjs`.
+
+**Cómo entra en el instalador.** `[bundle] resources` de dx 0.7.10 no sirve para un árbol: `copy_resources` copia cada entrada con `fs::copy` como un archivo suelto en la raíz, sin carpetas ni comodines. Por eso `Dioxus.toml` usa dos ajustes de NSIS:
+
+- `template = "installer/template.nsi"`: la plantilla de dx con dos cambios, LZMA sólido (dx usa zlib) y la inclusión de los recursos dentro de la sección `Install`;
+- `installer_hooks = "installer/resources.nsh"`: un `File /r` de `target/bundle-resources` a `$INSTDIR\resources`.
+
+**Modo instalado.** Sin `ORGTREE_DIOXUS_PYTHON`, la app busca `resources\engine\launch.py` junto al ejecutable. Si está, lanza el motor como `apps/desktop/main/index.ts` y `engine.ts` cuando `app.isPackaged`. `EngineOptions::packaged` en `engine-host` verifica cada archivo y arma las opciones:
+
+- el Python es `resources\engine\runtime\python.exe`;
+- pasa `ORGTREE_PG_CUSTODIAN` y `ORGTREE_P03_PG_BIN` con los mismos archivos que revisa `postgres-runtime.ts`, y `ORGTREE_PG_BOOTSTRAP=1`, así que una raíz nueva nace en PostgreSQL;
+- escribe el descriptor `engine-paths.json` (`write_engine_paths`, esquema `orgtree.engine-paths/v1`) en la carpeta propia de la app, `%LOCALAPPDATA%\com.kushro.orgtree.dioxus-spike`;
+- no le pasa al motor las variables de conexión de libpq (`PGPASSWORD`, `PGUSER`…). libpq prefiere `PGPASSWORD` al passfile del custodio, y el clúster propio rechaza la conexión. Electron las hereda, así que fallaría igual en una máquina que las tenga definidas.
+
+**Raíz de datos.** Por defecto es `%LOCALAPPDATA%\com.kushro.orgtree.dioxus-spike\data`. `ORGTREE_DIOXUS_DATA` la cambia. `engine-host` se niega a usar una raíz que esté dentro de `%APPDATA%\Orgtree v2` o de `~/orgtree`, o que las contenga (`forbidden_roots`, como `validateDataRoot` en Electron). La tarjeta de inicio y la pantalla de arranque muestran la raíz en uso y si la app es la instalada o la de desarrollo.
+
+**Verificado en el CI** (paso "Install the NSIS installer and start the installed app"):
+
+- instala el NSIS generado en silencio (`/S /D=<RUNNER_TEMP>\orgtree-dioxus-installed`) y revisa lo instalado: el runtime tiene el mismo digest que lo armado, PostgreSQL coincide con su manifiesto y el renderer React no está;
+- arranca el exe instalado con una raíz descartable y sin `ORGTREE_DIOXUS_PYTHON`, con `ORGTREE_DIOXUS_PROBE_MODE=installed`;
+- la UI RSX carga con el CSS del renderer y sin puente, la lista de orgs llega vacía del motor, y la tarjeta muestra la raíz y "app instalada";
+- el motor ligó la raíz a PostgreSQL (`store-backend.json` con `fresh-bootstrap`, `orgtree-product-root.json`), creó el clúster (`pg\cluster\data\PG_VERSION` = 18) y `postgres.log` muestra que aceptó conexiones;
+- `engine-paths.json` apunta al runtime, el custodio, PostgreSQL y la raíz instalados;
+- al salir, la app termina sola, PostgreSQL se apaga (`postgres.log`) y no queda ningún proceso de la instalación.
+
+Capturas: `installed-splash` (arranque, con la raíz) e `installed` (inicio de la app instalada).
+
+**Bloqueo del runner y cómo se rodeó.** La cuenta de los runners de Windows de GitHub (`runneradmin`) es el Administrador integrado (RID 500). Windows escribe su SID como el alias `LA` en SDDL, y `parse_sddl` de `prototype-guard`, que usa pg-custodian, solo reconoce `SY` y `BA`. Entonces rechaza la carpeta de secretos del clúster recién creada (`acl.not_owner_only`). Además el runner corre elevado, y PostgreSQL no corre con un token de administrador. El CI no cambia el producto:
+
+- crea un usuario local estándar, le da la instalación (como una instalación por usuario) y una carpeta descartable;
+- arranca la app como ese usuario, con su perfil y su `LOCALAPPDATA` (`ProcessStartInfo` con credenciales).
+
+Así corre como una persona real, sin elevación. Quien use Orgtree con la cuenta Administrador integrada tendría el mismo problema con el instalador de Electron: queda anotado para el motor (`engine/native/prototype-guard/src/acl.rs`).
+
+**Pre-release.** `workflow_dispatch` con `prerelease: true` agrega el job `prerelease`: baja el instalador del run y lo publica con `gh release create --prerelease` como `dioxus-preview-<run_number>`, sobre el sha del run, con notas en español (qué incluye, la raíz de datos propia, que no es un release oficial). Usa `permissions: contents: write` y el `GITHUB_TOKEN`. Un push nunca publica nada.
+
+**Tamaños** (run [37581043040](https://github.com/Kushro/orgtree-own/actions/runs/37581043040)):
+
+| | Tamaño |
+|---|---|
+| Instalador NSIS | 51,3 MB |
+| `orgtree-dioxus.exe` | 4,8 MB |
+| Instalado (app más recursos) | 219,3 MB |
+| `resources\engine\runtime` sin comprimir | 62,8 MB |
+| `resources\engine\postgresql` sin comprimir | 141,3 MB |
+
+`makensis` con LZMA sólido tarda unos 90 s en el runner. El primer arranque, con `initdb`, el clúster, las migraciones y el hub de mail, tarda unos 14 s hasta la UI; con la pausa de la captura, la app sale sola a los 18 s.
+
+El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture, instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
 
