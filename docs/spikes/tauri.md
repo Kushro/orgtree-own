@@ -16,6 +16,7 @@ Se reemplaza solo la capa de escritorio (`apps/desktop/main` y `preload`). El re
 | 6 | #6 Popouts con `window.open` y portales de React | **Riesgo principal** del spike |
 | 7 | #7 Ventana sin marco, bandeja y notificación | Integración nativa básica |
 | 8 | #18 Instalador autónomo con motor, runtime y PostgreSQL | Instalador que se usa sin preparar nada |
+| 9 | #21 Integraciones: harnesses, login de proveedores, notificaciones y archivos | Contratar agentes con el instalador |
 
 ## Decisiones de diseño ya tomadas
 
@@ -123,7 +124,7 @@ El shim (`src-tauri/src/shim.js`) es un `initialization_script` de `main`:
 
 - Expone `window.orgtreeDesktop` con el contrato de `apps/desktop/preload/index.ts` sobre `invoke`.
 - Igual que el preload, solo existe en el frame principal y en el origen exacto del motor: los iframes y los popouts no lo tienen.
-- Los métodos opcionales que el recorte no cubre (`requestOrg`, ventanas múltiples, popouts nativos, login de proveedores) se omiten a propósito. El renderer ya tiene un camino para cuando faltan, el mismo de un navegador: abre la org en la misma ventana.
+- Los métodos opcionales que el recorte no cubre (`requestOrg`, ventanas múltiples, popouts nativos) se omiten a propósito (el login de proveedores llegó en #21). El renderer ya tiene un camino para cuando faltan, el mismo de un navegador: abre la org en la misma ventana.
 - Los obligatorios fuera del recorte rechazan con un error claro.
 
 Seguridad del puente:
@@ -188,8 +189,8 @@ La app se instala por usuario con su propio identificador (`com.kushro.orgtree.t
 
 **Notificación.** `orgtreeDesktop.notify` llama a `desktop_notify` (`tauri-plugin-notification`), con el filtro mínimo de `NotificationGate`: campos obligatorios, `notificationsEnabled` y una sola vez por org + id.
 
-- Quedan fuera del recorte: el filtro por tipo, el filtro con la ventana enfocada, el clic que abre el elemento y `syncNotifications`.
-- Desde `target/release`, el plugin usa el AppUserModelID de PowerShell. La app instalada usa el suyo.
+- El filtro por tipo, el filtro con la ventana enfocada, el clic que abre el elemento y `syncNotifications` llegaron en #21 (más abajo).
+- Desde `target/release`, el toast usa el AppUserModelID de PowerShell. La app instalada usa el suyo.
 
 **Instancia única.** `tauri-plugin-single-instance`: una segunda ejecución termina antes de crear ventanas o lanzar el motor, y la primera muestra y enfoca `main`.
 
@@ -197,7 +198,6 @@ La app se instala por usuario con su propio identificador (`com.kushro.orgtree.t
 
 - `main` no tiene marco y el ícono de la bandeja existe;
 - los botones del renderer se ven, y maximizar y restaurar llegan con sus eventos `window-state` (el ícono cambia a Restore);
-- `notify` devuelve `true` y, la segunda vez, `false`;
 - una segunda ejecución termina sola, y la ventana existente queda enfocada y al frente;
 - el CI arrastra la ventana con el mouse real desde la zona de arrastre del renderer (`.native-header-main`), y la ventana se mueve lo mismo que el mouse (dx 120, dy 60).
 
@@ -253,3 +253,40 @@ Lo implementa el módulo `packaged` de `engine-host`. Un paquete al que le falta
 Números del CI: instalador **50,8 MB** (LZMA), exe **4,4 MB**, unos **227 MB** instalada. De los 222 MB armados, 141 son de PostgreSQL y 63 del runtime de Python. Con una raíz nueva, la primera página está lista en unos **15 s**, incluido `initdb`.
 
 **Pre-release.** Un `workflow_dispatch` con `prerelease: true` agrega el job `prerelease`. Publica el instalador que el job de Windows acaba de probar como pre-release `tauri-preview-<run_number>`, sobre el commit del run, con notas en español. No toca `main` ni los releases normales.
+
+### Integraciones (#21)
+
+Paridad con `harnesses.ts`, `providerlogin.ts`, `notifications.ts` y `taskbar-attention.ts`, para que el instalador sirva para contratar agentes de verdad. Todo vive en el shell (`src-tauri/src/harnesses.rs`, `login.rs`, `notifications.rs`, `files.rs`), detrás de 9 comandos nuevos: cada uno está en el `AppManifest` de `build.rs`, en `capabilities/engine-ui.json`, pasa por `authorize()` y tiene su método en el shim con la firma del contrato.
+
+**Harnesses.** `getHarnesses` busca `claude`, `codex` y `agy` como Electron: en el `PATH` del proceso (con `.exe`, `.cmd` y `.bat`), en `ORGTREE_CODEX` y `ORGTREE_ANTIGRAVITY`, y en la carpeta del instalador de Antigravity. Solo informa presencia: nunca lanza ni instala nada. `openHarnessLink` abre en el navegador del sistema (`ShellExecuteW`) la URL fija del harness; la página solo elige el id, y cualquier otro valor se rechaza. La bandeja suma el submenú "Harness setup" de Electron.
+
+Lo que decide si un proveedor se puede contratar no es `getHarnesses`: el renderer lee `/api/providers` del motor, que hereda el `PATH` del shell. Con el motor del paquete eso ya funcionaba; esta lista la usan la bandeja y el login.
+
+**Login de proveedores.** `startProviderLogin`, `getProviderLoginStatus`, `submitProviderLoginCode` y `cancelProviderLogin`, con el mismo ciclo de estados (`starting`, `awaiting_code`, `done`, `error`). Reglas de seguridad:
+
+- solo se ejecuta el CLI de un harness **detectado por el shell**, con los argumentos fijos de Electron (`claude auth login --claudeai`, `codex login`, y `agy` en una consola visible); el proveedor se valida contra la lista y nada de la página llega a la línea de comandos;
+- `profileDir` solo elige la carpeta de perfil (`CLAUDE_CONFIG_DIR` o `CODEX_HOME`), tiene que ser absoluta, existir y aceptar escritura; `accountId` solo admite letras, números, `-` y `_`;
+- el token del escritorio no llega al hijo: el shell no lo tiene en su entorno (va al motor por `ORGTREE_V2_TOKEN`, solo en su proceso) y además lo quita del entorno del hijo, junto con las variables de la prueba;
+- el código pegado va solo al stdin del hijo, nunca a la salida ni a un registro;
+- cancelar, el tiempo máximo (5 min) y salir de la app matan el árbol entero con `taskkill /T` (un `.cmd` corre bajo `cmd.exe`);
+- un login que termina bien se verifica contra el motor (`/api/providers?force=true&force_provider=…` o la identidad de la cuenta), con el header del token, como Electron.
+
+**Notificaciones.** `notify` aplica el filtro completo de `NativeNotifications`: la validación de campos y tipos, las preferencias por tipo (`packages/contracts/notifications`, ahora en las preferencias del shell), el filtro con una ventana de Orgtree enfocada (`notifyWhileFocused`), el conjunto activo de `syncNotifications` y una sola vez por `org` + `id`. Un tipo que se apaga retira sus toasts.
+
+El plugin de notificaciones no da el clic en escritorio ni deja retirar un toast, así que en Windows el shell arma el toast con WinRT (crate `windows`, la misma versión que ya traen Tauri y wry), con tag y grupo propios. El clic (`Activated`) muestra la ventana y entrega `notification-click`, el evento que el renderer espera para abrir el elemento; el shim lo guarda si llega antes que el primer listener. `syncNotifications` retira con `ToastNotificationHistory` los toasts cuyo elemento ya se resolvió.
+
+**Barra de tareas.** `setPendingAttention(ids, items)` valida la carga como `attentionPayload` y hace parpadear el botón (`request_user_attention`, con `FLASHW_ALL | FLASHW_TIMERNOFG`, hasta que la ventana pasa al frente) solo cuando llega una identidad nueva. Un sondeo con la misma lista no lo reinicia, nunca parpadea la ventana que el usuario está mirando, y la lista vacía lo detiene.
+
+**Archivos.** `revealFile` exige una ruta absoluta, sin `.` ni `..`, sin comillas y que exista, y abre `explorer /select,"<ruta>"`: el Explorador muestra el archivo seleccionado y nunca lo abre ni lo ejecuta (decisión del usuario, 2026-09-13). `openCharterFolder` crea `~/.orgtree/charters` si falta y la abre.
+
+**Verificado en WebView2 y el CI** (paso de smoke test, con el renderer real):
+
+- `getHarnesses` tiene la forma del contrato, y un `codex.cmd` falso en el `PATH` de la app aparece detectado;
+- el login de un proveedor no detectado se niega con `not-installed`, uno inventado se rechaza, y el de `codex` arranca el CLI falso con `login`, no deja arrancar otro, rechaza un código, se cancela y vuelve a `idle`; el CLI falso confirma que no recibió el token ni la variable de la prueba, y no llega a terminar (el árbol murió);
+- el motor de fixture publica avisos sintéticos (`PUT /api/fixture/notices`) y el **renderer real** los convierte en notificaciones: la pregunta se muestra sin foco, el correo de rutina recién cuando se prende "todo el correo" (antes el shell lo filtra como inactivo, porque el renderer solo sincroniza los avisos habilitados), una pregunta con la ventana enfocada recién con `notifyWhileFocused`, y un aviso resuelto retira su toast. Las llamadas directas confirman la deduplicación, el filtro de inactivos y la validación de campos. El shell anota cada decisión y el CI la compara;
+- el parpadeo empieza con la primera llegada (ventana minimizada), no se reinicia con la misma lista y para cuando no queda nada, según el registro del shell. En la captura `taskbar-attention` no se distingue el botón resaltado;
+- el clic en el toast, simulado con la misma función que llama su handler (el CI no puede hacer clic en el centro de notificaciones), muestra la ventana minimizada con el foco, y el renderer recibe `notification-click` y abre su bandeja de entrada en el elemento, como en Electron (captura `notification-click`; el aviso es sintético, así que la bandeja dice que no lo encuentra). Va en una etapa final porque la bandeja tapa la zona de arrastre;
+- `revealFile` rechaza una ruta relativa, una inexistente y una con `..`; en la etapa final, con un `.cmd` existente, el Explorador se abre en su carpeta (`Shell.Application`) y el `.cmd` no se ejecuta. La selección no se pudo leer en el runner: `Shell.Application` devuelve `SelectedItems` vacío, y en la captura `reveal-file` la carpeta (`D:\a\_temp`, con muchos archivos) todavía está cargando. `openCharterFolder` abre su carpeta y `openHarnessLink('codex')` abre Edge con el enlace oficial (captura `integrations`);
+- pruebas unitarias del shell (`cargo test` en `src-tauri`) en Windows.
+
+Fuera del recorte: el diálogo de Electron que avisa en el primer arranque si no hay ningún harness, y el login real contra un proveedor, que necesita una cuenta y lo prueba una persona.
