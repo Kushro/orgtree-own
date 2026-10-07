@@ -17,6 +17,7 @@ Se reemplaza solo la capa de escritorio (`apps/desktop/main` y `preload`). El re
 | 7 | #7 Ventana sin marco, bandeja y notificación | Integración nativa básica |
 | 8 | #18 Instalador autónomo con motor, runtime y PostgreSQL | Instalador que se usa sin preparar nada |
 | 9 | #21 Integraciones: harnesses, login de proveedores, notificaciones y archivos | Contratar agentes con el instalador |
+| 10 | #20 Una ventana por organización, creación de orgs y preferencias persistentes | Paridad con el manejo de ventanas de Electron |
 
 ## Decisiones de diseño ya tomadas
 
@@ -290,3 +291,86 @@ El plugin de notificaciones no da el clic en escritorio ni deja retirar un toast
 - pruebas unitarias del shell (`cargo test` en `src-tauri`) en Windows.
 
 Fuera del recorte: el diálogo de Electron que avisa en el primer arranque si no hay ningún harness, y el login real contra un proveedor, que necesita una cuenta y lo prueba una persona.
+
+### Ventanas por organización (#20)
+
+Paridad con `org-windows.ts`, `index.ts`, `window-close.ts`, `org-placement.ts`, `window-placement.ts` y `preferences.ts`: una ventana principal por organización, con el renderer **sin cambios**. Cuando el shim trae `requestOrg`, el renderer pasa solo a su modelo de varias ventanas.
+
+**Registro de ventanas.** `orgwindows.rs` es el registro puro, sin Tauri, con las reglas de `org-windows.ts`, y `mainwin.rs` aplica sus efectos:
+
+- hay tres clases de ventana principal: la Homepage (lista de orgs), la de creación y una por org (`win-1`, `win-2`, …), cada una con su shim y su identidad;
+- `requestOrg` enfoca la ventana de una org abierta, liga la Homepage a la org pedida si se pide desde ella, o abre una ventana nueva. La ventana nueva se registra antes de construirla, así que un segundo pedido de la misma org la encuentra y no abre otra;
+- `windowIdentity` es síncrono, como en el preload: el shell lo siembra en el script de inicialización de cada ventana. `getWindowIdentity` y el evento `window-identity` dan el valor vivo;
+- la dueña de las notificaciones es la primera ventana viva. Las escrituras globales (`syncNotifications`, `setPendingAttention`) solo se aceptan desde ella, y el parpadeo va a la ventana de la org del aviso;
+- los eventos que el renderer no puede volver a pedir, como el clic de una notificación, se retienen hasta que el documento carga (`takePendingWindowEvents`, como `window-outbox.ts`);
+- `desktop.rs` resuelve en cada comando la ventana que llama, en vez de suponer `main`.
+
+**Creación de organizaciones.** `openCreateOrgWindow`, `cancelCreation`, `bindCreatedOrg` y `setUnsavedCreation`, con las reglas de Electron:
+
+- desde una Homepage, la creación ocupa esa misma ventana, y cancelar vuelve a la Homepage;
+- desde una ventana de org, la creación abre una ventana nueva;
+- `bindCreatedOrg` convierte la ventana de creación en la de la org nueva.
+
+Con datos sin guardar, cerrar la ventana, cancelar o salir de la app preguntan si se descarta el borrador (decisión del usuario, 2026-09-21). Es un `MessageBoxW` modal (`dialog.rs`) en un hilo propio. Cancelar es el botón por defecto, y Escape o la X también conservan el borrador.
+
+**Cierre y salida, como `performClose`:**
+
+- cerrar una de varias ventanas cierra también sus popouts;
+- cerrar la última la oculta en la bandeja, o sale si `exitOnClose` está prendido;
+- la bandeja suma "Nueva ventana", "Start at login" y "Exit on close". "Abrir" y una segunda instancia van a la última ventana usada.
+
+**Posición y restauración.** `placement.rs` guarda `window-placement.json` en la carpeta de la app, con dos datos separados como en Electron:
+
+- `geometry`: la última posición de cada clave (`homepage` u `org:<slug>`). Se recuerda siempre, para que abrir una org a mano la ponga donde estaba;
+- `session`: las ventanas abiertas al salir. Una salida la guarda **antes** de cerrar nada, y cerrar una ventana a mano la saca de la sesión pero conserva su posición.
+
+Al iniciar, el shell reabre la sesión. `fit_window` (el `fitWindow` de Electron) deja cada ventana entera dentro del área de trabajo del monitor con el que más se superpone. Una ventana guardada cuya org ya no existe abre igual, y el renderer muestra el error `no such org`.
+
+Tauri no da los límites normales de una ventana maximizada (`getNormalBounds`), así que maximizar solo marca `maximized` y conserva el último rectángulo normal.
+
+**El bug del alto de 30 px.** El primer run del CI con este paso (29) falló porque las ventanas restauradas volvían 30 px más altas (600 → 630, 520 → 550; el ancho sin cambios).
+
+- La ventana se crea oculta para ubicarla antes de mostrarla. tao conserva `WS_CAPTION` en las ventanas sin marco (ver #7), y un `set_size` sobre esa ventana todavía oculta queda con la barra de título de más. La prueba de #7 no lo vio porque mueve ventanas ya visibles.
+- `mainwin::exact_size` mide el área cliente con `inner_size` y corrige la diferencia sobre lo pedido (no sobre lo medido, para no oscilar si la diferencia desaparece). Corre al construir la ventana y otra vez después del primer `show`. Electron necesita lo mismo con sus popouts sin marco (`setExactPopoutBounds`).
+- Los 30 px de más también dejaban la ventana de error por debajo del área de trabajo, y por eso falló el control de "ventana fuera de pantalla".
+- El mismo run mostró un error de la prueba, no de la app: la segunda org se ubicaba en parte fuera de la pantalla de 1024 px del runner, y `fit_window` la movía con razón. La prueba ahora la ubica entera dentro del área de trabajo.
+
+**Preferencias.** `preferences.rs` guarda `preferences.json` en la carpeta de la app, con escritura atómica (temporal y `rename`):
+
+- `setPreferences` solo acepta las claves conocidas, cada una con su tipo (`preferencesPatch`), y rechaza un tema desconocido;
+- `setEffectiveTheme` informa el tema efectivo que resolvió el renderer;
+- `startAtLogin` escribe o borra el valor `com.kushro.orgtree.tauri-spike` en la clave `Run` del usuario (HKCU, nunca HKLM), con `"<exe>" --background` (`autostart.rs`). Con `--background`, la app arranca en la bandeja con las ventanas ocultas.
+
+**Verificado en el CI** (paso "Windows per organization", run 37596623553). Un director de prueba (`wprobe.rs` y `wprobe.js`, activo solo con `ORGTREE_TAURI_WINDOWS_PROBE`) maneja la app compilada en dos arranques sobre una raíz descartable.
+
+Primer arranque:
+
+- la Homepage lista `spike-fixture`. Su identidad es `homepage`, es la dueña de las notificaciones, y `requestOrg` existe en el shim;
+- Homepage → creación → Cancelar vuelve a la Homepage; pedir `spike-fixture` desde la Homepage la liga a esa org en la misma ventana (`win-1`);
+- `openCreateOrgWindow` desde una ventana de org abre una ventana de creación aparte. Al escribir `segunda`, el renderer avisa que hay datos sin guardar, y cerrar la ventana muestra la confirmación. La prueba contesta Cancelar y la ventana sigue abierta (captura `windows-confirm-dialog`). Después, crear la org la convierte en la ventana de `segunda` (captura `windows-create-window`);
+- `requestOrg('tercera')` abre una ventana nueva que no es la dueña de las notificaciones. Quedan abiertas `spike-fixture`, `segunda` y `tercera` (captura `windows-two-orgs`);
+- volver a pedir `spike-fixture` enfoca `win-1` sin abrir otra ventana (captura `windows-refocus`);
+- `segunda` no es la dueña de las notificaciones, y `win-1` sigue siéndolo;
+- el clic de una notificación de `segunda` enfoca su ventana y le llega `notification-click`. El de una org cuya ventana se cerró la reabre, y el evento queda retenido hasta que el documento carga (captura `windows-click-reopened`);
+- `setPreferences` guarda `startAtLogin`, el tema `codex` y `notifyAllMail`, y rechaza un tema desconocido, una clave inventada y un tipo equivocado. Llega `setEffectiveTheme('codex')`;
+- entre los arranques, `preferences.json` tiene esos valores y `HKCU\…\Run` tiene `"…\orgtree-tauri.exe" --background`. `window-placement.json` guarda la sesión `org:spike-fixture,org:segunda,org:tercera`, El CI le agrega una org inexistente (`ya-no-existe`), guardada en 40000,30000, un monitor que ya no está.
+
+Segundo arranque:
+
+- se restauran las 4 ventanas, visibles, y las tres orgs vuelven con la misma posición y tamaño que antes del reinicio, con 2 px de tolerancia (captura `windows-restored`);
+- la ventana de `ya-no-existe` vuelve entera al área de trabajo y muestra el error `no such org: 'ya-no-existe'` (captura `windows-error-window`);
+- `spike-fixture` restaurada muestra su agente con el tema `codex`, y `segunda` tiene su título;
+- las preferencias siguen ahí después del reinicio. Apagar `startAtLogin` borra el valor de `Run`, y el CI confirma que no quedó.
+
+Además, `cargo test` corre las pruebas unitarias del registro (las reglas de `requestOrg`, la creación, la dueña de las notificaciones, los eventos retenidos), de `fit_window` con un monitor que ya no existe y de las preferencias entre dos cargas.
+
+**Lo que se ve en las capturas y el CI no mide:**
+
+- en `windows-error-window`, debajo del error queda el texto `loading ya-no-existe...`. Es el renderer sin cambios; no se comparó contra Electron;
+- en `windows-two-orgs`, la cabecera de `segunda` todavía no muestra su nombre, que sí aparece en `windows-click-reopened`. La captura sale justo después de ubicar las ventanas.
+
+**Fuera del recorte:**
+
+- el cierre de la última ventana con `exitOnClose` (ocultar o salir) y el menú nuevo de la bandeja no los maneja la prueba;
+- un arranque real con `--background` desde el inicio de Windows, que necesita cerrar la sesión;
+- la restauración con varios monitores o con escalas distintas: el runner tiene un solo monitor de 1024x768 al 100 %. El monitor ausente se simula con una posición fuera de todos los monitores.
