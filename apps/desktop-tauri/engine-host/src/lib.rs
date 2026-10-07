@@ -548,7 +548,7 @@ impl Drop for Engine {
 }
 
 /// Texto de ruta sin el prefijo `\\?\` de `canonicalize`, que el motor no usa.
-fn canonical_display(path: &Path) -> String {
+pub(crate) fn canonical_display(path: &Path) -> String {
     let text = path.to_string_lossy();
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
 }

@@ -298,6 +298,8 @@ jobs:
           foreach ($name in 'ORGTREE_TAURI_PYTHON', 'ORGTREE_TAURI_ENGINE_DIR', 'ORGTREE_TAURI_UI_DIR', 'ORGTREE_TAURI_PROBE') {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
           }
+          # Las rutas que da Tauri pueden traer el prefijo \\?\ de Windows.
+          function Strip-Long($path) { "$path".Replace('\\?\', '').TrimEnd('\') }
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
           $dir = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-installed'
           $data = $env:ORGTREE_TAURI_DATA
@@ -342,11 +344,10 @@ jobs:
             Write-Host "Install probe: $raw"
             "### Installed app (#18)`n- first page ready after $([int]$ready) s (fresh PostgreSQL cluster)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
             $probe = $raw | ConvertFrom-Json
-            $strip = { param($path) "$path".Replace('\\?\', '').TrimEnd('\') }
             if ($probe.launch.mode -ne 'packaged') { $failures += "the app did not use the packaged engine: $($probe.launch.mode)" }
-            if ((& $strip $probe.launch.dataRoot) -ne $data) { $failures += "data root in use: $($probe.launch.dataRoot)" }
-            if ((& $strip $probe.engine.dataRoot) -ne $data) { $failures += "data root confirmed by the engine: $($probe.engine.dataRoot)" }
-            if ((& $strip $probe.launch.engineDir) -ne (Join-Path $dir 'engine')) { $failures += "engine directory: $($probe.launch.engineDir)" }
+            if ((Strip-Long $probe.launch.dataRoot) -ne $data) { $failures += "data root in use: $($probe.launch.dataRoot)" }
+            if ((Strip-Long $probe.engine.dataRoot) -ne $data) { $failures += "data root confirmed by the engine: $($probe.engine.dataRoot)" }
+            if ((Strip-Long $probe.launch.engineDir) -ne (Join-Path $dir 'engine')) { $failures += "engine directory: $($probe.launch.engineDir)" }
             $page = $probe.page
             if ($page.nav -eq 401 -or $page.http -ne 200) { $failures += "the packaged engine page was not authenticated: nav $($page.nav), http $($page.http)" }
             if ($page.bridge -ne $true -or $page.status -ne 'ready') { $failures += "window.orgtreeDesktop: bridge $($page.bridge), status $($page.status)" }
@@ -375,18 +376,34 @@ jobs:
           else {
             $descriptor = Get-Content $paths -Raw | ConvertFrom-Json
             Write-Host "engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
-            if ($descriptor.schema -ne 'orgtree.engine-paths/v1' -or (& $strip $descriptor.data) -ne $data -or $descriptor.python -notlike "$dir\*" -or $descriptor.pgBin -notlike "$dir\*") {
+            if ($descriptor.schema -ne 'orgtree.engine-paths/v1' -or (Strip-Long $descriptor.data) -ne $data -or (Strip-Long $descriptor.python) -ne (Join-Path $dir 'engine\runtime\python.exe') -or (Strip-Long $descriptor.pgBin) -ne (Join-Path $dir 'engine\postgresql\bin')) {
               $failures += "engine-paths.json does not describe the install: $($descriptor | ConvertTo-Json -Compress)"
             }
           }
           $size = (Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum
           "- installed folder: {0:N1} MB, {1}: {2:N1} MB, {3} postgres processes" -f ($size / 1MB), $exe.Name, ($exe.Length / 1MB), $postgres.Count | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          taskkill /PID $p.Id /T /F | Out-Null
           if ($failures) {
-            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, startup-refusal*.json -ErrorAction SilentlyContinue | Select-Object -First 12) {
+            # Diagnóstico: los registros de la raíz y el motor empaquetado lanzado a mano
+            # con el mismo entorno que le da el shell (el shell descarta su stderr).
+            Write-Host "Files in the data root: $((Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($data.Length) }) -join ', ')"
+            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, *.json, *.txt -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 2MB } | Select-Object -First 20) {
               Write-Host "----- $($log.FullName)"; Get-Content $log.FullName -Tail 40
             }
+            $env:ORGTREE_DATA = $data
+            $env:ORGTREE_V2_TOKEN = [guid]::NewGuid().ToString('N')
+            $env:ORGTREE_PG_BOOTSTRAP = '1'
+            $env:ORGTREE_PG_CUSTODIAN = Join-Path $dir 'engine\pg-custodian.exe'
+            $env:ORGTREE_P03_PG_BIN = Join-Path $dir 'engine\postgresql\bin'
+            $env:ORGTREE_V2_UI_DIR = Join-Path $dir 'ui'
+            $out = Join-Path $env:RUNNER_TEMP 'manual-engine.out'; $err = Join-Path $env:RUNNER_TEMP 'manual-engine.err'
+            $manual = Start-Process -FilePath (Join-Path $dir 'engine\runtime\python.exe') -ArgumentList (Join-Path $dir 'engine\launch.py') `
+              -WorkingDirectory (Join-Path $dir 'engine') -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+            if (-not $manual.WaitForExit(120000)) { taskkill /PID $manual.Id /T /F | Out-Null; Write-Host 'manual engine still running after 120 s' }
+            else { Write-Host "manual engine exited with $($manual.ExitCode)" }
+            Write-Host '----- manual engine stdout'; Get-Content $out -Tail 60
+            Write-Host '----- manual engine stderr'; Get-Content $err -Tail 80
           }
-          taskkill /PID $p.Id /T /F | Out-Null
           if ($failures) { throw ($failures -join '; ') }
           Write-Host 'Installed app verified: packaged engine on the embedded Python and PostgreSQL, own data root, renderer loaded'
 

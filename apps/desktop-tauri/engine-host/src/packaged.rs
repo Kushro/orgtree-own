@@ -37,6 +37,9 @@ impl PackagedRuntime {
     /// empaquetada). Si lo trae pero falta otra pieza, es un error: un
     /// paquete roto no debe caer en el modo de desarrollo.
     pub fn locate(resources: &Path) -> Option<Result<PackagedRuntime, EngineError>> {
+        // Tauri da la carpeta de recursos con el prefijo `\\?\` en Windows;
+        // Electron pasa rutas comunes, y el motor y PostgreSQL las esperan así.
+        let resources = &PathBuf::from(crate::canonical_display(resources));
         let engine_dir = resources.join("engine");
         let python = engine_dir.join("runtime").join("python.exe");
         if !python.is_file() {
@@ -134,6 +137,16 @@ mod tests {
         }
         touch(root.join("tools/pypg/pgimport.py"));
         touch(root.join("ui/index.html"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sin_prefijo_de_ruta_larga() {
+        let root = scratch("prefijo");
+        full_package(&root);
+        let long = PathBuf::from(format!(r"\\?\{}", root.display()));
+        let runtime = PackagedRuntime::locate(&long).unwrap().unwrap();
+        assert!(!runtime.python.to_string_lossy().starts_with(r"\\?\"), "{}", runtime.python.display());
     }
 
     #[test]
