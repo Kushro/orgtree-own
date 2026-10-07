@@ -140,6 +140,31 @@ Seguridad del puente:
 
 Reutilización del renderer: **100 %**. Ningún archivo de `apps/desktop/renderer` cambió (61.000 líneas TSX y 8.700 de CSS).
 
+### Desk en vivo y recuperación del motor (#5)
+
+El desk es el del renderer, sin cambios: carga `/chat`, se conecta al WebSocket de la org (autenticado por la cookie) y aplica los frames `node_stream`. Para probarlo sin proveedores, el motor de fixture acepta dos variables:
+
+- `ORGTREE_FIXTURE_LIVE=1`: emite cada 1,5 s un frame `node_stream` de tipo `delta` del agente (`supervisor.stream`), igual que un turno en curso.
+- `ORGTREE_FIXTURE_MESSAGES=N`: agrega N mensajes al historial del agente. El CI usa 1.200.
+
+**Recuperación.** Un vigilante en Rust (`watch_engine`) revisa el proceso del motor cada segundo. Si se cae:
+
+1. lo vuelve a lanzar con las mismas opciones;
+2. guarda la cookie nueva (el token cambia en cada arranque);
+3. recarga la ventana, que reconecta su WebSocket.
+
+Reintenta durante unos 2 minutos. En Linux el puerto guardado queda en `TIME_WAIT` unos 60 s y el motor lo rechaza como ocupado (`engine/launch.py`, `_port`), así que la recuperación tarda eso. Si el puerto cambiara, el shim de `main` quedaría con el origen viejo. El motor persiste el puerto precisamente para que no pase, y el spike no cubre ese caso.
+
+**Verificado en WebView2** con la prueba de `ORGTREE_TAURI_PROBE`:
+
+- el desk abre y el texto de los frames en vivo crece;
+- la conversación se carga entera (del mensaje 1 al 1200, con el chip de `Read README.md`);
+- se miden los cuadros de un scroll de punta a punta, y el resultado queda en el resumen del run;
+- el botón real "Open in new window" saca el desk a otra ventana, con la misma tipografía y los mensajes, y el borrador escrito ahí vuelve al dueño al cerrarla;
+- tras matar el motor, el vigilante lo reinicia y la página recargada vuelve a autenticarse (`fetch` 200, WebSocket abierto) y a mostrar al agente.
+
+El CI sube capturas de pantalla del desk y de la ventana recuperada (artefacto `orgtree-tauri-screens`).
+
 El workflow `.github/workflows/spike-tauri.yml` hace lo mismo en `windows-latest` en cada push a `spike/tauri`: compila, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-tauri-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.tauri-spike`), así que no pisa una instalación de Orgtree existente.

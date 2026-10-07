@@ -16,10 +16,17 @@
 //!   shell escrito en el hijo, estilos clonados, DOM del dueño movido al hijo,
 //!   borrador compartido).
 //!
+//! - #5, desk en vivo: abre el desk del agente del fixture, espera frames
+//!   `node_stream` (texto que crece), carga la conversación larga y mide los
+//!   cuadros de un scroll de punta a punta; después abre el desk en una ventana
+//!   aparte con su botón real y verifica tipografía y borrador.
+//!
 //! El script devuelve el resultado en `document.title`, sin IPC. Después Rust
 //! pide cerrar la ventana dueña y anota qué pasó con el popout (etapa
-//! `owner_close`), y recién ahí escribe el archivo. El token no se escribe
-//! nunca: solo si la cookie llegó o no.
+//! `owner_close`), y luego mata el motor como si se cayera: el shell lo
+//! reinicia y la página recargada corre `probe_reconnect.js` (etapa
+//! `reconnect`). El reporte se escribe en cada etapa; el token no se escribe
+//! nunca, solo si la cookie llegó o no.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -28,12 +35,17 @@ use std::sync::{Arc, Mutex};
 
 pub const PAGE_PREFIX: &str = "orgtree-probe:";
 pub const CLOSE_PREFIX: &str = "orgtree-probe-closed:";
+pub const RECONNECT_PREFIX: &str = "orgtree-probe-reconnected:";
 
 pub struct Probe {
     out: PathBuf,
     echo_port: u16,
     hits: Arc<Mutex<Vec<serde_json::Value>>>,
     page: Mutex<Option<serde_json::Value>>,
+    close: Mutex<Option<serde_json::Value>>,
+    /// Después de matar el motor, la próxima carga corre el script de reconexión.
+    reconnecting: std::sync::atomic::AtomicBool,
+    crashed_pid: Mutex<Option<u32>>,
 }
 
 impl Probe {
@@ -67,7 +79,33 @@ impl Probe {
                 }
             })
             .ok()?;
-        Some(Probe { out, echo_port, hits, page: Mutex::new(None) })
+        Some(Probe {
+            out,
+            echo_port,
+            hits,
+            page: Mutex::new(None),
+            close: Mutex::new(None),
+            reconnecting: std::sync::atomic::AtomicBool::new(false),
+            crashed_pid: Mutex::new(None),
+        })
+    }
+
+    /// El script que corresponde a esta carga de la página: la prueba completa
+    /// la primera vez, la de reconexión después de la caída del motor.
+    pub fn script_for_load(&self) -> String {
+        if self.reconnecting.load(std::sync::atomic::Ordering::SeqCst) {
+            include_str!("probe_reconnect.js").replace("__PREFIX__", RECONNECT_PREFIX)
+        } else {
+            self.script()
+        }
+    }
+
+    pub fn begin_reconnect(&self) {
+        self.reconnecting.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn note_crashed_pid(&self, pid: Option<u32>) {
+        *self.crashed_pid.lock().unwrap() = pid;
     }
 
     /// Script de la página del motor.
@@ -102,15 +140,39 @@ impl Probe {
         true
     }
 
-    /// Cierra el reporte con la etapa de cierre y lo escribe.
-    pub fn record_close(&self, title: &str, shell: serde_json::Value) {
-        let Some(json) = title.strip_prefix(CLOSE_PREFIX) else { return };
-        let page_side: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
-        let report = serde_json::json!({
+    fn write(&self, reconnect: Option<serde_json::Value>) {
+        let mut report = serde_json::json!({
             "page": self.page.lock().unwrap().clone(),
             "echo": *self.hits.lock().unwrap(),
-            "owner_close": { "shell": shell, "page": page_side },
+            "owner_close": self.close.lock().unwrap().clone(),
         });
+        if let Some(reconnect) = reconnect {
+            report["reconnect"] = reconnect;
+        }
         let _ = std::fs::write(&self.out, serde_json::to_vec_pretty(&report).unwrap_or_default());
+    }
+
+    /// Guarda la etapa de cierre (reporte parcial). Devuelve `true` la primera
+    /// vez, para que el shell siga con la etapa de caída del motor.
+    pub fn record_close(&self, title: &str, shell: serde_json::Value) -> bool {
+        let Some(json) = title.strip_prefix(CLOSE_PREFIX) else { return false };
+        let page_side: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+        {
+            let mut close = self.close.lock().unwrap();
+            if close.is_some() {
+                return false;
+            }
+            *close = Some(serde_json::json!({ "shell": shell, "page": page_side }));
+        }
+        self.write(None);
+        true
+    }
+
+    /// Cierra el reporte con la etapa de reconexión y lo escribe completo.
+    pub fn record_reconnect(&self, title: &str, shell: serde_json::Value) {
+        let Some(json) = title.strip_prefix(RECONNECT_PREFIX) else { return };
+        let page_side: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+        let crashed = *self.crashed_pid.lock().unwrap();
+        self.write(Some(serde_json::json!({ "shell": shell, "crashed_pid": crashed, "page": page_side })));
     }
 }

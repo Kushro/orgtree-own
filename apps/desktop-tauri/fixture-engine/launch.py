@@ -11,7 +11,9 @@ no existen. Sigue la receta de ``tests/test_engine_http.py``.
   desarrollar el shell en Linux.
 
 ``ORGTREE_FIXTURE_LIVE=1`` emite frames ``node_stream`` del agente cada 1,5 s
-para probar el desk en vivo sin un proveedor real.
+para probar el desk en vivo sin un proveedor real, y
+``ORGTREE_FIXTURE_MESSAGES=N`` agrega N mensajes al historial para medir el
+scroll de una conversación larga.
 """
 
 from __future__ import annotations
@@ -59,7 +61,19 @@ def _records(sid: str) -> list[dict]:
     answer = rec("assistant", result["uuid"], "2026-10-07T10:00:06Z",
                  {"id": "msg_fixture_2", "role": "assistant", "content": [
                      {"type": "text", "text": "Orgtree organiza agentes de código en un organigrama."}]})
-    return [ask, tool, result, answer]
+    records = [ask, tool, result, answer]
+    # Conversación larga para medir el scroll del desk (#5): N pares extra.
+    extra = int(os.environ.get("ORGTREE_FIXTURE_MESSAGES", "0") or 0)
+    parent = answer["uuid"]
+    for i in range(extra // 2):
+        q = rec("user", parent, f"2026-10-07T11:{(i // 60) % 60:02d}:{i % 60:02d}Z",
+                {"role": "user", "content": f"Mensaje {2 * i + 1}: ¿cómo va la tarea {i}?"})
+        a = rec("assistant", q["uuid"], f"2026-10-07T11:{(i // 60) % 60:02d}:{i % 60:02d}Z",
+                {"id": f"msg_fixture_long_{i}", "role": "assistant", "content": [
+                    {"type": "text", "text": f"Respuesta {2 * i + 2}: la tarea {i} avanza. " + "Detalle. " * 12}]})
+        records += [q, a]
+        parent = a["uuid"]
+    return records
 
 
 def _stub_providers() -> None:

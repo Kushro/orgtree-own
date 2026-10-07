@@ -407,6 +407,14 @@ impl Engine {
         http_request(self.port, "GET", path, Some(&self.token), timeout)
     }
 
+    /// Mata el árbol del motor sin pedir apagado, como una caída. Para probar la
+    /// recuperación del shell; el apagado normal es `stop`.
+    pub fn kill(&mut self) -> bool {
+        let killed = self.kill_tree_and_wait(KILL_EXIT_WAIT);
+        self.child = None;
+        killed
+    }
+
     /// Apagado limpio con el token; si el motor no sale, mata el árbol.
     pub fn stop(mut self) -> StopOutcome {
         self.stop_inner()

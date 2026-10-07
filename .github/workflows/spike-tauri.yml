@@ -79,13 +79,16 @@ jobs:
       - name: Build installer
         run: npx tauri build --ci
 
-      - name: Smoke test (engine, cookie auth, bridge, home window, popouts)
+      - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery)
         shell: pwsh
         env:
           ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
           # El motor real con una org sembrada (un agente con historial) y sin proveedores.
           ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
           ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          # Desk en vivo (#5): frames node_stream simulados y una conversación larga.
+          ORGTREE_FIXTURE_LIVE: '1'
+          ORGTREE_FIXTURE_MESSAGES: '1200'
           ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-smoke
           # Prueba de autenticación por cookie en WebView2 (src-tauri/src/probe.rs).
           ORGTREE_TAURI_PROBE: ${{ runner.temp }}\orgtree-tauri-probe.json
@@ -93,11 +96,25 @@ jobs:
           $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
           if (-not $exe) { throw "orgtree-tauri.exe not found" }
           $p = Start-Process -FilePath $exe.FullName -PassThru
-          $deadline = (Get-Date).AddSeconds(90)
-          # El reporte final incluye la etapa de cierre de la ventana dueña (#6).
-          while (-not ((Test-Path $env:ORGTREE_TAURI_PROBE) -and (Select-String -Path $env:ORGTREE_TAURI_PROBE -Pattern 'owner_close' -Quiet)) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          $deadline = (Get-Date).AddSeconds(300)
+          $shot = $false
+          # El reporte final incluye la reconexión tras la caída del motor (#5).
+          while (-not ((Test-Path $env:ORGTREE_TAURI_PROBE) -and (Select-String -Path $env:ORGTREE_TAURI_PROBE -Pattern '"reconnect"' -Quiet)) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            # captura del desk con la conversación larga apenas termina la primera etapa
+            if (-not $shot -and (Test-Path $env:ORGTREE_TAURI_PROBE)) { try { Save-Screen 'desk' } catch { Write-Host "screenshot: $_" }; $shot = $true }
             Start-Sleep -Seconds 1; $p.Refresh()
           }
+          try { Save-Screen 'after-reconnect' } catch { Write-Host "screenshot: $_" }
           if ($p.HasExited) {
             if (Test-Path $env:ORGTREE_TAURI_PROBE) { Write-Host "Partial probe: $(Get-Content $env:ORGTREE_TAURI_PROBE -Raw)" }
             throw "app exited early with code $($p.ExitCode)"
@@ -105,7 +122,7 @@ jobs:
           $port = Join-Path $env:ORGTREE_TAURI_DATA 'engine-port.json'
           if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
           Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
-          if (-not (Test-Path $env:ORGTREE_TAURI_PROBE)) { throw "the WebView2 probe did not report within 90 s" }
+          if (-not (Test-Path $env:ORGTREE_TAURI_PROBE)) { throw "the WebView2 probe did not report within 300 s" }
           $raw = Get-Content $env:ORGTREE_TAURI_PROBE -Raw
           Write-Host "WebView2 probe: $raw"
           "### WebView2 probe (cookie, popouts)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
@@ -139,6 +156,28 @@ jobs:
           }
           if ($pop.childLink -ne 'load') { $failures += "cloned stylesheet link in the popout: $($pop.childLink)" }
           if ($pop.styles.width -ne '123px' -or $pop.styles.height -ne '45px') { $failures += "popout styles not applied: $($pop.styles | ConvertTo-Json -Compress)" }
+          # #5: desk en vivo, conversación larga, scroll y reconexión
+          $desk = $probe.page.desk
+          if ($desk.opened -ne $true) { $failures += 'the agent desk did not open' }
+          if (-not ($desk.live.later -gt $desk.live.first)) { $failures += "no live node_stream updates in the desk: $($desk.live | ConvertTo-Json -Compress)" }
+          if ($desk.oldestLoaded -ne 1 -or $desk.domRows -lt 1000) { $failures += "long conversation not fully loaded: oldest $($desk.oldestLoaded), rows $($desk.domRows)" }
+          if ($desk.toolShown -ne $true) { $failures += 'the tool chip (Read README.md) is not shown' }
+          if (-not $desk.scroll -or $desk.scroll.frames -lt 30) { $failures += "scroll was not measured: $($desk.scroll | ConvertTo-Json -Compress)" }
+          "### Desk scroll (WebView2, $($desk.domRows) rows)`n$($desk.scroll | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $dp = $probe.page.deskPopout
+          foreach ($check in 'opened', 'ownerEmptied', 'fontMatchesOwner', 'draftBackInOwner', 'redocked') {
+            if ($dp.$check -ne $true) { $failures += "deskPopout.$check was $($dp.$check)" }
+          }
+          if (-not ($dp.messagesInChild -gt 0)) { $failures += 'the popped-out desk shows no messages' }
+          $rc = $probe.reconnect
+          if (-not $rc) { $failures += 'reconnect stage did not report' }
+          else {
+            if ($rc.shell.restarts -lt 1) { $failures += 'the engine was not restarted' }
+            if ($rc.shell.engine_pid -eq $rc.crashed_pid) { $failures += 'the engine pid did not change after the crash' }
+            if ($rc.page.http -ne 200) { $failures += "after restart, fetch returned $($rc.page.http)" }
+            if ($rc.page.ws -ne 'open') { $failures += "after restart, WebSocket: $($rc.page.ws)" }
+            if ($rc.page.bridge -ne $true -or $rc.page.agentShown -ne $true) { $failures += "after restart, the UI did not recover: $($rc.page | ConvertTo-Json -Compress)" }
+          }
           $close = $probe.owner_close
           if (-not $close) { $failures += 'owner-close stage did not report' }
           else {
@@ -149,7 +188,7 @@ jobs:
           }
           Stop-Process -Id $p.Id -Force
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Cookie auth, desktop bridge, home window and popouts verified in WebView2"
+          Write-Host "Cookie auth, bridge, home, live desk, popouts and engine recovery verified in WebView2"
 
       - name: Report sizes
         shell: pwsh
@@ -157,6 +196,13 @@ jobs:
           Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe, src-tauri/target/release/orgtree-tauri.exe |
             ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: orgtree-tauri-screens
+          path: ${{ runner.temp }}/screens/*.png
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:

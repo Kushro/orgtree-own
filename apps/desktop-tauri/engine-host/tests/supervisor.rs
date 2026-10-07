@@ -78,6 +78,16 @@ fn si_ignora_el_apagado_mata_el_arbol() {
 }
 
 #[test]
+fn kill_simula_una_caida() {
+    with_mode("ready", || {
+        let mut engine = Engine::start(&fake_options("kill")).expect("ready");
+        assert!(engine.kill());
+        assert!(!engine.is_running());
+        assert_eq!(engine.stop(), StopOutcome::Graceful, "un motor ya caído no necesita apagado");
+    });
+}
+
+#[test]
 fn ready_de_otro_pid_se_rechaza_y_no_deja_el_proceso() {
     with_mode("bad-pid", || {
         let error = Engine::start(&fake_options("bad-pid")).unwrap_err();

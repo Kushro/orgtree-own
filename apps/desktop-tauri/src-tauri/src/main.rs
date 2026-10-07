@@ -6,7 +6,7 @@ mod probe;
 
 use orgtree_engine_host::{Engine, EngineOptions};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use tauri::webview::{Cookie, NewWindowFeatures, NewWindowResponse, PageLoadEvent};
 use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
@@ -22,6 +22,10 @@ struct Shell {
     status: Mutex<String>,
     preferences: Mutex<serde_json::Value>,
     probe: Mutex<Option<probe::Probe>>,
+    /// Opciones del arranque, para reiniciar el motor si se cae.
+    options: Mutex<Option<EngineOptions>>,
+    restarts: AtomicU32,
+    quitting: AtomicBool,
 }
 
 impl Default for Shell {
@@ -32,6 +36,9 @@ impl Default for Shell {
             status: Mutex::new(String::new()),
             preferences: Mutex::new(desktop::default_preferences()),
             probe: Mutex::new(None),
+            options: Mutex::new(None),
+            restarts: AtomicU32::new(0),
+            quitting: AtomicBool::new(false),
         }
     }
 }
@@ -129,7 +136,7 @@ fn open_engine(app: &tauri::AppHandle, engine: &Engine) -> Result<(), String> {
                 let _ = splash.close();
             }
             if let Some(probe) = app.state::<Shell>().probe.lock().unwrap().as_ref() {
-                let _ = window.eval(probe.script());
+                let _ = window.eval(probe.script_for_load());
             }
         })
         .on_document_title_changed(move |window, title| on_title(&titles, &window, &title))
@@ -160,8 +167,12 @@ fn start_engine(app: tauri::AppHandle) {
                     let text = format!("Motor listo en {} (pid {}).", engine.origin(), engine.pid().unwrap_or(0));
                     let opened = open_engine(&app, &engine);
                     *app.state::<Shell>().engine.lock().unwrap() = Some(engine);
+                    *app.state::<Shell>().options.lock().unwrap() = Some(options.clone());
                     match opened {
-                        Ok(()) => *app.state::<Shell>().status.lock().unwrap() = text,
+                        Ok(()) => {
+                            *app.state::<Shell>().status.lock().unwrap() = text;
+                            watch_engine(app.clone());
+                        }
                         Err(error) => show_status(&app, &format!("{text} No se pudo abrir la interfaz: {error}")),
                     }
                 }
@@ -169,6 +180,67 @@ fn start_engine(app: tauri::AppHandle) {
             }
         })
         .expect("no se pudo crear el hilo de arranque del motor");
+}
+
+/// Recuperación (#5): si el motor se cae, lo vuelve a lanzar con las mismas
+/// opciones, renueva la cookie (el token es nuevo en cada arranque) y recarga la
+/// ventana, que reconecta su WebSocket. El guardián del motor puede tardar en
+/// liberar la raíz, así que un `root-owned` se reintenta. Si el puerto cambiara,
+/// el shim de `main` quedaría con el origen viejo: el motor persiste su puerto
+/// (`engine-port.json`) justamente para que no pase, y el spike no cubre ese caso.
+fn watch_engine(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("orgtree-engine-watch".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let state = app.state::<Shell>();
+            if state.quitting.load(Ordering::SeqCst) {
+                return;
+            }
+            let dead = state.engine.lock().unwrap().as_mut().is_some_and(|engine| !engine.is_running());
+            if !dead {
+                continue;
+            }
+            drop(state.engine.lock().unwrap().take());
+            #[cfg(debug_assertions)]
+            eprintln!("[shell] el motor se cayó; reiniciando");
+            let Some(options) = state.options.lock().unwrap().clone() else { return };
+            // ~2 min: en Linux el puerto guardado sigue en TIME_WAIT unos 60 s después
+            // de la caída y el motor rechaza un puerto ocupado (engine/launch.py `_port`).
+            for attempt in 0..90 {
+                if state.quitting.load(Ordering::SeqCst) {
+                    return;
+                }
+                match Engine::start(&options) {
+                    Ok(engine) => {
+                        let same_origin = state.origin.lock().unwrap().as_deref() == Some(engine.origin().as_str());
+                        if let Some(window) = main_window(&app) {
+                            if let Ok(cookie) = desktop_cookie(&engine) {
+                                let _ = window.set_cookie(cookie);
+                            }
+                            if same_origin {
+                                let _ = window.eval("location.reload()");
+                            }
+                        }
+                        *state.engine.lock().unwrap() = Some(engine);
+                        state.restarts.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    Err(error) if attempt < 89 => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[shell] reinicio {attempt} falló: {error}");
+                        let _ = error;
+                        std::thread::sleep(std::time::Duration::from_secs(1))
+                    }
+                    Err(error) => {
+                        #[cfg(debug_assertions)]
+                        eprintln!("[shell] el motor no volvió: {error}");
+                        let _ = error;
+                    }
+                }
+            }
+        })
+        .expect("no se pudo crear el vigilante del motor");
 }
 
 /// Origen `scheme://host:port` de una URL, como lo compara el navegador.
@@ -260,8 +332,41 @@ fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
             "main_visible": window.is_visible().ok(),
             "popouts": popout_labels(app, None).len(),
         });
-        probe.record_close(title, shell);
+        if probe.record_close(title, shell) {
+            probe_engine_crash(app.clone());
+        }
+    } else if title.starts_with(probe::RECONNECT_PREFIX) {
+        let state = app.state::<Shell>();
+        let pid = state.engine.lock().unwrap().as_ref().and_then(|engine| engine.pid());
+        probe.record_reconnect(title, serde_json::json!({
+            "restarts": state.restarts.load(Ordering::SeqCst),
+            "engine_pid": pid,
+        }));
     }
+}
+
+/// Etapa de la prueba (#5): mata el motor como si se cayera; el vigilante tiene
+/// que reiniciarlo y la ventana, reconectarse. La página recargada corre el
+/// script de reconexión.
+fn probe_engine_crash(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let state = app.state::<Shell>();
+        if let Some(probe) = state.probe.lock().unwrap().as_ref() {
+            probe.begin_reconnect();
+        }
+        if let Some(window) = main_window(&app) {
+            let _ = window.show();
+        }
+        let old_pid = state.engine.lock().unwrap().as_mut().and_then(|engine| {
+            let pid = engine.pid();
+            engine.kill();
+            pid
+        });
+        let probe = state.probe.lock().unwrap();
+        if let Some(probe) = probe.as_ref() {
+            probe.note_crashed_pid(old_pid);
+        }
+    });
 }
 
 /// Etapa de la prueba: pide cerrar la ventana dueña y le pregunta a su página
@@ -318,6 +423,7 @@ fn main() {
         .expect("error while building the Orgtree Tauri shell");
     app.run(|app, event| {
         if let RunEvent::Exit = event {
+            app.state::<Shell>().quitting.store(true, Ordering::SeqCst);
             if let Some(engine) = app.state::<Shell>().engine.lock().unwrap().take() {
                 let _ = engine.stop();
             }

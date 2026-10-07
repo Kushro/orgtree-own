@@ -66,6 +66,140 @@
     return out;
   })();
 
+  // #5: el desk del agente en vivo, con una conversación larga
+  r.desk = r.shell && r.shell.agentShown ? await (async () => {
+    const out = {};
+    const card = [...document.querySelectorAll('#root *')]
+      .find(el => el.children.length === 0 && el.textContent.trim() === 'worker');
+    if (!card) { out.error = 'sin tarjeta del agente'; return out }
+    // El lienzo escucha eventos de puntero, no solo click: la secuencia completa.
+    const box = card.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, clientX: box.x + box.width / 2, clientY: box.y + box.height / 2,
+      pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, view: window };
+    card.dispatchEvent(new PointerEvent('pointerdown', at));
+    card.dispatchEvent(new MouseEvent('mousedown', at));
+    card.dispatchEvent(new PointerEvent('pointerup', { ...at, buttons: 0 }));
+    card.dispatchEvent(new MouseEvent('mouseup', { ...at, buttons: 0 }));
+    card.dispatchEvent(new MouseEvent('click', { ...at, buttons: 0 }));
+    const msgs = await waitFor(() => document.querySelector('.msgs'), 15000);
+    out.opened = !!msgs;
+    if (!msgs) return out;
+    await waitFor(() => msgs.querySelectorAll('.msg').length, 15000);
+    out.toolShown = document.body.innerText.includes('README');
+    // en vivo: el texto de los frames node_stream crece mientras miramos
+    const beat = () => (msgs.innerText.match(/latido (\d+)/g) || []).map(m => Number(m.split(' ')[1]));
+    const first = await waitFor(() => { const b = beat(); return b.length && Math.max(...b) }, 20000);
+    const later = await waitFor(() => { const b = beat(); return b.length && Math.max(...b) > (first || 0) && Math.max(...b) }, 10000);
+    out.live = { first, later };
+    const count = () => msgs.querySelectorAll('.msg').length;
+    const scroller = (() => { let el = msgs; while (el && el !== document.body) {
+      const style = getComputedStyle(el);
+      if (/(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight) return el;
+      el = el.parentElement } return null })();
+    // conversación larga: el desk pide la página anterior al llegar arriba con el
+    // scroll ("earlier messages"); subir hasta que la altura deje de crecer. Las
+    // filas del DOM están virtualizadas, así que el avance se mide por la altura.
+    const oldestVisible = () => {
+      const n = (msgs.innerText.match(/(?:Mensaje|Respuesta) (\d+)/g) || []).map(m => Number(m.split(' ')[1]));
+      return n.length ? Math.min(...n) : null;
+    };
+    out.earlierPages = 0;
+    const pagingStart = performance.now();
+    for (let page = 0; page < 80 && scroller; page++) {
+      const before = scroller.scrollHeight;
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event('scroll'));
+      await timeout(150);
+      if (oldestVisible() === 1 || msgs.innerText.includes('README')) break;
+      if (!(await waitFor(() => scroller.scrollHeight > before, 5000))) break;
+      out.earlierPages++;
+    }
+    out.pagingMs = Math.round(performance.now() - pagingStart);
+    out.domRows = count();
+    // tras cargar todo, arriba: el mensaje más viejo y el chip de la herramienta
+    out.oldestLoaded = oldestVisible();
+    out.toolShown = msgs.innerText.includes('README');
+    // fluidez: recorrer la conversación entera de arriba abajo y medir los cuadros
+    if (scroller) {
+      const frames = [];
+      const duration = 4000;
+      const from = scroller.scrollTop, span = Math.max(1, scroller.scrollHeight - scroller.clientHeight - from);
+      await new Promise(done => {
+        const start = performance.now(); let last = start;
+        const step = now => {
+          frames.push(now - last); last = now;
+          const t = Math.min(1, (now - start) / duration);
+          scroller.scrollTop = from + span * t;
+          if (t < 1) requestAnimationFrame(step); else done();
+        };
+        requestAnimationFrame(step);
+      });
+      frames.shift();
+      const sorted = [...frames].sort((a, b) => a - b);
+      out.scroll = {
+        height: scroller.scrollHeight, frames: frames.length,
+        avgMs: Math.round(frames.reduce((a, b) => a + b, 0) / frames.length * 10) / 10,
+        p95Ms: Math.round(sorted[Math.floor(sorted.length * 0.95)] * 10) / 10,
+        maxMs: Math.round(sorted[sorted.length - 1] * 10) / 10,
+        over50ms: frames.filter(f => f > 50).length,
+      };
+      const numbers = (msgs.innerText.match(/(?:Mensaje|Respuesta) (\d+)/g) || []).map(m => Number(m.split(' ')[1]));
+      out.newestLoaded = numbers.length ? Math.max(...numbers) : null;
+    }
+    return out;
+  })() : { skipped: true };
+
+  // #6: el popout real del desk ("Open in new window") y su borrador
+  r.deskPopout = r.desk && r.desk.opened ? await (async () => {
+    const out = {};
+    const ownerSample = document.querySelector('.msgs .msgtext') || document.querySelector('.msgs .msg');
+    out.ownerFontFamily = ownerSample ? getComputedStyle(ownerSample).fontFamily : '';
+    const native = window.open;
+    let child = null;
+    window.open = function (...args) { child = native.apply(this, args); return child };
+    try {
+      const button = document.querySelector('#root [title="Open in new window"], #root [aria-label="Open in new window"]');
+      if (!button) { out.error = 'sin botón Open in new window'; return out }
+      button.click();
+      await waitFor(() => child && child.document && child.document.querySelector('.msgs .msg'), 15000);
+    } finally { window.open = native }
+    out.opened = !!child;
+    if (!child) return out;
+    const d = child.document;
+    out.messagesInChild = d.querySelectorAll('.msg').length;
+    out.ownerEmptied = !document.querySelector('.msgs .msg');
+    // fuentes: la tipografía del desk en el hijo es la misma y está cargada
+    const sample = d.querySelector('.msgtext') || d.querySelector('.msg');
+    // el <link> clonado carga asíncrono: esperar a que el hijo tenga la tipografía del dueño
+    const styled = Date.now();
+    await waitFor(() => sample && child.getComputedStyle(sample).fontFamily === out.ownerFontFamily, 10000);
+    out.styledAfterMs = Date.now() - styled;
+    const family = sample ? child.getComputedStyle(sample).fontFamily : '';
+    out.fontFamily = family;
+    out.fontMatchesOwner = family === out.ownerFontFamily;
+    await child.document.fonts.ready;
+    const firstFamily = family.split(',')[0].trim().replace(/^['"]|['"]$/g, '');
+    out.fontLoaded = !!firstFamily && child.document.fonts.check(`14px "${firstFamily}"`);
+    out.childFontFaces = [...child.document.fonts].filter(f => f.status === 'loaded').length;
+    out.ownerFontFaces = [...document.fonts].filter(f => f.status === 'loaded').length;
+    // borrador: escribir en el compositor del popout y verlo en el dueño al volver
+    const composer = d.querySelector('textarea');
+    if (composer) {
+      const setter = Object.getOwnPropertyDescriptor(child.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(composer, 'borrador escrito en el popout');
+      composer.dispatchEvent(new child.Event('input', { bubbles: true }));
+      await timeout(500);
+      child.close();
+      const back = await waitFor(() => {
+        const area = document.querySelector('#root textarea');
+        return area && area.value === 'borrador escrito en el popout' && area.value;
+      }, 10000);
+      out.draftBackInOwner = back === 'borrador escrito en el popout';
+      out.redocked = !!document.querySelector('.msgs .msg');
+    }
+    return out;
+  })() : { skipped: true };
+
   // #6: la secuencia de popout.tsx — window.open('', nombre, features), un shell
   // estándar escrito en el hijo, estilos clonados del dueño y DOM del dueño
   // movido al hijo como un portal de React.
