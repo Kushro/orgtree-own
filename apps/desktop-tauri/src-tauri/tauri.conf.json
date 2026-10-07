@@ -9,7 +9,7 @@
   "app": {
     "windows": [
       {
-        "label": "main",
+        "label": "splash",
         "title": "Orgtree (Tauri spike)",
         "width": 1200,
         "height": 800,

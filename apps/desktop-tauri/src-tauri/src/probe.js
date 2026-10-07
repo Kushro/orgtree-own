@@ -27,6 +27,45 @@
     document.documentElement.appendChild(frame);
   });
 
+  // #4: el shim de window.orgtreeDesktop y la ventana de inicio del renderer real
+  const waitFor = async (test, ms) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { const value = test(); if (value) return value; await timeout(200) }
+    return null;
+  };
+  r.shell = await (async () => {
+    const out = {};
+    const bridge = window.orgtreeDesktop;
+    out.bridge = !!bridge;
+    if (bridge) {
+      try { out.version = await bridge.getAppVersion() } catch (e) { out.version = 'error:' + e }
+      try { out.status = (await bridge.getStatus()).state } catch (e) { out.status = 'error:' + e }
+      try { out.preferences = typeof (await bridge.getPreferences()).visualTheme } catch (e) { out.preferences = 'error:' + e }
+      out.outside = await bridge.openHarnessLink('claude').then(() => 'resolved', e => String(e && e.message || e));
+      out.requestOrg = typeof bridge.requestOrg; // omitido a propósito: el renderer abre en la misma ventana
+    }
+    out.iframeBridge = await new Promise(done => {
+      const frame = document.createElement('iframe');
+      frame.srcdoc = '<p>sin puente</p>';
+      frame.onload = () => { try { done(typeof frame.contentWindow.orgtreeDesktop) } catch (e) { done('error:' + e) } };
+      setTimeout(() => done('timeout'), 5000);
+      document.documentElement.appendChild(frame);
+    });
+    const root = document.querySelector('#root');
+    out.rendered = !!(root && await waitFor(() => root.children.length, 15000));
+    if (out.rendered) {
+      const row = await waitFor(() => [...document.querySelectorAll('#root *')]
+        .find(el => el.children.length === 0 && el.textContent.trim() === 'spike-fixture'), 15000);
+      out.orgListed = !!row;
+      if (row) {
+        row.click();
+        out.orgPath = await waitFor(() => location.pathname.startsWith('/o/') && location.pathname, 10000);
+        out.agentShown = !!(await waitFor(() => document.body.innerText.includes('worker'), 15000));
+      }
+    }
+    return out;
+  })();
+
   // #6: la secuencia de popout.tsx — window.open('', nombre, features), un shell
   // estándar escrito en el hijo, estilos clonados del dueño y DOM del dueño
   // movido al hijo como un portal de React.
@@ -81,6 +120,7 @@
     window.__orgtreeProbeShared = { draft: input.value };
     try { out.sharedState = w.opener.__orgtreeProbeShared.draft === 'escrito en el popout' } catch (e) { out.sharedState = String(e) }
     out.size = [w.innerWidth, w.innerHeight];
+    out.childBridge = typeof w.orgtreeDesktop;
     out.closedFlag = w.closed;
     return out;
   })();

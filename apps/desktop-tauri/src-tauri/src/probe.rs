@@ -8,6 +8,10 @@
 //!   y `echo`, un servidor local en otro puerto que registra si llegó la
 //!   cookie desde la página (control positivo) y desde un iframe
 //!   `sandbox="allow-scripts"` como los del HTML de agentes (no debe llevarla);
+//! - #4, ventana de inicio: el shim de `window.orgtreeDesktop` existe en la
+//!   página y responde por `invoke`, y no existe en iframes ni popouts; si el
+//!   motor sirve el renderer, la lista de orgs muestra la org del fixture y
+//!   abrirla lleva a su organigrama;
 //! - #6, popouts: la secuencia de `renderer/src/popout.tsx` (`window.open`,
 //!   shell escrito en el hijo, estilos clonados, DOM del dueño movido al hijo,
 //!   borrador compartido).
@@ -34,7 +38,7 @@ pub struct Probe {
 
 impl Probe {
     pub fn from_env() -> Option<Probe> {
-        let out = PathBuf::from(std::env::var_os("ORGTREE_TAURI_PROBE")?);
+        let out = PathBuf::from(std::env::var_os("ORGTREE_TAURI_PROBE").filter(|v| !v.is_empty())?);
         let listener = TcpListener::bind("127.0.0.1:0").ok()?;
         let echo_port = listener.local_addr().ok()?.port();
         let hits = Arc::new(Mutex::new(Vec::new()));

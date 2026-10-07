@@ -6,6 +6,7 @@ on:
     paths:
       - apps/desktop-tauri/**
       - engine/launch.py
+      - apps/desktop/renderer/**
       - .github/workflows/spike-tauri.yml
   workflow_dispatch:
 
@@ -27,7 +28,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: apps/desktop-tauri/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop-tauri/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -60,17 +63,29 @@ jobs:
           ORGTREE_TEST_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo test -- --include-ignored --nocapture
 
+      # El renderer React sin cambios, compilado como en tools/build.mjs; lo
+      # sirve el motor (ORGTREE_V2_UI_DIR). Sin el binario de Electron.
+      - name: Build renderer
+        working-directory: .
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx vite build apps/desktop/renderer --base / --outDir ../../../dist/renderer --emptyOutDir --logLevel warn
+
       - name: Install Tauri CLI
         run: npm ci
 
       - name: Build installer
         run: npx tauri build --ci
 
-      - name: Smoke test (window starts, launches the engine, cookie auth)
+      - name: Smoke test (engine, cookie auth, bridge, home window, popouts)
         shell: pwsh
         env:
           ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
-          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\engine
+          # El motor real con una org sembrada (un agente con historial) y sin proveedores.
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
           ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-smoke
           # Prueba de autenticación por cookie en WebView2 (src-tauri/src/probe.rs).
           ORGTREE_TAURI_PROBE: ${{ runner.temp }}\orgtree-tauri-probe.json
@@ -105,6 +120,18 @@ jobs:
           if ($top.Count -ne 1 -or -not $top[0].cookie) { $failures += 'positive control failed: the engine page did not send the cookie' }
           if ($frame.Count -ne 1) { $failures += 'the sandboxed iframe request never arrived' }
           elseif ($frame[0].cookie) { $failures += 'the sandboxed iframe sent the desktop cookie' }
+          # #4: shim de window.orgtreeDesktop y ventana de inicio del renderer real
+          $sh = $probe.page.shell
+          foreach ($check in 'bridge', 'rendered', 'orgListed', 'agentShown') {
+            if ($sh.$check -ne $true) { $failures += "shell.$check was $($sh.$check)" }
+          }
+          if ($sh.version -ne '0.0.1') { $failures += "getAppVersion via invoke: $($sh.version)" }
+          if ($sh.status -ne 'ready') { $failures += "getStatus via invoke: $($sh.status)" }
+          if ($sh.preferences -ne 'string') { $failures += "getPreferences via invoke: $($sh.preferences)" }
+          if ($sh.outside -notlike '*fuera del recorte*') { $failures += "out-of-scope method did not reject clearly: $($sh.outside)" }
+          if ($sh.iframeBridge -ne 'undefined') { $failures += "the bridge leaked into an iframe: $($sh.iframeBridge)" }
+          if ($sh.orgPath -ne '/o/spike-fixture') { $failures += "opening the org went to $($sh.orgPath)" }
+          if ($probe.page.popout.childBridge -ne 'undefined') { $failures += "the bridge leaked into a popout: $($probe.page.popout.childBridge)" }
           # #6: popouts con window.open y portales (secuencia de renderer/src/popout.tsx)
           $pop = $probe.page.popout
           foreach ($check in 'opened', 'opener', 'sameOrigin', 'moved', 'draftKept', 'draftShared', 'sharedState') {
@@ -122,7 +149,7 @@ jobs:
           }
           Stop-Process -Id $p.Id -Force
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Cookie auth and popouts verified in WebView2"
+          Write-Host "Cookie auth, desktop bridge, home window and popouts verified in WebView2"
 
       - name: Report sizes
         shell: pwsh

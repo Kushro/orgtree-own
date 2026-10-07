@@ -107,6 +107,39 @@ En Tauri 2.12 eso se resuelve con `on_new_window` → `NewWindowResponse::Create
 
 En Linux (WebKitGTK), `window.open` sin un gesto del usuario queda bloqueado y Tauri no expone el ajuste. Linux no es destino, así que no se trabajó.
 
+### Ventana de inicio y `window.orgtreeDesktop` (#4)
+
+El renderer React se usa **sin modificar**: `npx vite build apps/desktop/renderer --base / --outDir ../../../dist/renderer`, igual que `tools/build.mjs`, y lo sirve el motor (`ORGTREE_TAURI_UI_DIR` → `ORGTREE_V2_UI_DIR`).
+
+Ventanas:
+
+- `splash` (local, `ui/index.html`): muestra el estado del arranque. Solo tiene la capability `default`.
+- `main`: se crea cuando el motor está listo, directo en su origen. Se crea recién ahí porque su shim lleva el **origen exacto** del motor, que antes no se conoce. Electron le pasa el mismo dato al preload por argv. `splash` se cierra cuando `main` termina de cargar: cerrarla antes termina la app, porque Tauri todavía no registró `main`.
+
+El shim (`src-tauri/src/shim.js`) es un `initialization_script` de `main`:
+
+- Expone `window.orgtreeDesktop` con el contrato de `apps/desktop/preload/index.ts` sobre `invoke`.
+- Igual que el preload, solo existe en el frame principal y en el origen exacto del motor: los iframes y los popouts no lo tienen.
+- Los métodos opcionales que el recorte no cubre (`requestOrg`, ventanas múltiples, popouts nativos, login de proveedores) se omiten a propósito. El renderer ya tiene un camino para cuando faltan, el mismo de un navegador: abre la org en la misma ventana.
+- Los obligatorios fuera del recorte rechazan con un error claro.
+
+Seguridad del puente:
+
+- `build.rs` declara un `AppManifest` con los 12 comandos `desktop_*`.
+- La capability `engine-ui` (`capabilities/engine-ui.json`) los concede solo a `main` con `remote.urls` `http://127.0.0.1:*/*`, sin `core:default`, shell, fs ni process.
+- Además, cada comando verifica en Rust que lo llama `main` y que su URL está en el origen exacto del motor (`src-tauri/src/desktop.rs`).
+
+**Motor de fixture** (`apps/desktop-tauri/fixture-engine/launch.py`): el motor real con una org sembrada (`spike-fixture`, con un agente `worker` y su historial, que incluye una herramienta) y sin proveedores, siguiendo `tests/test_engine_http.py`. El perfil (`~/.claude`) queda en una carpeta hermana de la raíz descartable. En Windows corre `launch.main()`; en Linux sirve la misma app con uvicorn, solo para desarrollar.
+
+**Verificado en WebView2** con la prueba de `ORGTREE_TAURI_PROBE`:
+
+- el shim existe y responde por `invoke` (`getAppVersion`, `getStatus`, `getPreferences`);
+- un método fuera del recorte rechaza con un error claro;
+- el shim no aparece en iframes ni en popouts;
+- la página de inicio del renderer lista `spike-fixture`, y al abrirla navega a `/o/spike-fixture` y muestra al agente.
+
+Reutilización del renderer: **100 %**. Ningún archivo de `apps/desktop/renderer` cambió (61.000 líneas TSX y 8.700 de CSS).
+
 El workflow `.github/workflows/spike-tauri.yml` hace lo mismo en `windows-latest` en cada push a `spike/tauri`: compila, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-tauri-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.tauri-spike`), así que no pisa una instalación de Orgtree existente.

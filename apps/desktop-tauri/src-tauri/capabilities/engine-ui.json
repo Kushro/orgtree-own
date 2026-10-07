@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "engine-ui",
+  "description": "The engine UI window (main) at http://127.0.0.1. It renders agent-written HTML and Markdown, so it gets only the orgtreeDesktop bridge commands: no core plugins, shell, fs or process. Each command also checks the exact engine origin in Rust.",
+  "windows": [
+    "main"
+  ],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*/*"
+    ]
+  },
+  "permissions": [
+    "allow-desktop-app-version",
+    "allow-desktop-status",
+    "allow-desktop-window-state",
+    "allow-desktop-window-controls-state",
+    "allow-desktop-preferences",
+    "allow-desktop-set-preferences",
+    "allow-desktop-show",
+    "allow-desktop-quit",
+    "allow-desktop-window-minimize",
+    "allow-desktop-window-toggle-maximize",
+    "allow-desktop-window-close",
+    "allow-desktop-harnesses"
+  ]
+}
