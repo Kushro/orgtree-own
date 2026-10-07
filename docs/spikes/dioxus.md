@@ -147,6 +147,40 @@ Límites:
 
 El CI sube la captura `popout` con las dos ventanas.
 
+### Integración nativa (#14)
+
+`src/native.rs` cubre cuatro cosas.
+
+**Ventana sin marco.** Se crea con `with_decorations(false)`, como `frame: false` en Electron. El desk en otra ventana tampoco tiene marco.
+
+- Los botones de minimizar, maximizar y cerrar son un componente RSX con las clases de `WindowControls` del renderer. Actúan sobre su propia ventana y siguen el estado real a través de `Resized`.
+- El arrastre usa `-webkit-app-region: drag` en el título de la tarjeta de inicio (con el CSS del renderer) y en los headers de la org y del desk (`shell.css`). WebView2 lo respeta porque wry activa `IsNonClientRegionSupportEnabled`, igual que en Tauri.
+
+**Bandeja.** Usa la de Dioxus (`init_tray_icon`), con el menú Abrir Orgtree / Salir. Un clic en el ícono muestra las ventanas.
+
+- Cerrar la principal la oculta y la app sigue en la bandeja, como Electron con `exitOnClose` apagado, su valor por defecto.
+- Salir cierra todas las ventanas. Dioxus no tiene un `exit()`: la principal pasa a `WindowCloses`, se cierran todas y, sin ventanas, el loop termina y `LoopDestroyed` apaga el motor.
+
+**Notificación.** Usa `notify-rust`, porque Dioxus no tiene plugin de notificaciones. En Windows toma el AppUserModelID de PowerShell cuando la app no está instalada con el suyo.
+
+**Instancia única.** Dioxus tampoco tiene plugin para esto; son unas 40 líneas propias.
+
+- La primera instancia toma un candado de archivo junto a la raíz de datos (`File::try_lock`) y escucha en un puerto de `127.0.0.1` que guarda en otro archivo.
+- Una segunda ejecución no consigue el candado, le avisa por ese puerto y termina. La primera, al recibir el aviso, muestra y enfoca su ventana.
+- Cualquier proceso local puede mandar ese aviso, pero lo único que puede pedir es mostrar la ventana.
+
+**Verificado en WebView2** con la prueba y el CI:
+
+- la ventana no tiene marco (el área cliente ocupa la ventana entera);
+- los botones RSX maximizan y restauran;
+- la notificación se muestra y el ícono de la bandeja existe;
+- el CI arrastra la ventana con el mouse real desde el header del desk, y se mueve;
+- con todas las ventanas cerradas, la app sigue viva en la bandeja;
+- una segunda ejecución termina sola y vuelve a mostrar la principal;
+- Salir termina la app y cierra el puerto del motor.
+
+Escalado a 125 % y 150 %: el runner de CI corre al 100 % y no se puede cambiar sin cerrar la sesión. Lo prueba una persona en Windows, con las métricas de tamaño, RAM y arranque.
+
 El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.

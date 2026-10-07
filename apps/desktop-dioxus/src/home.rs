@@ -37,6 +37,7 @@ pub fn Home() -> Element {
                         target: "_blank", rel: "noreferrer", title: "Orgtree on GitHub",
                         GitHubIcon {}
                     }
+                    crate::native::WindowControls {}
                 }
                 match orgs() {
                     None => rsx! { div { class: "dim org-freshness", role: "status", "cargando…" } },

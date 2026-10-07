@@ -194,6 +194,7 @@ pub fn DeskView(org: String, node: String, #[props(default)] popout: bool) -> El
                         "⧉ Pop out"
                     }
                 }
+                crate::native::WindowControls {}
             }
             div { class: "msgs-wrap",
                 div { class: "msgs",

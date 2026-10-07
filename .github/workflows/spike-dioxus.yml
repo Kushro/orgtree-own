@@ -56,7 +56,7 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (engine, home window, live desk and desk window in RSX)
+      - name: Smoke test (engine, home, live desk, desk window and native integration in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -83,30 +83,75 @@ jobs:
             $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
             $graphics.Dispose(); $bitmap.Dispose()
           }
-          $deadline = (Get-Date).AddSeconds(240)
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Win {
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+            [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, IntPtr e);
+          }
+          '@
+          $ci = @{}
+          # #14: arrastrar la ventana con el mouse real desde el header (zona -webkit-app-region: drag)
+          function Test-Drag {
+            $probe = Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw | ConvertFrom-Json
+            $nat = $probe.native
+            $hwnd = [IntPtr][long]$nat.shell.hwnd
+            # tao deja WS_CAPTION (snap, animaciones) y quita el área no cliente: sin marco,
+            # el área cliente ocupa la ventana entera.
+            $wr = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$wr)
+            $cr = New-Object Win+RECT; [void][Win]::GetClientRect($hwnd, [ref]$cr)
+            $ci.frame = "window $($wr.R - $wr.L)x$($wr.B - $wr.T), client $($cr.R)x$($cr.B)"
+            $ci.framed = (($wr.R - $wr.L) - $cr.R -gt 2) -or (($wr.B - $wr.T) - $cr.B -gt 2)
+            $drag = $nat.page.drag
+            if (-not $drag) { return }
+            $before = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$before)
+            $pt = New-Object Win+POINT; $pt.X = [int]($drag.x * $drag.dpr); $pt.Y = [int]($drag.y * $drag.dpr)
+            [void][Win]::ClientToScreen($hwnd, [ref]$pt)
+            [void][Win]::SetCursorPos($pt.X, $pt.Y); Start-Sleep -Milliseconds 200
+            [Win]::mouse_event(0x2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 200
+            for ($i = 1; $i -le 10; $i++) { [void][Win]::SetCursorPos($pt.X + 12 * $i, $pt.Y + 6 * $i); Start-Sleep -Milliseconds 40 }
+            [Win]::mouse_event(0x4, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 500
+            $after = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$after)
+            $ci.dx = $after.L - $before.L; $ci.dy = $after.T - $before.T; $ci.at = "$($pt.X),$($pt.Y)"
+          }
+          $deadline = (Get-Date).AddSeconds(300)
           $shots = @{}
-          # El reporte termina con la ventana del desk después de cerrar la principal (#13);
-          # entonces la app sale sola.
-          $finished = { (Test-Path $env:ORGTREE_DIOXUS_PROBE) -and (Select-String -Path $env:ORGTREE_DIOXUS_PROBE -Pattern '"popout_after_owner_close"' -Quiet) }
-          while (-not (& $finished) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+          while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
             # la prueba deja un marcador y espera 3 s: capturas del inicio, del desk y de las dos ventanas
             foreach ($name in 'home', 'desk', 'popout') {
               if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
                 try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
               }
             }
-            Start-Sleep -Milliseconds 500; $p.Refresh()
+            if (-not $ci.native -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).native")) {
+              $ci.native = $true
+              try { Test-Drag } catch { $ci.dragError = "$_" }
+              try { Save-Screen 'native' } catch { Write-Host "screenshot: $_" }
+              New-Item -ItemType File "$($env:ORGTREE_DIOXUS_PROBE).native-done" | Out-Null
+            }
+            # Sin ventanas visibles la app sigue en la bandeja; una segunda ejecución la vuelve a mostrar.
+            if (-not $ci.tray -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).tray")) {
+              $ci.tray = $true
+              $p.Refresh(); $ci.aliveInTray = -not $p.HasExited
+              $second = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -ArgumentList '--second' -PassThru
+              $ci.secondExited = $second.WaitForExit(20000)
+              if (-not $ci.secondExited) { $second.Kill() }
+              Start-Sleep -Milliseconds 800
+              try { Save-Screen 'second-instance' } catch { Write-Host "screenshot: $_" }
+            }
+            Start-Sleep -Milliseconds 300; $p.Refresh()
           }
-          if ($p.HasExited -and -not (& $finished)) {
-            if (Test-Path $env:ORGTREE_DIOXUS_PROBE) { Write-Host "Partial probe: $(Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw)" }
-            throw "app exited early with code $($p.ExitCode)"
-          }
-          # Cerrar el último desk con la principal oculta termina la app, y con ella el motor.
-          $exited = $p.WaitForExit(20000)
+          # Salir (como desde la bandeja) termina la app, y con ella el motor.
+          $exited = $p.HasExited
+          if (-not (Test-Path $env:ORGTREE_DIOXUS_PROBE)) { throw "the WebView2 probe did not report" }
           $port = Join-Path $env:ORGTREE_DIOXUS_DATA 'engine-port.json'
           if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
           Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
-          if (-not (Test-Path $env:ORGTREE_DIOXUS_PROBE)) { throw "the WebView2 probe did not report within 240 s" }
           $raw = Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw
           Write-Host "WebView2 probe: $raw"
           "### WebView2 probe (Dioxus)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
@@ -145,7 +190,27 @@ jobs:
           if ($oc.popouts -ne 1) { $failures += "desk windows after closing the main one: $($oc.popouts)" }
           $after = $probe.popout_after_owner_close
           if ($after.alive -ne $true -or $after.draft -ne 'escrito en el popout') { $failures += "the desk window did not survive the main close: $($after | ConvertTo-Json -Compress)" }
-          if (-not $exited) { $failures += 'the app did not exit after its last window closed'; Stop-Process -Id $p.Id -Force }
+          # #14: ventana sin marco, botones, notificación, bandeja, arrastre e instancia única
+          $nat = $probe.native
+          if ($nat.shell.decorated -ne $false) { $failures += "main window is decorated: $($nat.shell.decorated)" }
+          Write-Host "Frame: $($ci.frame)"
+          if ($ci.framed -ne $false) { $failures += "main window has a native frame: $($ci.frame)" }
+          if ($nat.page.controls -lt 3) { $failures += "window controls in RSX: $($nat.page.controls)" }
+          foreach ($check in 'maximized', 'restored') {
+            if ($nat.page.$check -ne $true) { $failures += "native.$check was $($nat.page.$check)" }
+          }
+          if ($nat.shell.notify -ne $true) { $failures += 'the native notification failed' }
+          if ($nat.shell.tray -ne $true) { $failures += 'no tray icon' }
+          $moved = "dx $($ci.dx), dy $($ci.dy) (at $($ci.at), region $($nat.page.drag.region)) $($ci.dragError)"
+          Write-Host "Drag: $moved"
+          if (-not ($ci.dx -ge 60 -and $ci.dy -ge 30)) { $failures += "dragging the header did not move the window: $moved" }
+          $to = $probe.tray_only
+          if ($to.main_visible -ne $false -or $to.popouts -ne 0 -or $ci.aliveInTray -ne $true) { $failures += "with every window closed the app should stay in the tray: $($to | ConvertTo-Json -Compress), alive $($ci.aliveInTray)" }
+          if ($ci.secondExited -ne $true) { $failures += 'the second instance did not exit' }
+          $si = $probe.second_instance
+          if (-not $si -or $si.main_visible -ne $true) { $failures += "the second instance did not bring back the main window: $($si | ConvertTo-Json -Compress)" }
+          "### Native window (#14, Dioxus)`n- drag: $moved`n- second instance: $($si | ConvertTo-Json -Compress)`n- scale: $($nat.shell.scale)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          if (-not $exited) { $failures += 'the app did not exit after Quit'; Stop-Process -Id $p.Id -Force }
           else {
             Write-Host "App exited by itself with code $($p.ExitCode)"
             $enginePort = (Get-Content $port -Raw | ConvertFrom-Json).port
@@ -153,7 +218,7 @@ jobs:
             try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
           }
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Home window, live desk and desk window in RSX verified in WebView2"
+          Write-Host "Home window, live desk, desk window and native integration in RSX verified in WebView2"
 
       - name: Report sizes
         shell: pwsh

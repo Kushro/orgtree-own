@@ -25,3 +25,10 @@
 .dx-desk .dx-composer { margin: 0 0 12px; }
 .dx-desk .dx-composer textarea { width: 100%; resize: none; background: transparent; color: inherit; border: 0; font: inherit; outline: none; }
 .dx-desk header .dx-popout { margin-left: auto; }
+
+/* Ventana sin marco (#14): los headers son zona de arrastre, sus botones no. */
+.dx-org-view header, .dx-desk header { -webkit-app-region: drag; }
+.dx-org-view header button, .dx-desk header button { -webkit-app-region: no-drag; }
+.dx-org-view header .window-controls, .dx-desk header .window-controls { margin-left: auto; }
+.dx-desk header .dx-popout + .window-controls { margin-left: 4px; }
+.welcome-card h1 .window-controls { margin-left: auto; }

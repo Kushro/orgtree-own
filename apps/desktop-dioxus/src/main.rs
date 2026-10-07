@@ -4,6 +4,7 @@
 mod desk;
 mod home;
 mod icons;
+mod native;
 mod org;
 mod probe;
 mod windows;
@@ -105,8 +106,18 @@ fn stop_engine() {
 }
 
 fn main() {
+    // Instancia única (#14): una segunda ejecución le avisa a la primera y termina.
+    if let Ok(options) = engine_options() {
+        if let native::Instance::Second = native::single_instance(&options.data_root) {
+            return;
+        }
+    }
     let window = WindowBuilder::new()
         .with_title("Orgtree (Dioxus spike)")
+        // Sin marco (#14), como Electron (`frame: false`): botones propios en RSX
+        // y arrastre con `-webkit-app-region`, que WebView2 respeta porque wry
+        // activa `IsNonClientRegionSupportEnabled`.
+        .with_decorations(false)
         .with_inner_size(dioxus::desktop::LogicalSize::new(1200.0, 800.0))
         .with_min_inner_size(dioxus::desktop::LogicalSize::new(640.0, 480.0));
 
@@ -128,6 +139,8 @@ fn App() -> Element {
     use_context_provider(|| route);
     use_context_provider(|| client);
     use_hook(|| windows::register_main(dioxus::desktop::window()));
+    native::use_tray();
+    native::use_second_instance();
     use_hook(move || {
         let (sender, mut receiver) = futures_channel::mpsc::unbounded();
         start_engine(sender);

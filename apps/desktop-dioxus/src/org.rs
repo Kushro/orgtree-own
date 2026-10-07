@@ -29,6 +29,7 @@ pub fn OrgView(slug: String) -> Element {
             header {
                 button { class: "home", onclick: move |_| route.set(Route::Home), HomeIcon {} " All organizations" }
                 h2 { "{slug}" }
+                crate::native::WindowControls {}
             }
             {content}
         }

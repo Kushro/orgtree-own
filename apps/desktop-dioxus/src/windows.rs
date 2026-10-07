@@ -15,11 +15,13 @@
 //! proceso. Las ventanas corren en el mismo hilo, así que el registro de
 //! ventanas usa `thread_local!`.
 //!
-//! **Cerrar la principal.** Con desks abiertos en otras ventanas, cerrar la
-//! principal la oculta (como Electron: "Main close preserves all popouts") y
-//! los desks siguen vivos con su borrador. Al cerrar el último desk con la
-//! principal oculta, la app termina.
+//! **Cerrar la principal.** Cerrar la principal la oculta y la app sigue en
+//! la bandeja (#14), como Electron con `exitOnClose` apagado, que es su valor
+//! por defecto. Los desks abiertos en otras ventanas siguen vivos con su
+//! borrador ("Main close preserves all popouts"). Salir (menú de la bandeja)
+//! cierra todas las ventanas y la app termina.
 
+use dioxus::desktop::tao::window::WindowId;
 use dioxus::desktop::{Config, DesktopContext, LogicalSize, WindowBuilder, WindowCloseBehaviour};
 use dioxus::prelude::*;
 use orgtree_engine_client::Client;
@@ -75,25 +77,36 @@ pub fn use_shared_draft(key: String) -> Signal<String> {
 thread_local! {
     static MAIN: RefCell<Option<DesktopContext>> = const { RefCell::new(None) };
     static POPOUTS: Cell<usize> = const { Cell::new(0) };
+    static POPOUT_IDS: RefCell<Vec<WindowId>> = const { RefCell::new(Vec::new()) };
 }
 
-/// La ventana principal se registra al montarse.
+/// La ventana principal se registra al montarse. Cerrarla la oculta.
 pub fn register_main(window: DesktopContext) {
+    window.set_close_behavior(WindowCloseBehaviour::WindowHides);
     MAIN.with(|main| *main.borrow_mut() = Some(window));
-    sync_main_close();
+}
+
+pub fn with_main(f: impl FnOnce(&DesktopContext)) {
+    MAIN.with(|main| {
+        if let Some(main) = main.borrow().as_ref() {
+            f(main);
+        }
+    });
 }
 
 pub fn popout_count() -> usize {
     POPOUTS.with(Cell::get)
 }
 
-/// Con desks abiertos, cerrar la principal la oculta; sin ellos, la cierra.
-fn sync_main_close() {
-    let behaviour = if popout_count() > 0 { WindowCloseBehaviour::WindowHides } else { WindowCloseBehaviour::WindowCloses };
-    MAIN.with(|main| {
-        if let Some(main) = main.borrow().as_ref() {
-            main.set_close_behavior(behaviour);
+/// Salir: cerrar los desks y la principal (en modo cierre, no oculta). Sin
+/// ventanas, Dioxus termina el loop y `LoopDestroyed` apaga el motor.
+pub fn quit_all() {
+    with_main(|main| {
+        main.set_close_behavior(WindowCloseBehaviour::WindowCloses);
+        for id in POPOUT_IDS.with(|ids| ids.borrow().clone()) {
+            main.close_window(id);
         }
+        main.close();
     });
 }
 
@@ -104,26 +117,17 @@ pub fn open_desk_window(client: Client, org: String, node: String) {
     let window = WindowBuilder::new()
         .with_title(title)
         .with_inner_size(LogicalSize::new(760.0, 680.0))
+        // Sin marco, como los popouts de Electron: botones propios en el header.
+        .with_decorations(false)
         .with_min_inner_size(LogicalSize::new(420.0, 360.0));
     POPOUTS.with(|count| count.set(count.get() + 1));
-    sync_main_close();
     dioxus::desktop::window().new_window(dom, Config::new().with_window(window).with_menu(None));
 }
 
 /// Un desk cerró su ventana. Corre al soltar su VirtualDom, fuera de un render.
-fn popout_closed() {
+fn popout_closed(id: WindowId) {
     POPOUTS.with(|count| count.set(count.get().saturating_sub(1)));
-    sync_main_close();
-    if popout_count() == 0 {
-        MAIN.with(|main| {
-            if let Some(main) = main.borrow().as_ref() {
-                if !main.window.is_visible() {
-                    // La principal estaba oculta y no queda ninguna ventana: salir.
-                    main.close();
-                }
-            }
-        });
-    }
+    POPOUT_IDS.with(|ids| ids.borrow_mut().retain(|other| *other != id));
 }
 
 #[derive(Props, Clone)]
@@ -145,7 +149,12 @@ fn DeskWindow(props: DeskWindowProps) -> Element {
     let client = props.client.clone();
     use_context_provider(|| Signal::new(Some(client)));
     use_context_provider(|| Signal::new(crate::Route::Desk { org: props.org.clone(), node: props.node.clone() }));
-    use_drop(popout_closed);
+    let id = use_hook(|| {
+        let id = dioxus::desktop::window().id();
+        POPOUT_IDS.with(|ids| ids.borrow_mut().push(id));
+        id
+    });
+    use_drop(move || popout_closed(id));
     rsx! {
         style { {crate::RENDERER_CSS} }
         style { {crate::SHELL_CSS} }
