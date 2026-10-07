@@ -927,6 +927,9 @@ jobs:
           "- exit codes: $($codes -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           if ($failures) { throw ($failures -join '; ') }
           Write-Host 'Engine lifecycle verified: refusal and retry, conversion phases, crash notice and recovery, maintenance, and three orderly exits without orphans'
+          # El runner sale con el último $LASTEXITCODE: un taskkill /T anterior (el motor
+          # externo, cuyo árbol ya puede haber muerto en parte) no decide el resultado.
+          exit 0
 
       # #24: el instalador generado, instalado en silencio en una carpeta descartable
       # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y
