@@ -1,0 +1,11 @@
+/* Lo que el shell Dioxus agrega encima del CSS del renderer. */
+.dx-splash { min-height: 100vh; display: grid; place-content: center; text-align: center; }
+.dx-splash p { opacity: .75; }
+.dx-org-view { padding: 16px 24px; }
+.dx-org-view header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.dx-org-view header h2 { margin: 0; }
+.dx-agents { display: flex; flex-wrap: wrap; gap: 12px; }
+.dx-agent { width: 180px; padding: 10px 12px; border: 1px solid var(--line, #333); border-radius: 6px;
+  background: var(--panel, #252525); cursor: pointer; }
+.dx-agent .dx-agent-title { font-weight: 600; }
+.dx-agent .dx-agent-meta { font-size: 11px; }

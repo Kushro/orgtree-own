@@ -3003,7 +3003,10 @@ dependencies = [
  "dioxus",
  "futures-channel",
  "futures-util",
+ "orgtree-engine-client",
  "orgtree-engine-host",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

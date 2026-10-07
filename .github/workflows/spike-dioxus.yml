@@ -5,6 +5,7 @@ on:
     branches: [spike/dioxus]
     paths:
       - apps/desktop-dioxus/**
+      - apps/desktop/renderer/src/styles.css
       - .github/workflows/spike-dioxus.yml
   workflow_dispatch:
 
@@ -55,26 +56,62 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (window starts, launches the engine and stays up)
+      - name: Smoke test (engine, home window in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
-          ORGTREE_DIOXUS_ENGINE_DIR: ${{ github.workspace }}/engine
+          # El motor real con una org sembrada (un agente con historial) y sin proveedores.
+          ORGTREE_DIOXUS_ENGINE_DIR: ${{ github.workspace }}/apps/desktop-dioxus/fixture-engine
           ORGTREE_DIOXUS_DATA: ${{ runner.temp }}/orgtree-dioxus-smoke
+          ORGTREE_DIOXUS_PROBE: ${{ runner.temp }}/orgtree-dioxus-probe.json
         run: |
           $exe = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
             Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
           if (-not $exe) { throw "orgtree-dioxus.exe not found" }
           Write-Host "Running $($exe.FullName)"
           $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
-          Start-Sleep -Seconds 30
-          $p.Refresh()
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          $deadline = (Get-Date).AddSeconds(120)
+          $shot = $false
+          while (-not (Test-Path $env:ORGTREE_DIOXUS_PROBE) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            # captura del inicio en RSX cuando la lista ya cargó (antes de que la prueba abra la org)
+            if (-not $shot -and (Test-Path (Join-Path $env:ORGTREE_DIOXUS_DATA 'engine-port.json'))) {
+              Start-Sleep -Seconds 4; try { Save-Screen 'home' } catch { Write-Host "screenshot: $_" }; $shot = $true
+            }
+            Start-Sleep -Seconds 1; $p.Refresh()
+          }
           if ($p.HasExited) { throw "app exited early with code $($p.ExitCode)" }
           $port = Join-Path $env:ORGTREE_DIOXUS_DATA 'engine-port.json'
           if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
           Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
+          if (-not (Test-Path $env:ORGTREE_DIOXUS_PROBE)) { throw "the WebView2 probe did not report within 120 s" }
+          try { Save-Screen 'org' } catch { Write-Host "screenshot: $_" }
+          $raw = Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw
+          Write-Host "WebView2 probe: $raw"
+          "### WebView2 probe (Dioxus)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $probe = $raw | ConvertFrom-Json
+          $failures = @()
+          if ($probe.error) { $failures += "probe error: $($probe.error)" }
+          # #11: página de inicio en RSX con datos del cliente Rust
+          $hp = $probe.home
+          foreach ($check in 'card', 'orgListed', 'orgOpened', 'agentShown') {
+            if ($hp.$check -ne $true) { $failures += "home.$check was $($hp.$check)" }
+          }
+          if ($hp.version -ne '0.0.1') { $failures += "version badge: $($hp.version)" }
+          if ($hp.fontFamily -notlike '*Segoe UI*') { $failures += "renderer CSS not applied: $($hp.fontFamily)" }
+          if ($hp.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the webview: $($hp.bridge)" }
           Stop-Process -Id $p.Id -Force
-          Write-Host "App stayed up for 30 s"
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host "Home window in RSX verified in WebView2"
 
       - name: Report sizes
         shell: pwsh
@@ -84,6 +121,13 @@ jobs:
           @(Get-ChildItem dist -Recurse -Filter *.exe) + @($app) |
             ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: orgtree-dioxus-screens
+          path: ${{ runner.temp }}/screens/*.png
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
         with:
