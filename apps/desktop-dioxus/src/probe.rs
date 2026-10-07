@@ -12,6 +12,12 @@
 //! - #12, desk en RSX: la conversación, la herramienta, el Markdown sanitizado,
 //!   el texto en vivo, la carga de páginas anteriores hasta el primer mensaje y
 //!   los cuadros de un scroll de punta a punta;
+//! - #27, desk completo: pensamiento, mail con respuesta citada y adjunto,
+//!   avisos y segmentos; enviar un mensaje (queda aceptado en el buzón);
+//!   los estados del turno (en cola por el límite de turnos, trabajando con
+//!   STOP, detenido con reanudar); el cambio de modelo (en cola a mitad de
+//!   turno, con confirmación entre proveedores) y el esfuerzo; y el revelado
+//!   de archivos, que rechaza rutas relativas o inexistentes;
 //! - #13, varias ventanas: el desk en otra ventana nativa, el borrador
 //!   compartido en los dos sentidos y el cierre de la principal con el desk
 //!   abierto (la principal se oculta, el desk sigue);
@@ -267,6 +273,131 @@ if (card) {
     msgs.scrollTop = msgs.scrollHeight / 2;
     dioxus.send({ pause: 'desk' });
     await timeout(3000);
+
+    // #27: desk completo. El contenido sembrado está al final de la conversación.
+    const full = r.deskFull = {};
+    const bottom = async () => { msgs.scrollTop = msgs.scrollHeight; await timeout(400) };
+    await bottom();
+    const typed = () => [...msgs.querySelectorAll('.typed-input')].find(t => t.querySelector('.event-mail'));
+    const rich = await waitFor(typed, 10000);
+    full.segmentText = !!(rich && [...rich.querySelectorAll('.msg.user.msgtext')].some(e => e.textContent.includes('Revisá el informe')));
+    full.mailFrom = rich ? [...rich.querySelectorAll('.event-mail .event-actor')].map(e => e.textContent) : [];
+    full.mailBold = !!(rich && rich.querySelector('.event-mail .event-prose strong'));
+    full.mailTime = rich ? (rich.querySelector('.event-mail time') || {}).textContent || null : null;
+    full.notice = rich ? (rich.querySelector('.event-notices .event-prose') || {}).textContent || null : null;
+    full.replyQuote = rich ? (rich.querySelector('.reply-preview blockquote') || {}).textContent || null : null;
+    full.attachment = rich ? (rich.querySelector('.attach-chip') || {}).textContent || null : null;
+    const thought = [...msgs.querySelectorAll('button.thoughtline')].pop();
+    full.thinking = thought ? thought.textContent : null;
+    if (thought) {
+      thought.click();
+      full.thinkingOpens = !!(await waitFor(() => (thought.parentElement.querySelector('.thoughtbody') || {}).textContent?.includes('Pienso'), 3000));
+    }
+    full.localLinks = [...msgs.querySelectorAll('.md a.local-file')].map(a => a.getAttribute('data-local-path'));
+    // el motor dejó un aviso de reinicio sin leer: una fila pendiente
+    full.pendingAtOpen = msgs.querySelectorAll('.pendrow').length;
+    await bottom();
+    dioxus.send({ pause: 'desk-content' });
+    await timeout(3000);
+
+    // revelar: una ruta relativa (el adjunto) y una inexistente se muestran como texto
+    const reveals = () => [...document.querySelectorAll('.dx-desk .toast.dx-reveal')].map(t => t.textContent);
+    const toasts = () => [...document.querySelectorAll('.dx-desk .toast')].map(t => t.textContent);
+    const toastWith = text => waitFor(() => toasts().find(t => t.includes(text)), 8000);
+    const chip = rich && rich.querySelector('.attach-chip');
+    if (chip) { chip.click(); full.revealRelative = await waitFor(() => reveals().find(t => t.includes('uploads/informe.txt')), 5000) }
+    const missing = [...msgs.querySelectorAll('.md a.local-file')].find(a => a.getAttribute('data-local-path').endsWith('falta.log'));
+    if (missing) { missing.click(); full.revealMissing = await waitFor(() => reveals().find(t => t.includes('falta.log')), 5000) }
+    full.notNavigated = !!document.querySelector('.dx-desk .msgs');
+
+    // estado del turno: inactivo, en cola por el límite de turnos, trabajando
+    const label = () => (document.querySelector('.dx-desk header .turn-status-label') || {}).textContent || null;
+    full.idle = await waitFor(() => label() === 'Idle' && 'Idle', 10000);
+    const fixtureState = async state => { dioxus.send({ fixtureState: state }); return await dioxus.recv() };
+    full.queuedSet = await fixtureState('queued');
+    full.queued = await waitFor(() => label() === 'Queued' && 'Queued', 10000);
+    full.slotBanner = (await waitFor(() => document.querySelector('.dx-desk .slot-queued-warning'), 5000) || {}).textContent || null;
+    dioxus.send({ pause: 'desk-queued' });
+    await timeout(3000);
+    await fixtureState('working');
+    full.working = await waitFor(() => label() === 'Active' && 'Active', 10000);
+    full.slotBannerGone = !!(await waitFor(() => !document.querySelector('.dx-desk .slot-queued-warning'), 5000));
+    const stop = await waitFor(() => document.querySelector('.dx-desk .cc-send.stop'), 10000);
+    full.stopShown = !!stop;
+    if (stop) { stop.click(); full.stopResult = await toastWith('no provider call') }
+
+    // enviar a mitad de turno: el mensaje no interrumpe, queda en el buzón
+    const ta = document.querySelector('.dx-desk .cc-composer textarea');
+    const send = async text => {
+      setValue(ta, text);
+      await timeout(400);
+      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+      const row = await waitFor(() => [...msgs.querySelectorAll('.pendrow')].find(e => e.textContent.includes(text)), 10000);
+      return { pending: !!row, mode: await waitFor(() => (document.querySelector('.dx-desk .sendmode') || {}).textContent, 5000), cleared: ta.value === '' };
+    };
+    full.sendMidTurn = await send('Hola desde Dioxus a mitad de turno');
+    full.stillWorking = label() === 'Active';
+
+    // cambio de modelo a mitad de turno: pide confirmación y queda en cola
+    const model = () => document.querySelector('.dx-desk select.dx-model');
+    full.models = model() ? [...model().options].map(o => o.value) : null;
+    const choose = async tier => { const m = model(); setValue(m, tier, 'change'); await timeout(400) };
+    const confirmBox = () => document.querySelector('.dx-desk .dx-switch-confirm');
+    await choose('sonnet');
+    const queueAsk = await waitFor(confirmBox, 5000);
+    full.queueTitle = queueAsk ? queueAsk.querySelector('h3').textContent : null;
+    if (queueAsk) {
+      queueAsk.querySelector('.danger.solid').click();
+      full.queuedToast = await toastWith('QUEUED, not switched');
+      full.queuedMark = (await waitFor(() => document.querySelector('.dx-desk header .queued-mark'), 10000) || {}).textContent || null;
+    }
+    // elegir el modelo actual cancela el cambio en cola
+    await choose('haiku');
+    full.cancelToast = await toastWith('CANCELLED the queued switch');
+    full.queuedMarkGone = !!(await waitFor(() => !document.querySelector('.dx-desk header .queued-mark'), 10000));
+
+    await fixtureState('idle');
+    full.idleAgain = await waitFor(() => label() === 'Idle' && 'Idle', 10000);
+    // a otro proveedor: la confirmación de la división de linaje; cancelar no cambia nada
+    await choose('sol');
+    const cross = await waitFor(confirmBox, 5000);
+    full.crossTitle = cross ? cross.querySelector('h3').textContent : null;
+    full.crossBody = cross ? cross.querySelector('.confirm-body').textContent : null;
+    if (cross) [...cross.querySelectorAll('button')].find(b => b.textContent === 'cancel').click();
+    full.crossCancelled = !!(await waitFor(() => !confirmBox(), 5000)) && model().value === 'haiku';
+    // dentro del mismo proveedor y fuera de un turno: un clic
+    await choose('sonnet');
+    full.directSwitch = !!(await waitFor(() => model().value === 'sonnet', 10000)) && !confirmBox();
+    await choose('haiku');
+    full.directBack = !!(await waitFor(() => model().value === 'haiku', 10000));
+
+    // esfuerzo: el popover de cinco puntos
+    const eff = () => document.querySelector('.dx-desk .cc-eff');
+    full.effortBefore = eff() ? eff().textContent : null;
+    if (eff()) {
+      eff().click();
+      const low = await waitFor(() => document.querySelector('.dx-desk .eff-pop .eff-dot[title="low"]'), 3000);
+      full.effortLevels = [...document.querySelectorAll('.dx-desk .eff-pop .eff-dot')].map(d => d.title);
+      if (low) low.click();
+      full.effortToast = await toastWith('thinking effort: low');
+      full.effortAfter = await waitFor(() => eff().textContent === 'low' && eff().classList.contains('set') && 'low', 10000);
+    }
+
+    // detenido, con reanudar: el mail queda sin leer hasta reanudar
+    const halt = () => document.querySelector('.dx-desk header .halt-control');
+    if (halt()) {
+      halt().click();
+      full.halted = !!(await waitFor(() => document.querySelector('.dx-desk header .badge.halted') && halt().textContent === 'Unhalt', 15000));
+      full.haltedBanner = (await waitFor(() => document.querySelector('.dx-desk .halted-send-warning'), 5000) || {}).textContent || null;
+      full.sendHalted = await send('Mensaje con el agente detenido');
+      await bottom();
+      dioxus.send({ pause: 'desk-halted' });
+      await timeout(3000);
+      halt().click();
+      full.unhalted = !!(await waitFor(() => !document.querySelector('.dx-desk header .badge.halted') && label() === 'Idle', 15000));
+      full.haltedBannerGone = !document.querySelector('.dx-desk .halted-send-warning');
+    }
+    full.toasts = toasts();
   }
 }
 
@@ -309,6 +440,19 @@ if (ta && button) {
   multi.mirroredFromPopout = !!(await waitFor(() => ta.value === 'escrito en el popout', 30000));
   multi.mainDraft = ta.value;
   dioxus.send({ pause: 'popout' });
+  await timeout(3000);
+}
+
+// #27: revelar un archivo que existe (al final: abre una ventana del
+// administrador de archivos, que no tiene que tapar la prueba de arrastre).
+const reveal = r.reveal = {};
+const existing = [...document.querySelectorAll('.dx-desk .md a.local-file')].find(a => a.getAttribute('data-local-path').endsWith('informe.txt'));
+reveal.path = existing ? existing.getAttribute('data-local-path') : null;
+if (existing) {
+  existing.click();
+  reveal.toast = await waitFor(() => [...document.querySelectorAll('.dx-desk .toast.dx-reveal.ok')].map(t => t.textContent).find(t => t.includes('informe.txt')), 5000);
+  reveal.notNavigated = !!document.querySelector('.dx-desk .msgs');
+  dioxus.send({ pause: 'reveal' });
   await timeout(3000);
 }
 dioxus.send({ done: r });
@@ -519,6 +663,14 @@ pub fn Probe() -> Element {
                             Err(e) => serde_json::json!({ "error": e.to_string() }),
                         };
                         let _ = eval.send(result);
+                    } else if let Some(state) = message.get("fixtureState").and_then(|v| v.as_str()) {
+                        // #27: el motor de fixture simula el estado del turno (solo en el fixture).
+                        let body = serde_json::json!({ "node": "worker", "state": state });
+                        let result = match client.post::<serde_json::Value>("/api/fixture/turn-state", &body).await {
+                            Ok(value) => value,
+                            Err(e) => serde_json::json!({ "error": e.to_string() }),
+                        };
+                        let _ = eval.send(result);
                     } else if let Some(done) = message.get("done") {
                         break done.clone();
                     }
@@ -527,7 +679,7 @@ pub fn Probe() -> Element {
             }
         };
         // `native` ya quedó guardado con la parte del shell durante la pausa.
-        for key in ["home", "chart", "desk", "multiwindow", "error"] {
+        for key in ["home", "chart", "desk", "deskFull", "multiwindow", "reveal", "error"] {
             if let Some(value) = report.get(key) {
                 record(key, value.clone());
             }

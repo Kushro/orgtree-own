@@ -1,8 +1,9 @@
-//! Pruebas de las operaciones del organigrama (#26) contra un servidor HTTP
-//! falso: cada método usa la misma ruta, el mismo verbo y el mismo cuerpo que
-//! el renderer (`apps/desktop/renderer/src/api.ts`), con el token como header.
+//! Pruebas de las operaciones del organigrama (#26) y del desk (#27) contra un
+//! servidor HTTP falso: cada método usa la misma ruta, el mismo verbo y el
+//! mismo cuerpo que el renderer (`apps/desktop/renderer/src/api.ts`), con el
+//! token como header.
 
-use orgtree_engine_client::{Client, ClientError, OpRequest};
+use orgtree_engine_client::{Client, ClientError, OpRequest, SendMessage};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -94,6 +95,14 @@ fn ok(method: &str, path: &str) -> (u16, Value) {
         ("POST", p) if p.ends_with("/interrupt") => {
             (200, json!({ "interrupted": false, "reason": "the turn is admitted but no provider call is active" }))
         }
+        ("POST", p) if p.ends_with("/message") => (200, json!({
+            "accepted": true, "queued": 1, "halted": true, "deferred": "halted", "id": "f47beb2b74b8",
+            "delivery": "QUEUED, NOT READ: worker is halted."
+        })),
+        ("POST", p) if p.ends_with("/scope") => (200, json!({
+            "scope": { "effort": "low" }, "warnings": [],
+            "effort_delivery": { "delivery": "next_turn", "effort": "low" }
+        })),
         _ => (404, json!({ "detail": "no existe" })),
     }
 }
@@ -168,4 +177,39 @@ async fn un_rechazo_del_ledger_trae_su_detail() {
         Err(ClientError::Status { status: 422, detail }) => assert!(detail.contains("not installed"), "{detail}"),
         other => panic!("se esperaba 422, llegó {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn el_desk_como_el_renderer() {
+    let (client, log) = fake_engine(ok).await;
+    // enviar: el mismo cuerpo que `sendMessage`, sin los campos vacíos
+    let message = SendMessage { text: "Hola desde Dioxus".into(), client_op: Some("dx-1".into()), ..Default::default() };
+    let sent = client.send_message("spike-fixture", "worker", &message).await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/orgs/spike-fixture/nodes/worker/message"));
+    assert_eq!(seen.body, Some(json!({ "text": "Hola desde Dioxus", "client_op": "dx-1" })));
+    assert_eq!(sent.mode(), "halted — mail stays unread until unhalt");
+    assert_eq!(sent.id.as_deref(), Some("f47beb2b74b8"));
+    let notice = SendMessage { text: "aviso".into(), notice: true, attachments: vec!["uploads/a.txt".into()], ..Default::default() };
+    client.send_message("spike-fixture", "worker", &notice).await.unwrap();
+    assert_eq!(last(&log).body, Some(json!({ "text": "aviso", "attachments": ["uploads/a.txt"], "notice": true })));
+
+    // esfuerzo: `saveScope(slug, nid, { effort })`
+    let saved = client.save_scope("spike-fixture", "worker", &json!({ "effort": "low" })).await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/orgs/spike-fixture/nodes/worker/scope"));
+    assert_eq!(seen.body, Some(json!({ "effort": "low" })));
+    assert_eq!(saved.extra["effort_delivery"]["delivery"], "next_turn");
+
+    // cambio de modelo: `{op:'switch_model', node, tier}` por `/ops`
+    client.op("spike-fixture", &OpRequest::switch_model("worker", "sonnet")).await.unwrap();
+    let seen = last(&log);
+    assert_eq!(seen.path, "/api/orgs/spike-fixture/ops");
+    assert_eq!(seen.body, Some(json!({ "op": "switch_model", "node": "worker", "tier": "sonnet" })));
+
+    // retirar un mail no leído
+    client.retract_mail("spike-fixture", "worker", "f47beb2b74b8").await.unwrap();
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str(), seen.body), ("DELETE", "/api/orgs/spike-fixture/nodes/worker/mail/f47beb2b74b8", None));
+    assert!(log.lock().unwrap().iter().all(|s| s.token.as_deref() == Some(TOKEN)), "todos los pedidos llevan el token");
 }

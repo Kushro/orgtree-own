@@ -198,6 +198,26 @@ impl Client {
         self.post_empty(&format!("/api/orgs/{}/nodes/{}/interrupt", encode(slug), encode(node))).await
     }
 
+    /// `POST /api/orgs/{slug}/nodes/{nid}/message` — `sendMessage` (api.ts).
+    /// Un mensaje es mail: queda guardado en el buzón del agente y nunca
+    /// interrumpe un turno (a mitad de turno llega en el próximo límite seguro).
+    pub async fn send_message(&self, slug: &str, node: &str, message: &SendMessage) -> Result<SendResult, ClientError> {
+        let body = serde_json::to_value(message).expect("SendMessage siempre se serializa");
+        self.post(&format!("/api/orgs/{}/nodes/{}/message", encode(slug), encode(node)), &body).await
+    }
+
+    /// `POST /api/orgs/{slug}/nodes/{nid}/scope` — `saveScope` (api.ts). El
+    /// desk lo usa para el esfuerzo (`{effort}`; `""` vuelve al de la org).
+    pub async fn save_scope(&self, slug: &str, node: &str, scope: &serde_json::Value) -> Result<OpResult, ClientError> {
+        self.post(&format!("/api/orgs/{}/nodes/{}/scope", encode(slug), encode(node)), scope).await
+    }
+
+    /// `DELETE /api/orgs/{slug}/nodes/{nid}/mail/{mid}` — `retractMail` (api.ts):
+    /// retira un mail que el agente todavía no leyó.
+    pub async fn retract_mail(&self, slug: &str, node: &str, mail: &str) -> Result<serde_json::Value, ClientError> {
+        self.delete(&format!("/api/orgs/{}/nodes/{}/mail/{}", encode(slug), encode(node), encode(mail))).await
+    }
+
     /// `GET /api/orgs` — la ventana de inicio.
     pub async fn list_orgs(&self) -> Result<Vec<OrgListEntry>, ClientError> {
         self.get("/api/orgs").await

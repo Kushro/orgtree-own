@@ -24,13 +24,13 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Orden de los tiers como `ALL_TIERS` de `canvas/shared.ts`.
-const ALL_TIERS: [&str; 12] =
+pub(crate) const ALL_TIERS: [&str; 12] =
     ["haiku", "sonnet", "opus", "fable", "gpt-reserve", "luna", "terra", "sol", "astra", "flash", "pro", "argon"];
 /// El aviso con deshacer dura 12 s, como en el renderer.
 const TOAST_FOR: Duration = Duration::from_secs(12);
 
 /// `TIER_LETTER` de `canvas/shared.ts`.
-fn tier_letter(tier: &str) -> &'static str {
+pub(crate) fn tier_letter(tier: &str) -> &'static str {
     match tier {
         "haiku" => "H",
         "sonnet" | "sol" => "S",
@@ -46,7 +46,7 @@ fn tier_letter(tier: &str) -> &'static str {
 }
 
 /// `providerOf` y `PROVIDER_LABEL` de `canvas/shared.ts`.
-fn provider_of(tier: &str) -> (&'static str, &'static str) {
+pub(crate) fn provider_of(tier: &str) -> (&'static str, &'static str) {
     match tier {
         "gpt-reserve" | "luna" | "terra" | "sol" | "astra" => ("openai", "Codex"),
         "flash" | "pro" | "argon" => ("google", "Antigravity"),

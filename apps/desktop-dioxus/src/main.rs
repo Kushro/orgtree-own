@@ -7,6 +7,7 @@ mod icons;
 mod native;
 mod org;
 mod probe;
+mod reveal;
 mod windows;
 
 use dioxus::desktop::tao::event::Event;

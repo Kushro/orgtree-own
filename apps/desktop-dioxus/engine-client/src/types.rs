@@ -101,6 +101,28 @@ pub struct TreeNode {
     pub last_status: Option<NodeStatus>,
     #[serde(default)]
     pub inflight_at: Option<String>,
+    // Desk (#27): el compositor.
+    /// Lo que el usuario fijó para el agente (`scope.effort` es el esfuerzo propio).
+    #[serde(default)]
+    pub scope: Option<Value>,
+    /// El esfuerzo con que corre el próximo turno (`Org.effective_effort`).
+    #[serde(default)]
+    pub effort_effective: Option<String>,
+    /// Un cambio de modelo pedido a mitad de turno, en cola para el próximo.
+    #[serde(default)]
+    pub pending_switch: Option<PendingSwitch>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// `PendingSwitch` (types.ts): el cambio de modelo en cola hasta el fin del turno.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingSwitch {
+    pub tier: String,
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub crossing: Option<bool>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -148,6 +170,11 @@ fn yes() -> bool {
 }
 
 impl TreeNode {
+    /// `scope.effort`: el esfuerzo fijado en este agente ("" si hereda).
+    pub fn own_effort(&self) -> String {
+        self.scope.as_ref().and_then(|s| s.get("effort")).and_then(Value::as_str).unwrap_or_default().to_string()
+    }
+
     /// Recorre el subárbol en preorden.
     pub fn walk<'a>(&'a self, out: &mut Vec<&'a TreeNode>) {
         out.push(self);
@@ -212,9 +239,153 @@ pub struct ToolChip {
     pub error: Option<String>,
     #[serde(default)]
     pub truncated: Option<bool>,
+    /// Líneas del resultado, para el resumen del chip.
+    #[serde(default)]
+    pub result_lines: Option<u64>,
+    /// `orgtree_send_file`: el archivo que el agente mandó (tarjeta en lugar del chip).
+    #[serde(default)]
+    pub file: Option<Attachment>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
+
+/// Un adjunto de mail o un archivo mandado por un agente (`MailAttachment`,
+/// `ToolChip.file`): la ruta es relativa a la carpeta del agente.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Attachment {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// Una fila de mail: de un segmento `mail` de la conversación o de
+/// `pending_mail` (`PendingMail` y las filas de `Segment` en types.ts).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MailRow {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub from: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub relationship: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub attachments_missing: Vec<String>,
+    /// La respuesta citada: `{source_event_ref, quoted_context}`.
+    #[serde(default)]
+    pub reply_to: Option<Value>,
+    /// El evento tipado, si lo hay (`ev.variant` nombra la fila).
+    #[serde(default)]
+    pub ev: Option<Value>,
+    #[serde(default)]
+    pub client_op: Option<String>,
+    // Solo en `pending_mail`: dónde está la entrega.
+    #[serde(default)]
+    pub delivering: Option<bool>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub via: Option<String>,
+    #[serde(default)]
+    pub event_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl MailRow {
+    /// `ordinary.notice` o `kind: notice`: un aviso pasivo, sin respuesta esperada.
+    pub fn is_notice(&self) -> bool {
+        self.kind.as_deref() == Some("notice") || self.variant().as_deref() == Some("ordinary.notice")
+    }
+
+    pub fn variant(&self) -> Option<String> {
+        self.ev.as_ref()?.get("variant")?.as_str().map(str::to_string)
+    }
+
+    /// La cita de `reply_to` (`replyContext` de eventReply.ts): el evento
+    /// citado y su texto. `None` si no es una respuesta o no tiene la forma nueva.
+    pub fn reply(&self) -> Option<ReplyQuote> {
+        let wire = self.reply_to.as_ref()?;
+        let source = wire.get("source_event_ref")?;
+        Some(ReplyQuote {
+            event_id: source.get("eventId").and_then(Value::as_str).unwrap_or_default().to_string(),
+            quote: wire.get("quoted_context").and_then(Value::as_str).unwrap_or_default().to_string(),
+        })
+    }
+}
+
+/// Una respuesta citada: el evento al que responde y el texto citado.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReplyQuote {
+    pub event_id: String,
+    pub quote: String,
+}
+
+/// Una fila de un segmento `notices`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NoticeRow {
+    #[serde(default)]
+    pub at: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub ev: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// `Segment` (generated/events.ts): la composición de un mensaje del usuario
+/// tal como la entregó el motor (texto, mail, avisos y contexto de máquina).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Segment {
+    Text {
+        text: String,
+    },
+    State {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        event: Option<Value>,
+    },
+    Drive {
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        event: Option<Value>,
+    },
+    Notices {
+        rows: Vec<NoticeRow>,
+    },
+    Mail {
+        rows: Vec<MailRow>,
+    },
+}
+
+/// Variantes de contexto de máquina que el transcript humano no muestra
+/// (`HUMAN_HIDDEN_VARIANTS` de generated/events.ts).
+pub const HUMAN_HIDDEN_VARIANTS: [&str; 6] = [
+    "context.org_state",
+    "context.provider_usage",
+    "context.cache_continuity",
+    "context.org_charter",
+    "context.drive_mail_pointer",
+    "context.drive_restart_wake",
+];
 
 /// `ChatMessage` (types.ts): una fila del desk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -232,13 +403,41 @@ pub struct ChatMessage {
     pub tools: Vec<ToolChip>,
     #[serde(default)]
     pub thinking: Option<String>,
-    /// `Segment[]` de `generated/events.ts`, sin tipar en el recorte.
+    /// El pensamiento existió, pero el proveedor no mandó el texto.
+    #[serde(default)]
+    pub thinking_sealed: Option<bool>,
+    #[serde(default)]
+    pub think_secs: Option<f64>,
+    #[serde(default)]
+    pub thinking_event_id: Option<String>,
+    /// `Segment[]`: se lee con `ChatMessage::segments()`.
     #[serde(default)]
     pub segments: Option<Value>,
     #[serde(default)]
     pub assistant_state: Option<String>,
+    /// Salida de un comando de sesión (`/context`).
+    #[serde(default)]
+    pub cmd_out: Option<String>,
+    /// El resumen de una compactación, detrás de un clic.
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub truncated: Option<bool>,
+    #[serde(default)]
+    pub steered: Option<bool>,
+    #[serde(default)]
+    pub receipt: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl ChatMessage {
+    /// Los segmentos, si tienen una forma conocida. Como `isSegments` del
+    /// renderer: una forma desconocida no se dibuja a medias, la fila muestra
+    /// su texto.
+    pub fn segments(&self) -> Option<Vec<Segment>> {
+        serde_json::from_value(self.segments.clone()?).ok()
+    }
 }
 
 /// `ChatPayload` (types.ts): `GET /api/orgs/{slug}/nodes/{nid}/chat`.
@@ -261,8 +460,92 @@ pub struct ChatPayload {
     /// Cursor para pedir la página anterior.
     #[serde(default)]
     pub before: Option<String>,
+    /// El mail que el agente todavía no leyó (en cola o entregándose).
+    #[serde(default)]
+    pub pending_mail: Vec<MailRow>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// El cuerpo de `POST /api/orgs/{slug}/nodes/{nid}/message` (`sendMessage` en
+/// api.ts): los campos vacíos no se mandan.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SendMessage {
+    pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<Value>,
+    /// El nombre de este envío, para reconocer su copia durable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_op: Option<String>,
+    /// Aviso pasivo: no despierta al agente.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub notice: bool,
+}
+
+/// `SendMessageResult` (types.ts): qué pasó con el envío.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SendResult {
+    #[serde(default)]
+    pub accepted: Option<bool>,
+    /// `true` (retirado) o `"halted"` / `"killswitch"`.
+    #[serde(default)]
+    pub deferred: Option<Value>,
+    #[serde(default)]
+    pub queued: Option<u64>,
+    #[serde(default)]
+    pub frozen: Option<bool>,
+    #[serde(default)]
+    pub halted: Option<bool>,
+    #[serde(default)]
+    pub compacting: Option<bool>,
+    #[serde(default)]
+    pub command: Option<bool>,
+    #[serde(default)]
+    pub immediate: Option<bool>,
+    #[serde(default)]
+    pub steering: Option<bool>,
+    #[serde(default)]
+    pub notice: Option<bool>,
+    /// La frase del motor sobre qué pasó con el envío.
+    #[serde(default)]
+    pub delivery: Option<String>,
+    /// El id del mail guardado.
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl SendResult {
+    /// El aviso del compositor tras enviar (`flashMode` en desk.tsx), con el
+    /// orden de prioridad del renderer.
+    pub fn mode(&self) -> String {
+        let yes = |v: Option<bool>| v == Some(true);
+        let deferred = self.deferred.as_ref().filter(|d| !d.is_null() && **d != Value::Bool(false));
+        if yes(self.compacting) {
+            "compacting — the org way (§8)".into()
+        } else if deferred.and_then(Value::as_str) == Some("halted") {
+            "halted — mail stays unread until unhalt".into()
+        } else if yes(self.command) {
+            "command sent".into()
+        } else if yes(self.steering) {
+            "steering in mid-task".into()
+        } else if yes(self.frozen) {
+            "frozen — mail waits for ▶ resume".into()
+        } else if deferred.is_some() {
+            "retired — queued, waits for a rehire".into()
+        } else if yes(self.notice) {
+            "notice delivered — waits for next turn".into()
+        } else if self.queued.unwrap_or(0) > 0 {
+            format!("queued ({} ahead)", self.queued.unwrap_or(0))
+        } else {
+            "delivering".into()
+        }
+    }
 }
 
 /// `OpRequest` (types.ts): el cuerpo de `POST /api/orgs/{slug}/ops`. Solo
@@ -307,6 +590,12 @@ impl OpRequest {
     /// `{op:'retire'|'rehire'|'dissolve', node}` (agentmenu.tsx, desk.tsx).
     pub fn on_node(op: &str, node: &str) -> OpRequest {
         OpRequest { op: op.into(), node: Some(node.into()), ..Default::default() }
+    }
+
+    /// `{op:'switch_model', node, tier}` (modals.tsx `doSave`). Con el tier
+    /// actual cancela un cambio en cola.
+    pub fn switch_model(node: &str, tier: &str) -> OpRequest {
+        OpRequest { op: "switch_model".into(), node: Some(node.into()), tier: Some(tier.into()), ..Default::default() }
     }
 
     /// `{op:'move', node, new_parent}` (OrgCanvas.tsx, el deshacer de un arrastre).
@@ -492,6 +781,44 @@ mod tests {
         assert_eq!((node.seat, node.grant, node.free), (Some(0.1), Some(5.0), Some(4.9)));
         let audit: AuditReport = serde_json::from_str(r#"{"live_nodes":2,"top_level_holds":6}"#).unwrap();
         assert!(audit.no_overdraft);
+    }
+
+    #[test]
+    fn segmentos_de_la_conversacion() {
+        let message: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "user", "text": "hola", "segments": [
+                {"kind": "text", "text": "hola"},
+                {"kind": "mail", "rows": [{"id": "m1", "from": "@user", "kind": "message", "at": "t", "body": "b",
+                    "reply_to": {"source_event_ref": {"eventId": "e1"}, "quoted_context": "citado"},
+                    "attachments": [{"name": "a.txt", "path": "uploads/a.txt", "bytes": 3}]}]},
+                {"kind": "notices", "rows": [{"at": "t", "text": "aviso"}]},
+                {"kind": "state", "text": "x", "event": {"variant": "context.org_state"}}
+            ]
+        }))
+        .unwrap();
+        let segments = message.segments().unwrap();
+        assert_eq!(segments.len(), 4);
+        let Segment::Mail { rows } = &segments[1] else { panic!("{:?}", segments[1]) };
+        assert_eq!(rows[0].reply(), Some(ReplyQuote { event_id: "e1".into(), quote: "citado".into() }));
+        assert_eq!(rows[0].attachments[0].path.as_deref(), Some("uploads/a.txt"));
+        assert!(!rows[0].is_notice());
+        // una forma desconocida no se dibuja a medias
+        let odd: ChatMessage = serde_json::from_value(serde_json::json!({"role": "user", "segments": [{"kind": "nuevo"}]})).unwrap();
+        assert!(odd.segments().is_none());
+    }
+
+    #[test]
+    fn el_modo_del_envio_como_el_renderer() {
+        let parse = |v: Value| serde_json::from_value::<SendResult>(v).unwrap().mode();
+        assert_eq!(parse(serde_json::json!({"accepted": true, "queued": 0})), "delivering");
+        assert_eq!(parse(serde_json::json!({"accepted": true, "queued": 2})), "queued (2 ahead)");
+        assert_eq!(parse(serde_json::json!({"deferred": "halted", "queued": 1})), "halted — mail stays unread until unhalt");
+        assert_eq!(parse(serde_json::json!({"deferred": true})), "retired — queued, waits for a rehire");
+        assert_eq!(parse(serde_json::json!({"deferred": false, "steering": true})), "steering in mid-task");
+        let body = serde_json::to_value(SendMessage { text: "hola".into(), ..Default::default() }).unwrap();
+        assert_eq!(body, serde_json::json!({"text": "hola"}));
+        let switch = serde_json::to_value(OpRequest::switch_model("w", "sonnet")).unwrap();
+        assert_eq!(switch, serde_json::json!({"op": "switch_model", "node": "w", "tier": "sonnet"}));
     }
 
     #[test]

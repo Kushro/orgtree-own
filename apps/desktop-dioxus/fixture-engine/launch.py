@@ -14,6 +14,19 @@ no existen. Sigue la receta de ``tests/test_engine_http.py``.
 para probar el desk en vivo sin un proveedor real, y
 ``ORGTREE_FIXTURE_MESSAGES=N`` agrega N mensajes al historial para medir el
 scroll de una conversación larga.
+
+Desk completo (#27), solo en este fixture:
+
+- Al final del historial hay un mensaje con mail (con respuesta citada y un
+  adjunto), avisos y texto en segmentos (la proyección de ``read_chat``), y una
+  respuesta con pensamiento y enlaces a archivos locales: uno que existe (junto
+  a la raíz descartable) y otro que no.
+- El envío pasa por la puerta real (``send_message`` y la admisión de halt),
+  pero sin proveedor: el mail queda guardado y el turno no arranca. Un agente
+  detenido lo retiene hasta reanudarlo, como el motor real.
+- ``POST /api/fixture/turn-state`` ``{node, state}`` simula el estado del turno
+  (``idle``, ``queued`` detrás del límite de turnos, ``working`` con una
+  respuesta en curso) y avisa por el WebSocket, para probar los estados del desk.
 """
 
 from __future__ import annotations
@@ -41,6 +54,13 @@ import launch  # noqa: E402  (engine/launch.py del checkout)
 
 ORG = "spike-fixture"
 AGENT = "worker"
+# Archivos para los enlaces del desk (#27): junto a la raíz descartable, nunca adentro.
+FILES = _DATA.parent / f"{_DATA.name}-fixture-files"
+REPORT = FILES / "informe.txt"
+MISSING = (Path("C:/orgtree-fixture-no-existe/falta.log") if os.name == "nt"
+           else Path("/orgtree-fixture-no-existe/falta.log"))
+RICH_AT = "2026-10-07T12:00:00Z"
+RICH_RAW = "FROM @user (the user) · message · 2026-10-07T12:00:00Z\nRevisá el informe adjunto."
 
 
 def _records(sid: str) -> list[dict]:
@@ -74,7 +94,35 @@ def _records(sid: str) -> list[dict]:
                     {"type": "text", "text": f"Respuesta {2 * i + 2}: la tarea {i} avanza. " + "Detalle. " * 12}]})
         records += [q, a]
         parent = a["uuid"]
-    return records
+    # Desk completo (#27): segmentos con mail y avisos, pensamiento y archivos.
+    mail = rec("user", parent, RICH_AT, {"role": "user", "content": RICH_RAW})
+    reply = rec("assistant", mail["uuid"], "2026-10-07T12:00:05Z",
+                {"id": "msg_fixture_rich", "role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Pienso: el informe está adjunto; lo leo y respondo."},
+                    {"type": "text", "text": "Listo. El informe está en "
+                     f"[informe.txt](<{REPORT}>) y el log en [falta.log](<{MISSING}>), que no existe."}]})
+    return records + [mail, reply]
+
+
+def _rich_segments() -> list[dict]:
+    """La proyección de la conversación del mensaje con mail (#27)."""
+    quote = "Respuesta 2: la tarea 0 avanza."
+    return [
+        {"kind": "text", "text": "Revisá el informe adjunto."},
+        {"kind": "mail", "rows": [
+            {"id": "m-fixture-1", "from": "@user", "kind": "message", "at": RICH_AT,
+             "body": "Te paso el **informe** de la semana.",
+             "reply_to": {"source_event_ref": {"org": ORG, "agent": AGENT, "generation": 0,
+                                               "eventId": "fixture-reply-target"},
+                          "quoted_context": quote},
+             "attachments": [{"name": "informe.txt", "path": "uploads/informe.txt", "bytes": 42}]},
+            {"id": "m-fixture-2", "from": "jefe", "kind": "status", "at": RICH_AT,
+             "body": "Avance: la revisión va por la mitad."},
+        ]},
+        {"kind": "notices", "rows": [
+            {"at": RICH_AT, "text": "Aviso: el límite de turnos subió a 16."},
+        ]},
+    ]
 
 
 def _stub_providers() -> None:
@@ -91,7 +139,17 @@ def _stub_providers() -> None:
     supervisor.start_usage_warm_loop = lambda: None
     supervisor.start_cred_watcher = lambda: None
     warmpool.start_warm_pool = lambda: None
-    supervisor.send_message = lambda *a, **k: None
+    # Desk completo (#27): el envío pasa por la puerta real (`send_message`, con
+    # la admisión de halt, que retiene el mail de un agente detenido), pero el
+    # cuerpo no arranca ningún turno: el mail queda guardado en el buzón.
+    from orgtree import halt
+
+    def admit_without_provider(slug, nid, text, *a, **k):
+        busy = supervisor.state(slug, nid).get("busy")
+        return {"accepted": True, "queued": 1 if busy else 0}
+
+    supervisor._admit_message = halt.admission(
+        admit_without_provider, rows=lambda slug, nid, *_a, **_k: supervisor._envelope_rows(nid))
 
 
 def _seed() -> None:
@@ -111,8 +169,48 @@ def _seed() -> None:
     node["cost_usd"] = 1
     path = _HOME / ".claude" / "projects" / ORG / f"{sid}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    FILES.mkdir(parents=True, exist_ok=True)
+    REPORT.write_text("Informe semanal del fixture.\n", encoding="utf-8")
     path.write_text("".join(json.dumps(r) + "\n" for r in _records(sid)), encoding="utf-8")
     store.save_org(org)
+    # La proyección del mensaje con mail (segmentos), como la escribe el motor al admitir el turno.
+    from orgtree import supervisor
+    supervisor._record_prompt_view(ORG, sid, RICH_RAW, "Revisá el informe adjunto.", at=RICH_AT,
+                                   segments=_rich_segments())
+    # El adjunto existe en la carpeta del agente, con su ruta relativa.
+    uploads = Path(supervisor.scratch_dir(ORG, AGENT)) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    (uploads / "informe.txt").write_text("Informe semanal del fixture.\n", encoding="utf-8")
+
+
+def _install_turn_state() -> None:
+    """`POST /api/fixture/turn-state` (solo en este fixture): simula el estado
+    del turno de un agente y avisa por el WebSocket de la org (#27)."""
+    from fastapi import HTTPException
+    from orgtree import api, supervisor
+
+    async def set_turn_state(body: dict) -> dict:
+        node = str(body.get("node") or AGENT)
+        state = body.get("state")
+        st = supervisor.state(ORG, node)
+        with supervisor._state_lock:
+            for key in ("busy", "waiting", "responding"):
+                st[key] = False
+            st.pop("queued_for_slot", None)
+            st.pop("inflight_at", None)
+            if state == "queued":
+                st["waiting"] = True
+                st["queued_for_slot"] = {"since": time.time(), "limit": 16, "waiting": 3}
+            elif state == "working":
+                st["busy"] = st["responding"] = True
+            elif state != "idle":
+                raise HTTPException(422, "state must be idle, queued or working")
+        await api.hub.node_event(ORG, node, "fixture_turn_state", {"state": state})
+        return {"node": node, "state": state}
+
+    api.app.add_api_route("/api/fixture/turn-state", set_turn_state, methods=["POST"])
+    # Antes que cualquier ruta comodín de la app.
+    api.app.router.routes.insert(0, api.app.router.routes.pop())
 
 
 def _live_frames() -> None:
@@ -131,6 +229,7 @@ original_load_app = launch.load_app
 def seeded_load_app():
     result = original_load_app()
     _stub_providers()
+    _install_turn_state()
     _seed()
     if os.environ.get("ORGTREE_FIXTURE_LIVE") == "1":
         threading.Thread(target=_live_frames, name="fixture-live", daemon=True).start()

@@ -58,6 +58,10 @@ jobs:
           ORGTREE_TEST_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
         run: cargo test -p orgtree-engine-host -p orgtree-engine-client -- --include-ignored --nocapture
 
+      # #27: Markdown y enlaces a archivos, revelado (rutas relativas o inexistentes) y hora local
+      - name: Desk unit tests
+        run: cargo test -p orgtree-dioxus --bin orgtree-dioxus
+
       # #24: el runtime embebido y PostgreSQL 18, como el instalador de Electron.
       # El ZIP de PostgreSQL (~380 MB) queda en caché por el pin.
       - uses: actions/cache@v4
@@ -96,7 +100,7 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (engine, home, org chart, live desk, desk window and native integration in RSX)
+      - name: Smoke test (engine, home, org chart, full desk, desk window and native integration in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -105,6 +109,8 @@ jobs:
           ORGTREE_DIOXUS_DATA: ${{ runner.temp }}/orgtree-dioxus-smoke
           ORGTREE_DIOXUS_PROBE: ${{ runner.temp }}/orgtree-dioxus-probe.json
           # Desk en vivo (#12): frames node_stream simulados y una conversación larga.
+          # Desk completo (#27): el fixture siembra mail, avisos, pensamiento y archivos,
+          # y simula los estados del turno (POST /api/fixture/turn-state).
           ORGTREE_FIXTURE_LIVE: '1'
           ORGTREE_FIXTURE_MESSAGES: '1200'
         run: |
@@ -164,11 +170,25 @@ jobs:
           $shots = @{}
           while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
             # la prueba deja un marcador y espera 3 s: capturas del inicio, del organigrama
-            # (contratación, menú de agente, agente detenido), del desk y de las dos ventanas
-            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'desk', 'popout') {
+            # (contratación, menú de agente, agente detenido), del desk (scroll, contenido,
+            # en cola por el límite de turnos, detenido) y de las dos ventanas
+            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
               if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
                 try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
               }
+            }
+            # #27: revelar un archivo abre su carpeta con el archivo seleccionado (explorer /select,)
+            if (-not $shots['reveal'] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).reveal")) {
+              $shots['reveal'] = $true
+              Start-Sleep -Milliseconds 1500
+              try { Save-Screen 'reveal' } catch { Write-Host "screenshot: $_" }
+              try {
+                $explorer = @((New-Object -ComObject Shell.Application).Windows() | ForEach-Object { try { $_.Document.Folder.Self.Path } catch {} })
+                $ci.explorer = $explorer -join ' | '
+                $ci.revealedFolder = [bool]($explorer | Where-Object { $_ -and $_.TrimEnd('\') -like '*-fixture-files' })
+                # cerrar esas ventanas para que no tapen el resto de la prueba
+                (New-Object -ComObject Shell.Application).Windows() | Where-Object { try { $_.Document.Folder.Self.Path -like '*-fixture-files*' } catch { $false } } | ForEach-Object { $_.Quit() }
+              } catch { $ci.explorer = "error: $_" }
             }
             if (-not $ci.native -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).native")) {
               $ci.native = $true
@@ -241,6 +261,45 @@ jobs:
           if ($desk.oldestLoaded -ne 1 -or $desk.domRows -lt 1000) { $failures += "long conversation not fully loaded: oldest $($desk.oldestLoaded), rows $($desk.domRows)" }
           if (-not $desk.scroll -or $desk.scroll.frames -lt 30) { $failures += "scroll was not measured: $($desk.scroll | ConvertTo-Json -Compress)" }
           "### Desk scroll (WebView2, Dioxus, $($desk.domRows) rows)`n$($desk.scroll | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #27: desk completo
+          $full = $probe.deskFull
+          if (-not $full) { $failures += 'the full desk stage did not run' }
+          else {
+            foreach ($check in 'segmentText', 'mailBold', 'thinkingOpens', 'notNavigated', 'stopShown', 'stillWorking', 'slotBannerGone',
+                               'queuedMarkGone', 'crossCancelled', 'directSwitch', 'directBack', 'halted', 'unhalted', 'haltedBannerGone') {
+              if ($full.$check -ne $true) { $failures += "deskFull.$check was $($full.$check)" }
+            }
+            # contenido: mail con respuesta citada y adjunto, avisos, pensamiento y enlaces a archivos
+            if (($full.mailFrom -join ',') -ne 'User,jefe') { $failures += "mail senders: $($full.mailFrom -join ', ')" }
+            if ($full.replyQuote -ne 'Respuesta 2: la tarea 0 avanza.') { $failures += "quoted reply: $($full.replyQuote)" }
+            if ($full.attachment -notlike '*informe.txt*') { $failures += "attachment: $($full.attachment)" }
+            if ($full.notice -notlike 'Aviso: el l*mite de turnos sub*a 16.') { $failures += "notice segment: $($full.notice)" }
+            if ($full.thinking -notlike '*thought for 5s*') { $failures += "thinking line: $($full.thinking)" }
+            if ($full.mailTime -match 'T\d\d:\d\d' -or -not $full.mailTime) { $failures += "mail time is not local: $($full.mailTime)" }
+            if (@($full.localLinks | Where-Object { $_ -like '*:\*' }).Count -ne 2) { $failures += "local file links: $($full.localLinks -join ', ')" }
+            if (-not ($full.pendingAtOpen -ge 1)) { $failures += "no pending mail rows: $($full.pendingAtOpen)" }
+            # revelar: rutas relativas o inexistentes se muestran como texto, nunca se abren
+            if ($full.revealRelative -ne 'Not an absolute path: uploads/informe.txt') { $failures += "relative path reveal: $($full.revealRelative)" }
+            if ($full.revealMissing -notlike 'No such file:*falta.log') { $failures += "missing file reveal: $($full.revealMissing)" }
+            # estado del turno: en cola por el límite (con la explicación), trabajando con STOP, detenido con reanudar
+            if ($full.idle -ne 'Idle' -or $full.queued -ne 'Queued' -or $full.working -ne 'Active' -or $full.idleAgain -ne 'Idle') { $failures += "turn states: idle $($full.idle), queued $($full.queued), working $($full.working), idle again $($full.idleAgain)" }
+            if ($full.slotBanner -notlike '*concurrency limit (16)*') { $failures += "turn-slot banner: $($full.slotBanner)" }
+            if ($full.stopResult -notlike 'error:*no provider call*') { $failures += "STOP result: $($full.stopResult)" }
+            if ($full.haltedBanner -notlike '*mail is stored unread until this agent is explicitly unhalted*') { $failures += "halted banner: $($full.haltedBanner)" }
+            # enviar: el mensaje queda aceptado en el buzón, también a mitad de turno y detenido
+            if ($full.sendMidTurn.pending -ne $true -or $full.sendMidTurn.cleared -ne $true -or $full.sendMidTurn.mode -ne 'queued (1 ahead)') { $failures += "send mid-turn: $($full.sendMidTurn | ConvertTo-Json -Compress)" }
+            if ($full.sendHalted.pending -ne $true -or $full.sendHalted.mode -notlike 'halted * mail stays unread until unhalt') { $failures += "send while halted: $($full.sendHalted | ConvertTo-Json -Compress)" }
+            # modelo: en cola a mitad de turno, cancelar, y confirmación entre proveedores
+            if ($full.queueTitle -ne "queue worker's switch to sonnet?" -or $full.queuedToast -notlike 'QUEUED, not switched*' -or $full.queuedMark -ne "$([char]0x2192)S") { $failures += "queued switch: $($full.queueTitle) / $($full.queuedToast) / $($full.queuedMark)" }
+            if ($full.cancelToast -notlike 'CANCELLED the queued switch*') { $failures += "cancel queued switch: $($full.cancelToast)" }
+            if ($full.crossTitle -ne 'move worker from Claude to Codex?' -or $full.crossBody -notlike '*knowledge bearer worker@0*') { $failures += "cross-provider confirm: $($full.crossTitle)" }
+            # esfuerzo
+            if (($full.effortLevels -join ',') -ne 'low,medium,high,xhigh,max' -or $full.effortAfter -ne 'low' -or $full.effortToast -notlike '*applies from its next turn') { $failures += "effort: $($full.effortLevels -join ',') / $($full.effortAfter) / $($full.effortToast)" }
+          }
+          $rv = $probe.reveal
+          if ($rv.toast -notlike 'Shown in folder:*informe.txt' -or $rv.notNavigated -ne $true) { $failures += "reveal of an existing file: $($rv | ConvertTo-Json -Compress)" }
+          Write-Host "Explorer windows after the reveal: $($ci.explorer)"
+          "### Full desk (#27, Dioxus)`n- send: $($full.sendMidTurn | ConvertTo-Json -Compress) / halted: $($full.sendHalted | ConvertTo-Json -Compress)`n- turn: $($full.idle) / $($full.queued) / $($full.working) / halted $($full.halted)`n- reveal: $($full.revealRelative) / $($full.revealMissing) / $($rv.toast)`n- explorer windows: $($ci.explorer) (folder shown: $($ci.revealedFolder))" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           # #13: desk en otra ventana nativa, borrador compartido y cierre de la principal
           $mw = $probe.multiwindow
           if ($mw.composer -ne $true) { $failures += 'no composer in the desk' }
@@ -284,7 +343,7 @@ jobs:
             try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
           }
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Home window, org chart, live desk, desk window and native integration in RSX verified in WebView2"
+          Write-Host "Home window, org chart, full desk, desk window and native integration in RSX verified in WebView2"
 
       # #24: el instalador generado, instalado en silencio en una carpeta descartable
       # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y

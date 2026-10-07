@@ -36,14 +36,23 @@
 .dx-desk .msgs-wrap { flex: 1; min-height: 0; display: flex; }
 .dx-desk .msgs { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; }
 /* Lista larga: el webview no pinta ni maqueta las filas fuera de la vista. */
-.dx-desk .msgs > .msg { content-visibility: auto; contain-intrinsic-size: auto 48px; flex-shrink: 0; }
+.dx-desk .msgs > .dx-row { content-visibility: auto; contain-intrinsic-size: auto 48px; flex-shrink: 0; }
 .dx-desk .dx-earlier { text-align: center; padding: 6px; }
 .dx-desk .tooldot { margin-right: 2px; }
+.dx-desk header .dx-spacer { flex: 1; }
+.dx-desk header .turn-status-banner { flex: none; }
 
-/* Compositor (#13): el borrador compartido entre ventanas. */
-.dx-desk .dx-composer { margin: 0 0 12px; }
-.dx-desk .dx-composer textarea { width: 100%; resize: none; background: transparent; color: inherit; border: 0; font: inherit; outline: none; }
-.dx-desk header .dx-popout { margin-left: auto; }
+/* Compositor (#13, #27): el borrador compartido entre ventanas, el modelo,
+   el esfuerzo y enviar o STOP. Los avisos de arriba son los del renderer. */
+.dx-desk .dx-composer { margin: 0 0 12px; align-items: center; }
+.dx-desk .dx-composer textarea { flex: 1; width: auto; resize: none; background: transparent; color: inherit; border: 0; font: inherit; outline: none; }
+.dx-desk .halted-send-warning, .dx-desk .slot-queued-warning, .dx-desk .sendmode { margin: 0 0 6px; }
+.dx-desk .dx-model { flex: none; font-size: 11px; padding: 2px 4px; border-radius: 4px; background: var(--input); color: var(--ink); border: 1px solid var(--line); }
+.dx-desk .eff-wrap { position: relative; flex: none; }
+.dx-desk .eff-pop { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 20; }
+/* Adjuntos y archivos: botones que revelan, con el aspecto de los enlaces del renderer. */
+.dx-desk button.attach-chip, .dx-desk button.filecard { font: inherit; color: inherit; cursor: pointer; text-align: left; }
+.dx-desk .dx-reveal.refused { font-family: var(--mono, monospace); overflow-wrap: anywhere; }
 
 /* Ventana sin marco (#14): los headers son zona de arrastre, sus botones no. */
 .dx-org-view header, .dx-desk header { -webkit-app-region: drag; }
