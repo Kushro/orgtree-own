@@ -313,7 +313,7 @@ jobs:
           Write-Host "Runner shell elevated: $elevated"
           $started = Get-Date
           $p = Start-Process -FilePath $exe -WorkingDirectory $target -PassThru
-          $deadline = (Get-Date).AddSeconds(420)
+          $deadline = (Get-Date).AddSeconds(300)
           $shot = $false; $splash = $false
           while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
             if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) {
@@ -378,7 +378,26 @@ jobs:
           if ($left) { $failures += "processes left from the installed app: $(($left | ForEach-Object { "$($_.Name) $($_.Id)" }) -join ', ')" }
           "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start to exit: $seconds s`n- runner elevated: $elevated" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           if ($failures) {
-            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.txt, *.jsonl -ErrorAction SilentlyContinue | Select-Object -First 15) {
+            Write-Host "===== files under $data"
+            Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
+            foreach ($log in Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt', '.jsonl', '.json' } | Select-Object -First 25) {
+              Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
+            }
+            Write-Host "===== Application event log (Orgtree refusals)"
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'orgtree|postgres|p03' } | Select-Object -First 10 | ForEach-Object { "$($_.ProviderName): $($_.Message)" }
+            # La app descarta stdout y stderr del motor (pueden traer secretos). Para
+            # diagnosticar, el mismo motor empaquetado a mano sobre otra raíz descartable.
+            $diag = "$data-diagnostic"
+            $env:ORGTREE_DATA = $diag; $env:ORGTREE_V2_TOKEN = 'diagnostic-only'; $env:PYTHONUNBUFFERED = '1'
+            $env:ORGTREE_PG_BOOTSTRAP = '1'; $env:ORGTREE_PG_CUSTODIAN = "$resources\engine\pg-custodian.exe"; $env:ORGTREE_P03_PG_BIN = "$resources\engine\postgresql\bin"
+            New-Item -ItemType Directory -Force $diag | Out-Null
+            $d = Start-Process -FilePath "$resources\engine\runtime\python.exe" -ArgumentList "$resources\engine\launch.py" -WorkingDirectory "$resources\engine" `
+              -RedirectStandardOutput "$diag-stdout.txt" -RedirectStandardError "$diag-stderr.txt" -NoNewWindow -PassThru
+            if (-not $d.WaitForExit(240000)) { Write-Host "diagnostic engine still running after 240 s"; taskkill /PID $d.Id /T /F | Out-Null }
+            Write-Host "===== diagnostic engine stdout"; Get-Content "$diag-stdout.txt" -Tail 60
+            Write-Host "===== diagnostic engine stderr"; Get-Content "$diag-stderr.txt" -Tail 120
+            foreach ($log in Get-ChildItem $diag -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt' } | Select-Object -First 10) {
               Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
             }
             throw ($failures -join '; ')

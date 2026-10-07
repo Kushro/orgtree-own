@@ -259,6 +259,11 @@ async fn installed_probe() {
 /// para que el CI lo vea aunque la UI no llegue a montarse.
 pub fn startup_status(text: &str) {
     record("startup_status", serde_json::json!(text));
+    // En la prueba de la app instalada, un arranque fallido termina la app: el CI
+    // no espera en vano y diagnostica.
+    if installed_mode() && report_path().is_some() && text.starts_with("El motor no arrancó") {
+        crate::native::quit();
+    }
 }
 
 /// Reporte compartido por las dos ventanas.
