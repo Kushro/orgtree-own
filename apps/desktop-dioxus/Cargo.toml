@@ -6,11 +6,16 @@ license = "MIT"
 edition = "2021"
 publish = false
 
-# Standalone crate: keep it out of any parent workspace.
+# Standalone crate: keep it out of any parent workspace. The engine
+# supervisor is a member so both share one lockfile and target dir.
 [workspace]
+members = ["engine-host"]
 
 [dependencies]
 dioxus = { version = "0.7.10", features = ["desktop"] }
+futures-channel = "0.3"
+futures-util = "0.3"
+orgtree-engine-host = { path = "engine-host" }
 
 [profile.release]
 codegen-units = 1

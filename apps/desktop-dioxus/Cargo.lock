@@ -2906,6 +2906,18 @@ name = "orgtree-dioxus"
 version = "0.0.1"
 dependencies = [
  "dioxus",
+ "futures-channel",
+ "futures-util",
+ "orgtree-engine-host",
+]
+
+[[package]]
+name = "orgtree-engine-host"
+version = "0.0.1"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

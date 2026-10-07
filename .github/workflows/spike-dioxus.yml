@@ -31,6 +31,22 @@ jobs:
         with:
           workspaces: apps/desktop-dioxus
 
+      # Python para el motor real (sin el submódulo mailhub: el motor arranca igual
+      # y lo informa como caído). Raíz de datos descartable, nunca datos reales.
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: '3.13'
+
+      - name: Install engine dependencies
+        run: python -m pip install -r ../../tools/runtime-requirements.in
+
+      - name: Engine supervisor tests (fake and real engine)
+        env:
+          FAKE_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TEST_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: cargo test -p orgtree-engine-host -- --include-ignored --nocapture
+
       - uses: cargo-bins/cargo-binstall@main
 
       - name: Install Dioxus CLI
@@ -39,19 +55,26 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (window starts and stays up)
+      - name: Smoke test (window starts, launches the engine and stays up)
         shell: pwsh
+        env:
+          ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_DIOXUS_ENGINE_DIR: ${{ github.workspace }}/engine
+          ORGTREE_DIOXUS_DATA: ${{ runner.temp }}/orgtree-dioxus-smoke
         run: |
           $exe = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
             Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
           if (-not $exe) { throw "orgtree-dioxus.exe not found" }
           Write-Host "Running $($exe.FullName)"
           $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
-          Start-Sleep -Seconds 15
+          Start-Sleep -Seconds 30
           $p.Refresh()
           if ($p.HasExited) { throw "app exited early with code $($p.ExitCode)" }
+          $port = Join-Path $env:ORGTREE_DIOXUS_DATA 'engine-port.json'
+          if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
+          Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
           Stop-Process -Id $p.Id -Force
-          Write-Host "App stayed up for 15 s"
+          Write-Host "App stayed up for 30 s"
 
       - name: Report sizes
         shell: pwsh

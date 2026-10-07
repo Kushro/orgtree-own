@@ -39,6 +39,25 @@ dx serve --platform desktop        # ventana de desarrollo
 dx bundle --platform desktop --package-types nsis --release --out-dir dist
 ```
 
+### Motor Python (#9)
+
+La app lanza `engine/launch.py` al abrir y lo apaga al salir (`Event::LoopDestroyed` en `with_custom_event_handler`). El supervisor es el crate `apps/desktop-dioxus/engine-host`, copia del de `spike/tauri` (`apps/desktop-tauri/engine-host`): no depende del framework, así que es el mismo código en los dos spikes. Es miembro del workspace de la app. El intérprete se indica por entorno:
+
+| Variable | Qué es | Por defecto |
+|---|---|---|
+| `ORGTREE_DIOXUS_PYTHON` | Python absoluto con `tools/runtime-requirements.in` instalado | obligatoria |
+| `ORGTREE_DIOXUS_ENGINE_DIR` | Carpeta con `launch.py` | `engine/` del checkout donde se compiló |
+| `ORGTREE_DIOXUS_DATA` | Raíz de datos | `%LOCALAPPDATA%\com.kushro.orgtree.dioxus-spike\data` |
+
+Nunca apuntar `ORGTREE_DIOXUS_DATA` a la raíz real de Orgtree (`%APPDATA%\Orgtree v2\data`).
+
+```powershell
+python -m pip install -r tools/runtime-requirements.in
+cd apps/desktop-dioxus
+$env:ORGTREE_TEST_ENGINE_PYTHON = (Get-Command python).Source
+cargo test -p orgtree-engine-host -- --include-ignored   # motor falso y motor real
+```
+
 El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
