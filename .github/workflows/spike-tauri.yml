@@ -114,6 +114,7 @@ jobs:
         run: npm ci
 
       - name: Build installer
+        id: build
         run: npx tauri build --ci --config src-tauri/tauri.bundle.conf.json
 
       - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery, native window)
@@ -298,6 +299,8 @@ jobs:
       # (acl.not_owner_only, run 37574867250). No se cambia el producto: queda
       # documentado en docs/spikes/tauri.md.
       - name: Install and run the standalone installer (packaged engine on PostgreSQL)
+        # Corre aunque falle el smoke test de desarrollo: son pruebas independientes.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: pwsh
         run: |
           foreach ($name in 'ORGTREE_TAURI_PYTHON', 'ORGTREE_TAURI_ENGINE_DIR', 'ORGTREE_TAURI_UI_DIR', 'ORGTREE_TAURI_PROBE') {
