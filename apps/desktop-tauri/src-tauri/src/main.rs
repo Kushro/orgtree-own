@@ -307,22 +307,42 @@ fn open_popout(app: &tauri::AppHandle, url: &Url, features: NewWindowFeatures) -
 }
 
 /// `window.close()` desde JS (el renderer cierra así un popout al volver a
-/// acoplarlo): WebView2 dispara `WindowCloseRequested` y wry destruye solo el
-/// HWND contenedor del webview, no la ventana de Tauri, que queda vacía. Con el
-/// contenedor destruido, el controlador de WebView2 se cierra y `url()` falla:
-/// este vigilante lo detecta y destruye la ventana.
+/// acoplarlo): WebView2 dispara `WindowCloseRequested` y wry solo destruye el
+/// HWND contenedor del webview (clase `WRY_WEBVIEW`, hijo de la ventana de
+/// Tauri), no la ventana, que queda vacía. El controlador de WebView2 sigue
+/// respondiendo (`url()` no falla), así que el vigilante mira el contenedor:
+/// si la ventana ya no lo tiene, la destruye.
 fn reap_closed_popouts(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("orgtree-popout-reaper".into())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(400));
             for (label, window) in app.webview_windows() {
-                if label.starts_with(POPOUT_PREFIX) && window.url().is_err() {
+                if label.starts_with(POPOUT_PREFIX) && webview_container_gone(&window) {
                     let _ = window.destroy();
                 }
             }
         })
         .expect("no se pudo crear el vigilante de popouts");
+}
+
+#[cfg(windows)]
+fn webview_container_gone(window: &tauri::WebviewWindow) -> bool {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowExW(parent: *mut c_void, after: *mut c_void, class: *const u16, title: *const u16) -> *mut c_void;
+    }
+    let Ok(hwnd) = window.hwnd() else { return false };
+    let class: Vec<u16> = "WRY_WEBVIEW".encode_utf16().chain([0]).collect();
+    // SAFETY: hwnd es una ventana viva de Tauri y class termina en NUL.
+    unsafe { FindWindowExW(hwnd.0, std::ptr::null_mut(), class.as_ptr(), std::ptr::null()).is_null() }
+}
+
+#[cfg(not(windows))]
+fn webview_container_gone(_window: &tauri::WebviewWindow) -> bool {
+    // Fuera de Windows wry no separa el contenedor: el cierre llega como evento.
+    false
 }
 
 /// Cerrar la ventana dueña con popouts abiertos la oculta en lugar de
