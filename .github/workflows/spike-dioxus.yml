@@ -266,12 +266,17 @@ jobs:
       # #24: el instalador generado, instalado en silencio en una carpeta descartable
       # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y
       # PostgreSQL empaquetados, sobre una raíz de datos nueva y descartable.
+      #
+      # La app corre como un usuario local estándar creado para la prueba, como
+      # una persona real. La cuenta del runner (runneradmin) es el Administrador
+      # integrado de Windows (RID 500), cuyo SID Windows escribe como el alias
+      # "LA" en SDDL: la verificación de ACL de pg-custodian (prototype-guard,
+      # parse_sddl) no reconoce el alias y rechaza la carpeta de secretos del
+      # clúster (acl.not_owner_only). Además corre elevada, y PostgreSQL no corre
+      # con un token de administrador. Con un usuario estándar no pasa ninguna de
+      # las dos cosas y el producto no cambia.
       - name: Install the NSIS installer and start the installed app (packaged engine on PostgreSQL)
         shell: pwsh
-        env:
-          ORGTREE_DIOXUS_DATA: ${{ runner.temp }}\orgtree-dioxus-installed-data
-          ORGTREE_DIOXUS_PROBE: ${{ runner.temp }}\orgtree-dioxus-installed-probe.json
-          ORGTREE_DIOXUS_PROBE_MODE: installed
         run: |
           $installer = Get-ChildItem dist -Recurse -Filter *-setup.exe | Select-Object -First 1
           if (-not $installer) { throw "no NSIS installer in dist" }
@@ -296,9 +301,42 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "installed layout check failed" }
           Pop-Location
 
-          # Sin el modo de desarrollo: la app tiene que encontrar sus recursos sola.
-          Remove-Item Env:ORGTREE_DIOXUS_PYTHON, Env:ORGTREE_DIOXUS_ENGINE_DIR -ErrorAction SilentlyContinue
-          $data = $env:ORGTREE_DIOXUS_DATA
+          # Un usuario local estándar (no administrador) con su propio perfil.
+          $user = 'orgtreespike'
+          $password = 'Ot1!' + [guid]::NewGuid().ToString('N')
+          net user $user $password /add | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "could not create the local user $user" }
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          # Como una instalación por usuario: la carpeta es del usuario que la usa.
+          icacls $target /grant "${user}:(OI)(CI)M" /Q | Out-Null
+          $run = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-installed-run'
+          New-Item -ItemType Directory -Force $run | Out-Null
+          icacls $run /grant "${user}:(OI)(CI)F" /Q | Out-Null
+          $data = Join-Path $run 'data'
+          $probeFile = Join-Path $run 'probe.json'
+          function Start-AsUser([string]$file, [string]$arguments, [hashtable]$vars, [string]$cwd) {
+            $psi = [System.Diagnostics.ProcessStartInfo]::new($file, $arguments)
+            $psi.UseShellExecute = $false; $psi.LoadUserProfile = $true; $psi.WorkingDirectory = $cwd
+            $psi.UserName = $user; $psi.Domain = $env:COMPUTERNAME; $psi.Password = $secure
+            # Sin el modo de desarrollo: la app tiene que encontrar sus recursos sola.
+            foreach ($name in 'ORGTREE_DIOXUS_PYTHON', 'ORGTREE_DIOXUS_ENGINE_DIR', 'ORGTREE_DATA', 'ORGTREE_PG_BOOTSTRAP') { [void]$psi.Environment.Remove($name) }
+            foreach ($name in $vars.Keys) { $psi.Environment[$name] = $vars[$name] }
+            [System.Diagnostics.Process]::Start($psi)
+          }
+          # Crear el perfil y leer dónde quedó.
+          $first = Start-AsUser 'cmd.exe' '/d /c exit 0' @{} $run
+          $first.WaitForExit()
+          $sid = ([System.Security.Principal.NTAccount]::new($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $userDir = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+          Write-Host "Standard user $user ($sid), profile $userDir"
+          $userVars = @{
+            USERNAME = $user; USERPROFILE = $userDir; HOMEDRIVE = $userDir.Substring(0, 2); HOMEPATH = $userDir.Substring(2)
+            APPDATA = "$userDir\AppData\Roaming"; LOCALAPPDATA = "$userDir\AppData\Local"
+            TEMP = "$userDir\AppData\Local\Temp"; TMP = "$userDir\AppData\Local\Temp"
+          }
+          New-Item -ItemType Directory -Force $userVars.TEMP, $userVars.APPDATA | Out-Null
+          $appVars = $userVars + @{ ORGTREE_DIOXUS_DATA = $data; ORGTREE_DIOXUS_PROBE = $probeFile; ORGTREE_DIOXUS_PROBE_MODE = 'installed' }
+
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           function Save-Screen($name) {
             $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
@@ -309,27 +347,25 @@ jobs:
             $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
             $graphics.Dispose(); $bitmap.Dispose()
           }
-          $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          Write-Host "Runner shell elevated: $elevated"
           $started = Get-Date
-          $p = Start-Process -FilePath $exe -WorkingDirectory $target -PassThru
+          $p = Start-AsUser $exe '' $appVars $target
           $deadline = (Get-Date).AddSeconds(300)
           $shot = $false; $splash = $false
           while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
             if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) {
               try { Save-Screen 'installed-splash' } catch { Write-Host "screenshot: $_" }; $splash = $true
             }
-            if (-not $shot -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).installed")) {
+            if (-not $shot -and (Test-Path "$probeFile.installed")) {
               try { Save-Screen 'installed' } catch { Write-Host "screenshot: $_" }; $shot = $true
             }
             Start-Sleep -Milliseconds 300; $p.Refresh()
           }
           $seconds = [int]((Get-Date) - $started).TotalSeconds
           $exited = $p.HasExited
-          if (-not $exited) { try { Save-Screen 'installed-timeout' } catch {}; Stop-Process -Id $p.Id -Force }
+          if (-not $exited) { try { Save-Screen 'installed-timeout' } catch {}; taskkill /PID $p.Id /T /F | Out-Null }
 
           $failures = @()
-          $raw = if (Test-Path $env:ORGTREE_DIOXUS_PROBE) { Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw } else { '{}' }
+          $raw = if (Test-Path $probeFile) { Get-Content $probeFile -Raw } else { '{}' }
           Write-Host "Installed app probe: $raw"
           "### Installed app (#24, Dioxus)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           $probe = $raw | ConvertFrom-Json
@@ -360,7 +396,7 @@ jobs:
           }
           if (Test-Path "$data\pg\cluster\PG_VERSION") { Write-Host "PostgreSQL cluster version: $(Get-Content "$data\pg\cluster\PG_VERSION")" }
           # El descriptor engine-paths.json, en la carpeta propia de la app.
-          $paths = Join-Path $env:LOCALAPPDATA 'com.kushro.orgtree.dioxus-spike\engine-paths.json'
+          $paths = Join-Path $userVars.LOCALAPPDATA 'com.kushro.orgtree.dioxus-spike\engine-paths.json'
           if (Test-Path $paths) {
             $descriptor = Get-Content $paths -Raw | ConvertFrom-Json
             Write-Host "engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
@@ -368,7 +404,7 @@ jobs:
               $failures += "unexpected engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
             }
           } else { $failures += "no engine-paths.json at $paths" }
-          if (Test-Path "$env:APPDATA\Orgtree v2") { $failures += "something was written to the installed Orgtree's data folder" }
+          if (Test-Path "$($userVars.APPDATA)\Orgtree v2") { $failures += "something was written to the installed Orgtree's data folder" }
 
           # Salir (como desde la bandeja) apaga el motor y PostgreSQL con la app.
           if (-not $exited) { $failures += "the installed app did not exit after the probe ($seconds s)" }
@@ -376,30 +412,23 @@ jobs:
           Start-Sleep -Seconds 3
           $left = @(Get-Process postgres, python, pg-custodian -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$target*" })
           if ($left) { $failures += "processes left from the installed app: $(($left | ForEach-Object { "$($_.Name) $($_.Id)" }) -join ', ')" }
-          "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start to exit: $seconds s`n- runner elevated: $elevated" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start (PostgreSQL init) to exit: $seconds s`n- run as the standard local user $user" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           if ($failures) {
             Write-Host "===== files under $data"
             Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
             foreach ($log in Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt', '.jsonl', '.json' } | Select-Object -First 25) {
               Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
             }
-            Write-Host "===== Application event log (Orgtree refusals)"
-            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $started } -ErrorAction SilentlyContinue |
-              Where-Object { $_.Message -match 'orgtree|postgres|p03' } | Select-Object -First 10 | ForEach-Object { "$($_.ProviderName): $($_.Message)" }
             # La app descarta stdout y stderr del motor (pueden traer secretos). Para
-            # diagnosticar, el mismo motor empaquetado a mano sobre otra raíz descartable.
-            $diag = "$data-diagnostic"
-            $env:ORGTREE_DATA = $diag; $env:ORGTREE_V2_TOKEN = 'diagnostic-only'; $env:PYTHONUNBUFFERED = '1'
-            $env:ORGTREE_PG_BOOTSTRAP = '1'; $env:ORGTREE_PG_CUSTODIAN = "$resources\engine\pg-custodian.exe"; $env:ORGTREE_P03_PG_BIN = "$resources\engine\postgresql\bin"
-            New-Item -ItemType Directory -Force $diag | Out-Null
-            $d = Start-Process -FilePath "$resources\engine\runtime\python.exe" -ArgumentList "$resources\engine\launch.py" -WorkingDirectory "$resources\engine" `
-              -RedirectStandardOutput "$diag-stdout.txt" -RedirectStandardError "$diag-stderr.txt" -NoNewWindow -PassThru
+            # diagnosticar, el mismo motor empaquetado a mano, como el mismo usuario,
+            # sobre otra raíz descartable.
+            $diag = Join-Path $run 'diagnostic'
+            $engineVars = $userVars + @{ ORGTREE_DATA = $diag; ORGTREE_V2_TOKEN = 'diagnostic-only'; PYTHONUNBUFFERED = '1'; ORGTREE_PG_BOOTSTRAP = '1'
+              ORGTREE_PG_CUSTODIAN = "$resources\engine\pg-custodian.exe"; ORGTREE_P03_PG_BIN = "$resources\engine\postgresql\bin" }
+            $d = Start-AsUser 'cmd.exe' "/d /c $resources\engine\runtime\python.exe $resources\engine\launch.py > $run\diagnostic-stdout.txt 2> $run\diagnostic-stderr.txt" $engineVars "$resources\engine"
             if (-not $d.WaitForExit(240000)) { Write-Host "diagnostic engine still running after 240 s"; taskkill /PID $d.Id /T /F | Out-Null }
-            Write-Host "===== diagnostic engine stdout"; Get-Content "$diag-stdout.txt" -Tail 60
-            Write-Host "===== diagnostic engine stderr"; Get-Content "$diag-stderr.txt" -Tail 120
-            foreach ($log in Get-ChildItem $diag -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt' } | Select-Object -First 10) {
-              Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
-            }
+            Write-Host "===== diagnostic engine stdout"; Get-Content "$run\diagnostic-stdout.txt" -Tail 60
+            Write-Host "===== diagnostic engine stderr"; Get-Content "$run\diagnostic-stderr.txt" -Tail 120
             throw ($failures -join '; ')
           }
           Write-Host "Installed app verified: packaged engine on PostgreSQL, RSX UI loaded, own data root shown"
@@ -431,10 +460,10 @@ jobs:
         with:
           name: orgtree-dioxus-installed-logs
           path: |
-            ${{ runner.temp }}/orgtree-dioxus-installed-data/**/*.log
-            ${{ runner.temp }}/orgtree-dioxus-installed-data/**/*.txt
-            ${{ runner.temp }}/orgtree-dioxus-installed-data/**/*.jsonl
-            ${{ runner.temp }}/orgtree-dioxus-installed-data/*.json
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.log
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.txt
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.jsonl
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.json
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
