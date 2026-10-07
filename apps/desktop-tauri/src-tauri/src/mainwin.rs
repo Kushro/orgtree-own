@@ -133,6 +133,10 @@ pub fn reveal(app: &tauri::AppHandle, id: &str) {
     let Some(window) = app.get_webview_window(id) else { return };
     shell(app).restore_windows.store(true, Ordering::SeqCst);
     let _ = window.show();
+    let exact = shell(app).windows.lock().unwrap().get_mut(id).and_then(|e| e.exact_size.take());
+    if let Some(size) = exact {
+        exact_size(&window, size);
+    }
     if window.is_minimized().unwrap_or(false) {
         let _ = window.unminimize();
     }
@@ -269,12 +273,16 @@ fn build_inner(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
         .on_document_title_changed(move |window, title| crate::on_title(&titles, &window, &title))
         .build()
         .map_err(|e| format!("ventana {id}: {e}"))?;
+    let mut exact = None;
     if let Some(saved) = saved {
         let b = saved.bounds;
         let _ = window.set_size(PhysicalSize::new(b.width, b.height));
+        exact_size(&window, (b.width, b.height));
         let _ = window.set_position(PhysicalPosition::new(b.x, b.y));
         if saved.maximized {
             let _ = window.maximize();
+        } else {
+            exact = Some((b.width, b.height));
         }
     }
     let events = app.clone();
@@ -282,6 +290,7 @@ fn build_inner(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     window.on_window_event(move |event| on_window_event(&events, &label, event));
     if let Some(entry) = state.windows.lock().unwrap().get_mut(id) {
         entry.placement_key = key.clone();
+        entry.exact_size = exact;
     }
     if let Some(key) = &key {
         if let Some(store) = state.placement.lock().unwrap().as_mut() {
@@ -722,4 +731,22 @@ pub fn report(app: &tauri::AppHandle) -> Value {
         })
         .collect();
     json!({ "windows": rows, "areas": work_areas(app) })
+}
+
+/// Deja el área cliente en el tamaño pedido. Una ventana sin marco todavía
+/// oculta puede quedar con la altura de la barra de título de más (el tamaño
+/// se ajusta con el estilo de ventana anterior al de sin marco: en CI, 30 px),
+/// así que se mide y se corrige la diferencia, como `setExactPopoutBounds`.
+pub fn exact_size(window: &WebviewWindow, (width, height): (u32, u32)) {
+    // Lo pedido la última vez: la corrección es lo pedido más lo que falta.
+    let (mut asked_w, mut asked_h) = (width as i64, height as i64);
+    for _ in 0..2 {
+        let Ok(actual) = window.inner_size() else { return };
+        if actual.width == width && actual.height == height {
+            return;
+        }
+        asked_w = (asked_w + width as i64 - actual.width as i64).max(1);
+        asked_h = (asked_h + height as i64 - actual.height as i64).max(1);
+        let _ = window.set_size(PhysicalSize::new(asked_w as u32, asked_h as u32));
+    }
 }

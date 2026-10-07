@@ -255,7 +255,10 @@ fn run_one(app: &tauri::AppHandle, probe: &WindowsProbe) {
     let tall = h.saturating_sub(120).max(crate::mainwin::MIN_SIZE.1);
     let segunda = find(app, "segunda").unwrap_or_default();
     place(app, "win-1", x + 20, y + 20, half, tall);
-    place(app, &segunda, x + (w / 2) as i32 + 10, y + 40, half, tall);
+    // Entera dentro del área de trabajo (en CI mide 1024 de ancho): la
+    // restauración tiene que devolverla en el mismo lugar.
+    let right = (x + (w / 2) as i32 + 10).min(x + w as i32 - half as i32).max(x);
+    place(app, &segunda, right, y + 40, half, tall);
     place(app, &tercera, x + (w / 4) as i32, y + 90, 700, 520);
     std::thread::sleep(Duration::from_millis(1200));
     if let Some(window) = app.get_webview_window(&segunda) {

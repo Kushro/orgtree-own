@@ -70,6 +70,9 @@ pub struct Entry {
     /// La clave de posición con la que la ventana está en la sesión
     /// (`homepage`, `org:<slug>` o ninguna para la creación). La mantiene el shell.
     pub placement_key: Option<String>,
+    /// El tamaño de área cliente restaurado que la ventana tiene que tener al
+    /// mostrarse (se corrige después de `show`, ver `mainwin::exact_size`).
+    pub exact_size: Option<(u32, u32)>,
     /// El documento actual terminó de cargar: los eventos retenidos se pueden entregar.
     pub loaded: bool,
     /// Eventos que el renderer no puede volver a pedir, retenidos hasta que el
@@ -182,6 +185,7 @@ impl Registry {
                 return_home: false,
                 building: true,
                 placement_key: None,
+                exact_size: None,
                 loaded: false,
                 outbox: Vec::new(),
             },
