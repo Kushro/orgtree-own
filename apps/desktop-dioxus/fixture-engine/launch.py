@@ -100,7 +100,8 @@ def _records(sid: str) -> list[dict]:
                 {"id": "msg_fixture_rich", "role": "assistant", "content": [
                     {"type": "thinking", "thinking": "Pienso: el informe está adjunto; lo leo y respondo."},
                     {"type": "text", "text": "Listo. El informe está en "
-                     f"[informe.txt](<{REPORT}>) y el log en [falta.log](<{MISSING}>), que no existe."}]})
+                     f"[informe.txt](<{REPORT}>) y el log en [falta.log](<{MISSING}>), que no existe. "
+                     "Más en [el sitio](https://example.com/orgtree) y en [un relativo](uploads/informe.txt)."}]})
     return records + [mail, reply]
 
 

@@ -308,6 +308,10 @@ if (card) {
     if (chip) { chip.click(); full.revealRelative = await waitFor(() => reveals().find(t => t.includes('uploads/informe.txt')), 5000) }
     const missing = [...msgs.querySelectorAll('.md a.local-file')].find(a => a.getAttribute('data-local-path').endsWith('falta.log'));
     if (missing) { missing.click(); full.revealMissing = await waitFor(() => reveals().find(t => t.includes('falta.log')), 5000) }
+    // un enlace externo o relativo no navega ni abre nada: se muestra como texto
+    const links = () => [...document.querySelectorAll('.dx-desk .toast.dx-link')].map(t => t.textContent);
+    for (const a of [...msgs.querySelectorAll('.md a:not(.local-file)')].filter(a => /example\.com|^uploads/.test(a.getAttribute('href')))) a.click();
+    full.linksShown = await waitFor(() => { const l = links(); return l.length >= 2 && l }, 5000);
     full.notNavigated = !!document.querySelector('.dx-desk .msgs');
 
     // estado del turno: inactivo, en cola por el límite de turnos, trabajando

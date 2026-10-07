@@ -502,22 +502,32 @@ pub fn DeskView(org: String, node: String, #[props(default)] popout: bool) -> El
         }
     });
 
-    // Los enlaces del Markdown: un archivo local se revela, nada navega el webview.
+    // Los enlaces del Markdown: un archivo local se revela; nada navega el
+    // webview ni abre nada. Dioxus desktop, sin esto, manda el `href` de
+    // cualquier `<a>` clicado a `webbrowser::open` (`handleClickNavigate` del
+    // intérprete), que puede abrir el navegador o lanzar una ruta relativa: el
+    // clic se corta en la captura, antes de que llegue a su listener.
     use_future(move || async move {
         let mut eval = document::eval(
             "if (window.__dxLinks) document.removeEventListener('click', window.__dxLinks, true); \
              window.__dxLinks = e => { \
-               const a = e.target && e.target.closest && e.target.closest('.dx-desk .md a'); \
+               const a = e.target && e.target.closest && e.target.closest('.dx-desk a[href]'); \
                if (!a) return; \
                e.preventDefault(); \
+               e.stopPropagation(); \
                const path = a.getAttribute('data-local-path'); \
-               if (path) dioxus.send(path); \
+               dioxus.send(path ? { reveal: path } : { link: a.getAttribute('href') }); \
              }; \
              document.addEventListener('click', window.__dxLinks, true); \
              await new Promise(() => {});",
         );
-        while let Ok(path) = eval.recv::<String>().await {
-            desk.reveal(&path);
+        while let Ok(click) = eval.recv::<serde_json::Value>().await {
+            if let Some(path) = click.get("reveal").and_then(|v| v.as_str()) {
+                desk.reveal(path);
+            } else if let Some(href) = click.get("link").and_then(|v| v.as_str()) {
+                // un enlace externo no se abre desde el desk del spike: se muestra para copiarlo
+                desk.toast(format!("Link: {href}"), "dx-link");
+            }
         }
     });
 

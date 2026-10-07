@@ -118,6 +118,8 @@ jobs:
             Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
           if (-not $exe) { throw "orgtree-dioxus.exe not found" }
           Write-Host "Running $($exe.FullName)"
+          # #27: ningún enlace del desk abre el navegador (Dioxus manda cada <a> clicado a webbrowser::open)
+          $browsersBefore = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
           $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           function Save-Screen($name) {
@@ -296,6 +298,9 @@ jobs:
             # esfuerzo
             if (($full.effortLevels -join ',') -ne 'low,medium,high,xhigh,max' -or $full.effortAfter -ne 'low' -or $full.effortToast -notlike '*applies from its next turn') { $failures += "effort: $($full.effortLevels -join ',') / $($full.effortAfter) / $($full.effortToast)" }
           }
+          if (@($full.linksShown | Where-Object { $_ -like 'Link: *' }).Count -lt 2) { $failures += "links in the desk: $($full.linksShown -join ', ')" }
+          $browsersAfter = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
+          if ($browsersAfter -gt $browsersBefore) { $failures += "a browser was opened during the smoke test ($browsersBefore -> $browsersAfter processes)" }
           $rv = $probe.reveal
           if ($rv.toast -notlike 'Shown in folder:*informe.txt' -or $rv.notNavigated -ne $true) { $failures += "reveal of an existing file: $($rv | ConvertTo-Json -Compress)" }
           Write-Host "Explorer windows after the reveal: $($ci.explorer)"
