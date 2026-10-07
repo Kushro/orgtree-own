@@ -14,7 +14,7 @@
 //!    minimizar y enfocar desde los botones del renderer.
 //! 3. Un desk temporal que toma prestado el desk del popout y lo devuelve a
 //!    una ventana con el mismo rectángulo.
-//! 4. El modal de Usage anclado (queda encima y en su lugar) y su pop-out con
+//! 4. El inbox de `worker` como modal anclado (queda encima y en su lugar) y su pop-out con
 //!    el rectángulo del panel, sin cerrar el modal antes de que la ventana lo
 //!    adopte; el cierre desde su botón de ventana.
 //! 5. Devolver el desk a la ventana principal (`window.close()`): no queda
@@ -239,7 +239,7 @@ fn run(app: &tauri::AppHandle, probe: &PopoutProbe) {
     probe.put("afterTempNative", native(app));
     probe.shot(app, "tempdesk-restored");
 
-    // 4. El modal de Usage: anclado, y su pop-out con el rectángulo del panel.
+    // 4. El inbox de worker como modal: anclado, y su pop-out con el rectángulo del panel.
     probe.record(app, "modalPin", json!({}));
     probe.put("modalPinNative", native(app));
     probe.shot(app, "modal-pinned");

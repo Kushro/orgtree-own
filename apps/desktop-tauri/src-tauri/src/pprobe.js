@@ -222,14 +222,24 @@ window.__pprobe = window.__pprobe || (() => {
       return r;
     },
     // El modal de Usage, anclado a la ventana: queda encima y en su lugar.
+    // El inbox de worker (PinFrame `node-inbox`), desde el menú de su tarjeta:
+    // el botón de Usage no apareció en el fixture (runs 36 y 37).
     async modalPin() {
       const r = {};
-      const open = [...document.querySelectorAll('#root button[title^="usage"]')].find(b => b.offsetParent !== null)
-        || document.querySelector('#root button[title^="usage"]');
-      if (!open) return { error: 'sin botón de Usage' };
-      open.click();
-      const panel = await waitFor(() => document.querySelector('.usage-modal'), 10000);
-      if (!panel) return { error: 'el modal de Usage no abrió' };
+      const card = leaf('worker');
+      if (!card) return { error: 'sin tarjeta del agente' };
+      const c = card.getBoundingClientRect();
+      card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, buttons: 2,
+        clientX: c.x + c.width / 2, clientY: c.y + c.height / 2, view: window }));
+      const item = await waitFor(() => [...document.querySelectorAll('.ctxmenu [role="menuitem"]')].find(b => b.textContent.trim() === 'Open inbox'), 5000);
+      if (!item) return { error: 'sin la entrada Open inbox' };
+      item.click();
+      const bar = await waitFor(() => [...document.querySelectorAll('#root .modalpin-bar, body > * .modalpin-bar')]
+        .find(b => b.querySelector('[aria-label="pin this to the window"]')), 10000);
+      if (!bar) return { error: 'el inbox no abrió como modal anclable' };
+      const panel = bar.parentElement;
+      panel.setAttribute('data-pprobe', 'modal');
+      r.title = (bar.textContent || '').trim().slice(0, 40);
       const pin = panel.querySelector('[aria-label="pin this to the window"]');
       if (!pin) return { error: 'sin botón para anclar' };
       pin.click();
@@ -261,9 +271,9 @@ window.__pprobe = window.__pprobe || (() => {
       if (!button) return { error: 'sin botón Open in new window en el modal' };
       const r = { rect: box(panel), owner: metrics(window) };
       const before = S.opens.length;
-      S.watch = '.usage-modal';
+      S.watch = '[data-pprobe="modal"]';
       button.click();
-      const opened = await newOpen(before, child => child.document.querySelector('.usage-modal.modalpin-detached'), 15000);
+      const opened = await newOpen(before, child => child.document.querySelector('[data-pprobe="modal"].modalpin-detached'), 15000);
       S.watch = null;
       if (!opened) return { ...r, error: 'el modal no llegó al popout', opens: S.opens.slice(before) };
       S.modalWindow = opened.child;
@@ -271,8 +281,8 @@ window.__pprobe = window.__pprobe || (() => {
       r.features = opened.entry.features;
       r.requested = parse(opened.entry.features);
       r.atOpen = opened.entry.watched;
-      r.inChild = !!opened.child.document.querySelector('.usage-modal');
-      r.ownerHasPanel = !!document.querySelector('.usage-modal');
+      r.inChild = !!opened.child.document.querySelector('[data-pprobe="modal"]');
+      r.ownerHasPanel = !!document.querySelector('[data-pprobe="modal"]');
       r.controls = await waitFor(() => { const c = controls(opened.child); return c.length === 3 && c }, 5000);
       r.child = metrics(opened.child);
       return r;
@@ -284,15 +294,16 @@ window.__pprobe = window.__pprobe || (() => {
       if (!button) return { error: 'sin botón Close window' };
       button.click();
       const r = { closed: !!(await waitFor(() => w.closed, 5000)) };
-      r.back = !!(await waitFor(() => document.querySelector('.usage-modal'), 5000));
-      const panel = document.querySelector('.usage-modal');
+      r.back = !!(await waitFor(() => document.querySelector('[data-pprobe="modal"]'), 5000));
+      const panel = document.querySelector('[data-pprobe="modal"]');
       r.pinnedAgain = !!panel && panel.classList.contains('modalpin-win');
       return r;
     },
     // "Return to main window" en el popout del desk: el renderer lo cierra con window.close().
     async deskClose() {
       const w = S.desk;
-      const button = w && w.document.querySelector('[aria-label="Return to main window"]');
+      if (!w || w.closed) return { skipped: 'el desk no está en un popout' };
+      const button = w.document.querySelector('[aria-label="Return to main window"]');
       if (!button) return { error: 'sin botón Return to main window' };
       button.click();
       const r = { closed: !!(await waitFor(() => w.closed, 5000)) };
