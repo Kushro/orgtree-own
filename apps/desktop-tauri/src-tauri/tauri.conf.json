@@ -14,7 +14,8 @@
         "width": 1200,
         "height": 800,
         "minWidth": 640,
-        "minHeight": 480
+        "minHeight": 480,
+        "create": false
       }
     ],
     "security": {
@@ -23,8 +24,12 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
     "publisher": "Kushro",
     "shortDescription": "Orgtree desktop shell on Tauri 2 (migration spike)",
     "windows": {

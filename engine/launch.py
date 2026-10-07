@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hmac
 import json
 import os
 from pathlib import Path
@@ -153,12 +154,59 @@ def _port(data: Path) -> int:
     return port
 
 
-class TokenGate:
-    """ASGI middleware requiring the desktop token on every request."""
+DESKTOP_COOKIE = "orgtree_desktop_token"
 
-    def __init__(self, app: Callable[..., Awaitable[Any]], token: str) -> None:
+
+def _cookie_values(raw_headers: list[tuple[bytes, bytes]], name: str) -> list[str]:
+    """Every value the request carries for cookie `name` (any Cookie header)."""
+    values = []
+    for key, value in raw_headers:
+        if key.lower() != b"cookie":
+            continue
+        for pair in value.decode("latin-1").split(";"):
+            key_text, sep, cookie = pair.strip().partition("=")
+            if sep and key_text == name:
+                values.append(cookie)
+    return values
+
+
+class TokenGate:
+    """ASGI middleware requiring the desktop token on every request.
+
+    The token arrives as the `X-Orgtree-Desktop-Token` header (Electron and
+    tools) or, for a webview that cannot add headers to a WebSocket handshake
+    (WebView2, so the Tauri shell), as the HttpOnly cookie `DESKTOP_COOKIE`.
+    Cookies are scoped by host, not port, so a cookie is only trusted with
+    proof the request comes from the engine's own page: a WebSocket needs
+    `Origin` equal to the engine origin, and an HTTP request must not carry a
+    foreign `Origin` or a cross-origin `Sec-Fetch-Site`. Without a configured
+    `origin` the cookie is ignored. With one, a WebSocket from any other
+    `Origin` is refused whatever credential it carries.
+    """
+
+    def __init__(self, app: Callable[..., Awaitable[Any]], token: str, origin: str | None = None) -> None:
         self.app = app
         self.token = token
+        self._token_bytes = token.encode("utf-8")
+        self.origin = origin
+
+    def _matches(self, candidate: str) -> bool:
+        return bool(candidate) and hmac.compare_digest(candidate.encode("utf-8"), self._token_bytes)
+
+    def _cookie_ok(self, scope: dict[str, Any], headers: dict[bytes, bytes]) -> bool:
+        if self.origin is None:
+            return False
+        origin = headers.get(b"origin", b"").decode("latin-1")
+        if scope["type"] == "websocket":
+            if origin != self.origin:
+                return False
+        else:
+            if origin and origin != self.origin:
+                return False
+            fetch_site = headers.get(b"sec-fetch-site", b"").decode("latin-1")
+            if fetch_site and fetch_site not in {"same-origin", "none"}:
+                return False
+        return any(self._matches(value) for value in _cookie_values(scope.get("headers", []), DESKTOP_COOKIE))
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope.get("type") not in {"http", "websocket"}:
@@ -166,19 +214,24 @@ class TokenGate:
             return
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
         supplied = headers.get(b"x-orgtree-desktop-token", b"").decode("utf-8")
+        if (scope["type"] == "websocket" and self.origin is not None
+                and headers.get(b"origin", b"").decode("latin-1") not in {"", self.origin}):
+            await send({"type": "websocket.close", "code": 4401})
+            return
+        desktop = self._matches(supplied) or self._cookie_ok(scope, headers)
         route = str(scope.get("path", ""))
         parts = route.strip("/").split("/")
         steer_route = (len(parts) in (6, 7) and parts[:2] == ["api", "orgs"]
                        and parts[3] == "nodes" and parts[5] == "steer"
                        and (len(parts) == 6 or parts[6] == "ack"))
-        if supplied != self.token and scope.get("type") == "http" and (route == "/api/agent" or steer_route) and scope.get("method") == "POST":
+        if not desktop and scope.get("type") == "http" and (route == "/api/agent" or steer_route) and scope.get("method") == "POST":
             from orgtree import agentauth
             identity = agentauth.verify(headers.get(b"x-orgtree-agent-token", b"").decode("utf-8"))
             if identity is not None:
                 scope.setdefault("state", {})["agent_identity"] = identity
                 await self.app(scope, receive, send)
                 return
-        if supplied != self.token:
+        if not desktop:
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 4401})
                 return
@@ -370,7 +423,7 @@ def load_app() -> tuple[Any, str, Path, int, dict[str, bool]]:
     routes = api.app.router.routes
     routes[:] = ([route for route in routes if getattr(route, 'path', None) != '/{path:path}']
                  + [route for route in routes if getattr(route, 'path', None) == '/{path:path}'])
-    return TokenGate(api.app, token), token, data, port, stopping
+    return TokenGate(api.app, token, origin=f"http://127.0.0.1:{port}"), token, data, port, stopping
 
 
 def main() -> None:

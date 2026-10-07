@@ -5,6 +5,7 @@ on:
     branches: [spike/tauri]
     paths:
       - apps/desktop-tauri/**
+      - engine/launch.py
       - .github/workflows/spike-tauri.yml
   workflow_dispatch:
 
@@ -46,6 +47,12 @@ jobs:
       - name: Install engine dependencies
         run: python -m pip install -r ../../tools/runtime-requirements.in
 
+      - name: Engine TokenGate tests (header and cookie)
+        working-directory: .
+        run: >-
+          python tools/run-python-verification.py --python "${{ steps.python.outputs.python-path }}"
+          tests/test_desktop_cookie_auth.py tests/test_foreground_http.py tests/test_desktop_import_jobs.py
+
       - name: Engine supervisor tests (fake and real engine)
         working-directory: apps/desktop-tauri/engine-host
         env:
@@ -59,24 +66,44 @@ jobs:
       - name: Build installer
         run: npx tauri build --ci
 
-      - name: Smoke test (window starts, launches the engine and stays up)
+      - name: Smoke test (window starts, launches the engine, cookie auth)
         shell: pwsh
         env:
           ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
           ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\engine
           ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-smoke
+          # Prueba de autenticación por cookie en WebView2 (src-tauri/src/probe.rs).
+          ORGTREE_TAURI_PROBE: ${{ runner.temp }}\orgtree-tauri-probe.json
         run: |
           $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
           if (-not $exe) { throw "orgtree-tauri.exe not found" }
           $p = Start-Process -FilePath $exe.FullName -PassThru
-          Start-Sleep -Seconds 30
-          $p.Refresh()
+          $deadline = (Get-Date).AddSeconds(90)
+          while (-not (Test-Path $env:ORGTREE_TAURI_PROBE) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            Start-Sleep -Seconds 1; $p.Refresh()
+          }
           if ($p.HasExited) { throw "app exited early with code $($p.ExitCode)" }
           $port = Join-Path $env:ORGTREE_TAURI_DATA 'engine-port.json'
           if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
           Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
+          if (-not (Test-Path $env:ORGTREE_TAURI_PROBE)) { throw "the cookie probe did not report within 90 s" }
+          $raw = Get-Content $env:ORGTREE_TAURI_PROBE -Raw
+          Write-Host "Cookie probe: $raw"
+          "### Cookie probe (WebView2)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $probe = $raw | ConvertFrom-Json
+          $failures = @()
+          if ($probe.page.nav -eq 401) { $failures += 'navigation to the engine was not authenticated (401)' }
+          if ($probe.page.http -ne 200) { $failures += "fetch /api/desktop/identity returned $($probe.page.http)" }
+          if ($probe.page.ws -ne 'open') { $failures += "WebSocket did not open: $($probe.page.ws)" }
+          if ($probe.page.iframe.origin -ne 'null') { $failures += "sandboxed iframe origin was $($probe.page.iframe.origin)" }
+          $top = @($probe.echo | Where-Object { $_.path -eq '/top' })
+          $frame = @($probe.echo | Where-Object { $_.path -eq '/iframe' })
+          if ($top.Count -ne 1 -or -not $top[0].cookie) { $failures += 'positive control failed: the engine page did not send the cookie' }
+          if ($frame.Count -ne 1) { $failures += 'the sandboxed iframe request never arrived' }
+          elseif ($frame[0].cookie) { $failures += 'the sandboxed iframe sent the desktop cookie' }
           Stop-Process -Id $p.Id -Force
-          Write-Host "App stayed up for 30 s"
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host "Cookie auth verified in WebView2"
 
       - name: Report sizes
         shell: pwsh
