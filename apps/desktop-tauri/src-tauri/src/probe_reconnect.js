@@ -132,21 +132,8 @@
     notes.publish3 = await publish([Q2]);
     notes.syncInvalid = await attempt(() => bridge.syncNotifications([{ org, id: Q2.id, extra: 1 }]));
     notes.attentionMismatch = await attempt(() => bridge.setPendingAttention(['a'], [{ org, id: 'a' }, { org, id: 'b' }]));
-    // 5. El clic en el toast de Q2 (minimizada): la ventana vuelve y el renderer
-    //    recibe notification-click.
-    await attempt(() => bridge.minimizeWindow());
-    await timeout(800);
-    const clicks = [];
-    const offClick = bridge.onEvent(event => { if (event.type === 'notification-click') clicks.push(event.data) });
-    document.title = '__CLICK__' + JSON.stringify({ org, id: Q2.id });
-    await waitFor(() => clicks.length, 5000);
-    offClick();
-    notes.click = clicks[0] ? { id: clicks[0].id, org: clicks[0].org, kind: clicks[0].kind } : null;
-    notes.clickFocus = !!(await waitFor(() => document.hasFocus(), 5000));
-    await timeout(1000);
-    notes.clickPath = location.pathname + location.search;
-    // 6. Nada pendiente: para el parpadeo y se retira el último toast.
-    notes.publish4 = await publish([]);
+    // 5 y 6 (el clic en el toast y "nada pendiente") van en probe_late.js: el clic
+    // abre la bandeja de entrada del renderer, que taparía la zona de arrastre.
   }
   // Una zona de arrastre del renderer (`-webkit-app-region: drag`) que esté a la
   // vista y no tapada: el CI la arrastra con el mouse real.

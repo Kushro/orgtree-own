@@ -225,8 +225,9 @@ fn json_path(path: &std::path::Path) -> String {
 }
 
 /// Etapa final (#21), cuando el CI crea `<salida>.late-go`: `probe_late.js`
-/// selecciona en el Explorador un `.cmd` que, si se ejecutara, dejaría
-/// `<salida>.reveal-ran`; abre la carpeta de charters y el enlace de un harness.
+/// hace clic en el toast pendiente, selecciona en el Explorador un `.cmd` que,
+/// si se ejecutara, dejaría `<salida>.reveal-ran`, y abre la carpeta de
+/// charters y el enlace de un harness.
 pub fn watch_late(app: tauri::AppHandle) {
     use tauri::Manager;
     let Some((go, target, ran)) = app.state::<crate::Shell>().probe.lock().unwrap().as_ref().map(|probe| {
@@ -243,7 +244,10 @@ pub fn watch_late(app: tauri::AppHandle) {
         }
         if let Some(window) = crate::main_window(&app) {
             let _ = window.eval(
-                include_str!("probe_late.js").replace("__PREFIX__", LATE_PREFIX).replace("__TARGET__", &json_path(&target)),
+                include_str!("probe_late.js")
+                    .replace("__PREFIX__", LATE_PREFIX)
+                    .replace("__CLICK__", CLICK_PREFIX)
+                    .replace("__TARGET__", &json_path(&target)),
             );
         }
         return;

@@ -271,27 +271,6 @@ jobs:
           $nt = $it.notify
           if ((@($nt.prefKeys) -join ',') -ne 'boolean,boolean,boolean') { $failures += "notification preferences: $($nt.prefKeys -join ',')" }
           foreach ($k in 'publish1', 'publish2', 'publish3', 'publish4') { if ($nt.$k -ne 200) { $failures += "fixture notices ${k}: $($nt.$k)" } }
-          $nlog = @(& $read 'notify'); $slog = @(& $read 'sync'); $alog = @(& $read 'attention'); $click = & $read 'click'
-          $decisions = { param($id) @($nlog | Where-Object { $_.id -eq $id } | ForEach-Object { $_.decision }) }
-          $q1 = & $decisions 'fixture-q1'; $r1 = & $decisions 'fixture-r1'; $q2 = & $decisions 'fixture-q2'
-          if ($q1[0] -ne 'shown') { $failures += "the renderer's question was not shown without focus: $($q1 -join ',')" }
-          if ($q1 -notcontains 'duplicate') { $failures += "a repeated notification was not deduplicated: $($q1 -join ',')" }
-          if ($r1[0] -ne 'kind' -or $r1 -notcontains 'shown') { $failures += "routine mail by preference (off, then on): $($r1 -join ',')" }
-          if ($nt.directRoutine -ne $false -or $nt.directDuplicate -ne $false -or $nt.directInactive -ne $false) { $failures += "direct notify results: routine $($nt.directRoutine), duplicate $($nt.directDuplicate), inactive $($nt.directInactive)" }
-          if ((& $decisions 'fixture-zz') -notcontains 'inactive') { $failures += 'a notification outside the synced set was not filtered' }
-          if ($nt.shownFocus -ne $true) { $failures += 'the main window did not get the focus back for the focus filter' }
-          elseif ($q2.Count -lt 2 -or $q2[0] -ne 'focused' -or $q2 -notcontains 'shown') { $failures += "focus filter (notifyWhileFocused off, then on): $($q2 -join ',')" }
-          if ($nt.invalidKind -notlike '*Unknown notification kind*' -or $nt.unknownField -notlike '*Unknown notification field*') { $failures += "notification validation: $($nt.invalidKind) / $($nt.unknownField)" }
-          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q1' }).Count) { $failures += "syncNotifications did not withdraw the resolved toast: $($slog | ConvertTo-Json -Compress)" }
-          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q2' }).Count) { $failures += 'the last toast was not withdrawn when nothing was pending' }
-          if ($nt.syncInvalid -notlike '*Invalid notification identity*') { $failures += "syncNotifications validation: $($nt.syncInvalid)" }
-          if ($nt.attentionMismatch -notlike '*Invalid attention identities*') { $failures += "setPendingAttention validation: $($nt.attentionMismatch)" }
-          $starts = @($alog | Where-Object { $_.pulse -eq 'Start' })
-          if (-not $starts.Count -or $starts[0].started -ne $true -or $starts[0].focused -ne $false) { $failures += "the taskbar did not flash for a new arrival: $($alog | ConvertTo-Json -Compress)" }
-          if (@($alog | Where-Object { $_.pulse -eq 'Keep' -and $_.started }).Count) { $failures += 'an unchanged attention list restarted the flash' }
-          if (-not $alog.Count -or $alog[-1].pulse -ne 'Stop') { $failures += "the flash did not stop when nothing was pending: $($alog | ConvertTo-Json -Compress)" }
-          if ($click.clicked -ne $true -or $nt.click.id -ne 'fixture-q2' -or $nt.clickFocus -ne $true) { $failures += "notification click: shell $($click | ConvertTo-Json -Compress), page $($nt.click | ConvertTo-Json -Compress), focus $($nt.clickFocus)" }
-          "### Integraciones (#21)`n- harnesses: $($it.harnesses | ConvertTo-Json -Compress)`n- login: $($lg.start.phase) -> output '$(($lg.running.output -replace '\s+', ' ').Trim())' -> $($lg.cancel.phase)`n- notify: $($nlog | ConvertTo-Json -Compress)`n- sync: $($slog | ConvertTo-Json -Compress)`n- attention: $($alog | ConvertTo-Json -Compress)`n- click: $($click | ConvertTo-Json -Compress), path after click $($nt.clickPath)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           Add-Type @'
           using System; using System.Runtime.InteropServices;
           public static class Win {
@@ -342,8 +321,12 @@ jobs:
           # #21, etapa final: abre de verdad el Explorador (revealFile, openCharterFolder) y el
           # navegador (openHarnessLink). Va al final porque esas ventanas taparían el arrastre.
           New-Item -ItemType File -Force "$($env:ORGTREE_TAURI_PROBE).late-go" | Out-Null
-          $lateDeadline = (Get-Date).AddSeconds(20)
-          while (-not (Test-Path "$($env:ORGTREE_TAURI_PROBE).late") -and (Get-Date) -lt $lateDeadline) { Start-Sleep -Milliseconds 300 }
+          $lateDeadline = (Get-Date).AddSeconds(40)
+          $clickShot = $false
+          while (-not (Test-Path "$($env:ORGTREE_TAURI_PROBE).late") -and (Get-Date) -lt $lateDeadline) {
+            if (-not $clickShot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).clicked")) { Start-Sleep -Milliseconds 500; try { Save-Screen 'notification-click' } catch { Write-Host "screenshot: $_" }; $clickShot = $true }
+            Start-Sleep -Milliseconds 300
+          }
           $late = & $read 'late'
           if (-not $late) { $failures += 'the late integration stage did not report' }
           else {
@@ -356,7 +339,11 @@ jobs:
               Start-Sleep -Milliseconds 700
               $folders = @(); $selected = @()
               foreach ($w in @((New-Object -ComObject Shell.Application).Windows())) {
-                try { $folders += $w.Document.Folder.Self.Path; foreach ($item in @($w.Document.SelectedItems())) { $selected += $item.Path } } catch {}
+                try {
+                  $folders += $w.Document.Folder.Self.Path
+                  $items = $w.Document.SelectedItems()
+                  for ($n = 0; $n -lt $items.Count; $n++) { $selected += $items.Item($n).Path }
+                } catch {}
               }
               $browser = Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'msedge.exe', 'chrome.exe', 'firefox.exe' -and $_.CommandLine -like '*developers.openai.com/codex/cli*' } | Select-Object -First 1
             } while ((Get-Date) -lt $until -and -not ($browser -and $selected -contains $target -and $folders -contains $charters))
@@ -372,6 +359,28 @@ jobs:
             if (Test-Path "$($env:ORGTREE_TAURI_PROBE).reveal-ran") { $failures += 'revealFile ran the file instead of selecting it' }
             "- Explorer: selected $($selected -join ', '); folders $($folders -join ', '); browser $($browser.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           }
+          $nlog = @(& $read 'notify'); $slog = @(& $read 'sync'); $alog = @(& $read 'attention'); $click = & $read 'click'
+          $decisions = { param($id) @($nlog | Where-Object { $_.id -eq $id } | ForEach-Object { $_.decision }) }
+          $q1 = & $decisions 'fixture-q1'; $r1 = & $decisions 'fixture-r1'; $q2 = & $decisions 'fixture-q2'
+          if ($q1[0] -ne 'shown') { $failures += "the renderer's question was not shown without focus: $($q1 -join ',')" }
+          if ($q1 -notcontains 'duplicate') { $failures += "a repeated notification was not deduplicated: $($q1 -join ',')" }
+          if ($r1.Count -lt 2 -or $r1[0] -notin 'kind', 'inactive' -or $r1 -notcontains 'shown') { $failures += "routine mail by preference (off, then on): $($r1 -join ',')" }
+          if ($nt.directRoutine -ne $false -or $nt.directDuplicate -ne $false -or $nt.directInactive -ne $false) { $failures += "direct notify results: routine $($nt.directRoutine), duplicate $($nt.directDuplicate), inactive $($nt.directInactive)" }
+          if ((& $decisions 'fixture-zz') -notcontains 'inactive') { $failures += 'a notification outside the synced set was not filtered' }
+          if ($nt.shownFocus -ne $true) { $failures += 'the main window did not get the focus back for the focus filter' }
+          elseif ($q2.Count -lt 2 -or $q2[0] -ne 'focused' -or $q2 -notcontains 'shown') { $failures += "focus filter (notifyWhileFocused off, then on): $($q2 -join ',')" }
+          if ($nt.invalidKind -notlike '*Unknown notification kind*' -or $nt.unknownField -notlike '*Unknown notification field*') { $failures += "notification validation: $($nt.invalidKind) / $($nt.unknownField)" }
+          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q1' }).Count) { $failures += "syncNotifications did not withdraw the resolved toast: $($slog | ConvertTo-Json -Compress)" }
+          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q2' }).Count) { $failures += 'the last toast was not withdrawn when nothing was pending' }
+          if ($nt.syncInvalid -notlike '*Invalid notification identity*') { $failures += "syncNotifications validation: $($nt.syncInvalid)" }
+          if ($nt.attentionMismatch -notlike '*Invalid attention identities*') { $failures += "setPendingAttention validation: $($nt.attentionMismatch)" }
+          $starts = @($alog | Where-Object { $_.pulse -eq 'Start' })
+          if (-not $starts.Count -or $starts[0].started -ne $true -or $starts[0].focused -ne $false) { $failures += "the taskbar did not flash for a new arrival: $($alog | ConvertTo-Json -Compress)" }
+          if (@($alog | Where-Object { $_.pulse -eq 'Keep' -and $_.started }).Count) { $failures += 'an unchanged attention list restarted the flash' }
+          if (-not $alog.Count -or $alog[-1].pulse -ne 'Stop') { $failures += "the flash did not stop when nothing was pending: $($alog | ConvertTo-Json -Compress)" }
+          if ($click.clicked -ne $true -or $late.click.id -ne 'fixture-q2' -or $late.clickFocus -ne $true) { $failures += "notification click: shell $($click | ConvertTo-Json -Compress), page $($late.click | ConvertTo-Json -Compress), focus $($late.clickFocus)" }
+          if ($late.publishEmpty -ne 200) { $failures += "fixture notices (empty): $($late.publishEmpty)" }
+          "### Integraciones (#21)`n- harnesses: $($it.harnesses | ConvertTo-Json -Compress)`n- login: $($lg.start.phase) -> output '$(($lg.running.output -replace '\s+', ' ').Trim())' -> $($lg.cancel.phase)`n- notify: $($nlog | ConvertTo-Json -Compress)`n- sync: $($slog | ConvertTo-Json -Compress)`n- attention: $($alog | ConvertTo-Json -Compress)`n- click: $($click | ConvertTo-Json -Compress), page after click: $(($late.clickText -replace '\s+', ' ').Trim())" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           # El login cancelado tiene que haber matado el árbol del CLI falso (30 s de espera).
           $wait = 40 - ((Get-Date) - $reported).TotalSeconds
           if ($wait -gt 0) { Start-Sleep -Seconds ([int]$wait) }
