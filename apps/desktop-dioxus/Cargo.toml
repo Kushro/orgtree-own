@@ -1,0 +1,20 @@
+[package]
+name = "orgtree-dioxus"
+version = "0.0.1"
+description = "Orgtree desktop app on Dioxus (migration spike)"
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Standalone crate: keep it out of any parent workspace.
+[workspace]
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["desktop"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

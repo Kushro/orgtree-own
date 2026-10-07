@@ -28,4 +28,19 @@ Canvas del organigrama, docket, mail y demás vistas; tarea de arranque del sist
 
 ## Cómo compilar
 
-Lo completa el issue #8.
+El proyecto vive en `apps/desktop-dioxus` y no reemplaza a `apps/desktop` (Electron): conviven durante el spike.
+
+Requisitos en Windows: Rust estable (MSVC), WebView2 (viene con Windows 11) y la CLI de Dioxus en la misma versión que el crate (`0.7.10`).
+
+```powershell
+cargo binstall dioxus-cli@0.7.10   # o: cargo install dioxus-cli --version 0.7.10
+cd apps/desktop-dioxus
+dx serve --platform desktop        # ventana de desarrollo
+dx bundle --platform desktop --package-types nsis --release --out-dir dist
+```
+
+El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
+
+La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
+
+**Estilos:** por ahora la ventana base usa CSS en línea. La decisión entre reutilizar `apps/desktop/renderer/src/styles.css` o adoptar rust-ui con Tailwind se toma cuando se construya la primera vista real (#11), porque recién ahí se ve cuánto del CSS actual aplica.

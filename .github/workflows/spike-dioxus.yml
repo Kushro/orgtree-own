@@ -1,0 +1,71 @@
+name: Spike Dioxus
+
+on:
+  push:
+    branches: [spike/dioxus]
+    paths:
+      - apps/desktop-dioxus/**
+      - .github/workflows/spike-dioxus.yml
+  pull_request:
+    paths:
+      - apps/desktop-dioxus/**
+      - .github/workflows/spike-dioxus.yml
+  workflow_dispatch:
+
+concurrency:
+  group: spike-dioxus-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DIOXUS_CLI_VERSION: 0.7.10
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/desktop-dioxus
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop-dioxus
+
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: Install Dioxus CLI
+        run: cargo binstall dioxus-cli@${{ env.DIOXUS_CLI_VERSION }} --no-confirm --force
+
+      - name: Build installer
+        run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
+
+      - name: Smoke test (window starts and stays up)
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
+            Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-dioxus.exe not found" }
+          Write-Host "Running $($exe.FullName)"
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+          Start-Sleep -Seconds 15
+          $p.Refresh()
+          if ($p.HasExited) { throw "app exited early with code $($p.ExitCode)" }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "App stayed up for 15 s"
+
+      - name: Report sizes
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -Recurse -Filter *.exe |
+            ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orgtree-dioxus-installer
+          path: apps/desktop-dioxus/dist/*.exe
+          if-no-files-found: error

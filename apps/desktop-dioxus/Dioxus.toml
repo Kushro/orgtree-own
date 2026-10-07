@@ -1,0 +1,9 @@
+[application]
+name = "orgtree-dioxus"
+out_dir = "dist"
+
+[bundle]
+identifier = "com.kushro.orgtree.dioxus-spike"
+publisher = "Kushro"
+icon = ["icons/icon.ico"]
+short_description = "Orgtree desktop app on Dioxus (migration spike)"
