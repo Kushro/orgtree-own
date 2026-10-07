@@ -1,0 +1,38 @@
+[package]
+name = "orgtree-dioxus"
+version = "0.0.1"
+description = "Orgtree desktop app on Dioxus (migration spike)"
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Standalone crate: keep it out of any parent workspace. The engine
+# supervisor is a member so both share one lockfile and target dir.
+[workspace]
+members = ["engine-host", "engine-client"]
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["desktop"] }
+futures-channel = "0.3"
+futures-util = "0.3"
+orgtree-engine-host = { path = "engine-host" }
+orgtree-engine-client = { path = "engine-client" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# #30: los enlaces externos se validan con el parser de URL (solo http y https)
+url = "2"
+ammonia = "4"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+tokio = { version = "1", features = ["time", "sync", "macros"] }
+notify-rust = "4"
+
+# Notificaciones con clic (#28): el toast de WinRT directo, como el spike de Tauri.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

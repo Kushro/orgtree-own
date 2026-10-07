@@ -1,0 +1,1227 @@
+name: Spike Dioxus
+
+on:
+  push:
+    branches: [spike/dioxus]
+    paths:
+      - apps/desktop-dioxus/**
+      - apps/desktop/renderer/src/styles.css
+      - .github/workflows/spike-dioxus.yml
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Publicar el instalador como pre-release de GitHub (tag dioxus-preview-<run_number>)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: spike-dioxus-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DIOXUS_CLI_VERSION: 0.7.10
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: apps/desktop-dioxus
+    steps:
+      # El submódulo engine/mailhub va en el instalador (#24).
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop-dioxus
+            engine/native/pg-custodian -> ../../../artifacts/postgres-provision/cargo
+
+      # Python para el motor real en modo de desarrollo (pruebas y smoke test) y para
+      # aprovisionar el runtime embebido. Raíz de datos descartable, nunca datos reales.
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: '3.13'
+
+      - name: Install engine dependencies
+        run: python -m pip install -r ../../tools/runtime-requirements.in
+
+      - name: Engine supervisor and client tests (fake and real engine)
+        env:
+          FAKE_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TEST_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: cargo test -p orgtree-engine-host -p orgtree-engine-client -- --include-ignored --nocapture
+
+      # #27: Markdown y enlaces a archivos, revelado (rutas relativas o inexistentes) y hora local
+      - name: Desk unit tests
+        run: cargo test -p orgtree-dioxus --bin orgtree-dioxus
+
+      # #24: el runtime embebido y PostgreSQL 18, como el instalador de Electron.
+      # El ZIP de PostgreSQL (~380 MB) queda en caché por el pin.
+      - uses: actions/cache@v4
+        with:
+          path: .runtime-cache/*.zip
+          key: runtime-cache-${{ hashFiles('tools/postgres-runtime-pin.json', 'tools/provision-runtime.py') }}
+
+      - name: Provision the embedded Python runtime (engine/runtime)
+        working-directory: .
+        run: python tools/provision-runtime.py
+
+      - name: Provision PostgreSQL and pg-custodian (engine/postgresql, engine/pg-custodian.exe)
+        working-directory: .
+        run: python tools/provision-postgres.py
+
+      - name: Stage the installer resources
+        working-directory: .
+        run: python apps/desktop-dioxus/installer/stage_resources.py
+
+      # Las mismas verificaciones de disposición que tools/package-preflight.mjs,
+      # sobre lo que va al instalador.
+      - name: Verify the staged runtime and PostgreSQL layout
+        working-directory: .
+        run: >-
+          node --input-type=module -e "import { assertRuntimeLayout } from './tools/runtime-layout.mjs';
+          import { assertPostgresRuntime } from './tools/postgres-layout.mjs';
+          const engine = 'apps/desktop-dioxus/target/bundle-resources/engine';
+          assertRuntimeLayout(engine + '/runtime', { label: 'staged runtime' });
+          console.log('runtime ok', JSON.stringify(assertPostgresRuntime(engine, { sourceRoot: process.cwd() })))"
+
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: Install Dioxus CLI
+        run: cargo binstall dioxus-cli@${{ env.DIOXUS_CLI_VERSION }} --no-confirm --force
+
+      - name: Build installer
+        id: build
+        run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
+
+      - name: Smoke test (engine, home, org chart, inbox and attention, docket, settings and accounts, full desk, desk window and native integration in RSX)
+        shell: pwsh
+        env:
+          ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
+          # El motor real con una org sembrada (un agente con historial) y sin proveedores.
+          ORGTREE_DIOXUS_ENGINE_DIR: ${{ github.workspace }}/apps/desktop-dioxus/fixture-engine
+          ORGTREE_DIOXUS_DATA: ${{ runner.temp }}/orgtree-dioxus-smoke
+          ORGTREE_DIOXUS_PROBE: ${{ runner.temp }}/orgtree-dioxus-probe.json
+          # Desk en vivo (#12): frames node_stream simulados y una conversación larga.
+          # Desk completo (#27): el fixture siembra mail, avisos, pensamiento y archivos,
+          # y simula los estados del turno (POST /api/fixture/turn-state).
+          # Bandeja y atención (#28): POST /api/fixture/attention hace que el agente le
+          # escriba al usuario, le pregunte y levante la bandera en dos tickets.
+          # Docket (#29): POST /api/fixture/docket siembra tickets por el ledger real y
+          # hace que los agentes cambien un estado, levanten la bandera o pregunten.
+          # Cuentas, proveedores y ajustes (#30): un `codex` falso en el PATH de la app.
+          ORGTREE_FIXTURE_LIVE: '1'
+          ORGTREE_FIXTURE_MESSAGES: '1200'
+        run: |
+          $exe = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
+            Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-dioxus.exe not found" }
+          Write-Host "Running $($exe.FullName)"
+          # #30: un `codex` falso en el PATH de la app (el runner no trae harnesses). Repite
+          # sus argumentos, avisa si recibió el token o la variable de la prueba (el shell
+          # las quita) y tarda 30 s: si cancelar el login no mata el árbol, deja finished.txt.
+          $fake = Join-Path $env:RUNNER_TEMP 'fake-harness'
+          New-Item -ItemType Directory -Force $fake | Out-Null
+          Set-Content -Path (Join-Path $fake 'codex.cmd') -Encoding ascii -Value @(
+            '@echo off', 'echo fake-codex %*', 'if defined ORGTREE_V2_TOKEN echo token-leak',
+            'if defined ORGTREE_DIOXUS_PROBE echo probe-leak', 'ping -n 30 127.0.0.1 >nul', 'echo done> "%~dp0finished.txt"')
+          $env:PATH = "$fake;$env:PATH"
+          # #27: ningún enlace del desk abre el navegador (Dioxus manda cada <a> clicado a webbrowser::open)
+          $browsersBefore = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Win {
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+            [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, IntPtr e);
+          }
+          '@
+          $ci = @{}
+          # #14: arrastrar la ventana con el mouse real desde el header (zona -webkit-app-region: drag)
+          function Test-Drag {
+            $probe = Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw | ConvertFrom-Json
+            $nat = $probe.native
+            $hwnd = [IntPtr][long]$nat.shell.hwnd
+            # tao deja WS_CAPTION (snap, animaciones) y quita la barra de título. Queda el borde
+            # de redimensionado invisible de Windows (8 px por lado, dentro del rectángulo de la
+            # ventana en el tao de Dioxus); una barra de título real suma unos 30 px de alto.
+            $wr = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$wr)
+            $cr = New-Object Win+RECT; [void][Win]::GetClientRect($hwnd, [ref]$cr)
+            $ci.frame = "window $($wr.R - $wr.L)x$($wr.B - $wr.T), client $($cr.R)x$($cr.B)"
+            $ci.framed = (($wr.B - $wr.T) - $cr.B) -ge 20
+            $drag = $nat.page.drag
+            if (-not $drag) { return }
+            $before = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$before)
+            $pt = New-Object Win+POINT; $pt.X = [int]($drag.x * $drag.dpr); $pt.Y = [int]($drag.y * $drag.dpr)
+            [void][Win]::ClientToScreen($hwnd, [ref]$pt)
+            [void][Win]::SetCursorPos($pt.X, $pt.Y); Start-Sleep -Milliseconds 200
+            [Win]::mouse_event(0x2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 200
+            for ($i = 1; $i -le 10; $i++) { [void][Win]::SetCursorPos($pt.X + 12 * $i, $pt.Y + 6 * $i); Start-Sleep -Milliseconds 40 }
+            [Win]::mouse_event(0x4, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 500
+            $after = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$after)
+            $ci.dx = $after.L - $before.L; $ci.dy = $after.T - $before.T; $ci.at = "$($pt.X),$($pt.Y)"
+          }
+          $deadline = (Get-Date).AddSeconds(540)
+          $shots = @{}
+          while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
+            # la prueba deja un marcador y espera 3 s: capturas del inicio, del organigrama
+            # (contratación, menú de agente, agente detenido), del desk (scroll, contenido,
+            # en cola por el límite de turnos, detenido) y de las dos ventanas
+            # #28: la barra de tareas parpadeando (ventana minimizada), la cola tras el clic en
+            # la notificación, el panel de un ticket con bandera y la bandeja
+            # #29: el docket con el detalle de un ticket y con una bandera abierta desde la cola
+            # #30: los ajustes de la org, el filtro de tiers, los proveedores, el login, el
+            # runtime y el tema
+            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'taskbar', 'notification-click', 'attention', 'inbox', 'docket', 'docket-flag', 'org-settings', 'hire-filter', 'providers', 'login', 'runtime', 'theme', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
+              if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
+                try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
+              }
+            }
+            # #30: antes del enlace externo, contar los navegadores (ninguno abrió antes)
+            if (-not $ci.externalBefore -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).external-before")) {
+              $ci.externalBefore = $true
+              $ci.browsersBeforeExternal = @(Get-Process msedge, chrome, firefox -ErrorAction SilentlyContinue).Count
+              New-Item -ItemType File -Force "$($env:ORGTREE_DIOXUS_PROBE).external-before-done" | Out-Null
+            }
+            # #30: el enlace https del desk abrió el navegador del sistema en esa URL
+            if (-not $shots['external'] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).external")) {
+              $shots['external'] = $true
+              $until = (Get-Date).AddSeconds(15)
+              do {
+                Start-Sleep -Milliseconds 700
+                $browser = Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'msedge.exe', 'chrome.exe', 'firefox.exe' -and $_.CommandLine -like '*example.com/orgtree*' } | Select-Object -First 1
+              } while (-not $browser -and (Get-Date) -lt $until)
+              $ci.externalBrowser = [bool]$browser
+              $ci.externalBrowserName = if ($browser) { $browser.Name } else { $null }
+              try { Save-Screen 'external' } catch { Write-Host "screenshot: $_" }
+            }
+            # #27: revelar un archivo abre su carpeta con el archivo seleccionado (explorer /select,)
+            if (-not $shots['reveal'] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).reveal")) {
+              $shots['reveal'] = $true
+              Start-Sleep -Milliseconds 1500
+              try { Save-Screen 'reveal' } catch { Write-Host "screenshot: $_" }
+              try {
+                $explorer = @((New-Object -ComObject Shell.Application).Windows() | ForEach-Object { try { $_.Document.Folder.Self.Path } catch {} })
+                $ci.explorer = $explorer -join ' | '
+                $ci.revealedFolder = [bool]($explorer | Where-Object { $_ -and $_.TrimEnd('\') -like '*-fixture-files' })
+                # cerrar esas ventanas para que no tapen el resto de la prueba
+                (New-Object -ComObject Shell.Application).Windows() | Where-Object { try { $_.Document.Folder.Self.Path -like '*-fixture-files*' } catch { $false } } | ForEach-Object { $_.Quit() }
+              } catch { $ci.explorer = "error: $_" }
+            }
+            # #29: guardar un artefacto lo deja en Descargas y abre su carpeta con el archivo seleccionado
+            if (-not $shots['docket-artifact'] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).docket-artifact")) {
+              $shots['docket-artifact'] = $true
+              Start-Sleep -Milliseconds 1500
+              try { Save-Screen 'docket-artifact' } catch { Write-Host "screenshot: $_" }
+              try {
+                $explorer = @((New-Object -ComObject Shell.Application).Windows() | ForEach-Object { try { $_.Document.Folder.Self.Path } catch {} })
+                $ci.docketExplorer = $explorer -join ' | '
+                $ci.docketRevealed = [bool]($explorer | Where-Object { $_ -and $_ -like '*\Downloads\Orgtree\spike-fixture\*' })
+                (New-Object -ComObject Shell.Application).Windows() | Where-Object { try { $_.Document.Folder.Self.Path -like '*\Downloads\Orgtree*' } catch { $false } } | ForEach-Object { $_.Quit() }
+              } catch { $ci.docketExplorer = "error: $_" }
+            }
+            if (-not $ci.native -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).native")) {
+              $ci.native = $true
+              try { Test-Drag } catch { $ci.dragError = "$_" }
+              try { Save-Screen 'native' } catch { Write-Host "screenshot: $_" }
+              New-Item -ItemType File "$($env:ORGTREE_DIOXUS_PROBE).native-done" | Out-Null
+            }
+            # Sin ventanas visibles la app sigue en la bandeja; una segunda ejecución la vuelve a mostrar.
+            if (-not $ci.tray -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).tray")) {
+              $ci.tray = $true
+              $p.Refresh(); $ci.aliveInTray = -not $p.HasExited
+              $second = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -ArgumentList '--second' -PassThru
+              $ci.secondExited = $second.WaitForExit(20000)
+              if (-not $ci.secondExited) { $second.Kill() }
+              Start-Sleep -Milliseconds 800
+              try { Save-Screen 'second-instance' } catch { Write-Host "screenshot: $_" }
+            }
+            Start-Sleep -Milliseconds 300; $p.Refresh()
+          }
+          # Salir (como desde la bandeja) termina la app, y con ella el motor.
+          $exited = $p.HasExited
+          if (-not (Test-Path $env:ORGTREE_DIOXUS_PROBE)) { throw "the WebView2 probe did not report" }
+          $port = Join-Path $env:ORGTREE_DIOXUS_DATA 'engine-port.json'
+          if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
+          Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
+          $raw = Get-Content $env:ORGTREE_DIOXUS_PROBE -Raw
+          Write-Host "WebView2 probe: $raw"
+          "### WebView2 probe (Dioxus)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $probe = $raw | ConvertFrom-Json
+          $failures = @()
+          if ($probe.error) { $failures += "probe error: $($probe.error)" }
+          # #11: página de inicio en RSX con datos del cliente Rust
+          $hp = $probe.home
+          foreach ($check in 'card', 'orgListed', 'orgOpened', 'agentShown') {
+            if ($hp.$check -ne $true) { $failures += "home.$check was $($hp.$check)" }
+          }
+          if ($hp.version -ne '0.0.1') { $failures += "version badge: $($hp.version)" }
+          if ($hp.fontFamily -notlike '*Segoe UI*') { $failures += "renderer CSS not applied: $($hp.fontFamily)" }
+          if ($hp.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the webview: $($hp.bridge)" }
+          # #24: la raíz de datos en uso, a la vista en el inicio
+          if ($hp.dataRoot -ne $env:ORGTREE_DIOXUS_DATA) { $failures += "data root not shown on the home card: $($hp.dataRoot)" }
+          # #26: organigrama. Crear la org, contratar (el fixture declara un Claude stub),
+          # detener y reanudar, mover y deshacer, retirar y recontratar, y borrar la org.
+          $ch = $probe.chart
+          foreach ($check in 'created', 'emptyTree', 'hiredTop', 'hiredSub', 'nested', 'externalShown', 'externalTop',
+                             'halted', 'unhalted', 'interruptDisabledWhenIdle', 'moved', 'movedBack',
+                             'retiredHidden', 'retiredShown', 'rehired', 'listed', 'deleted') {
+            if ($ch.$check -ne $true) { $failures += "chart.$check was $($ch.$check)" }
+          }
+          if ($ch.orgName -ne 'Prueba Dioxus') { $failures += "org name in the orgbar: $($ch.orgName)" }
+          if ($ch.bar -notlike '3 live*H3') { $failures += "orgbar agents chip: $($ch.bar)" }
+          if ($ch.credits -ne "circulation 7 $([char]0xB7) seats 3 $([char]0xB7) free 4") { $failures += "orgbar credits: $($ch.credits)" }
+          if ($ch.model -notlike 'claude-haiku*') { $failures += "model badge: $($ch.model)" }
+          $ellipsis = [char]0x2026
+          foreach ($entry in 'Open desk', "Hire a subordinate$ellipsis", "Move to$ellipsis", 'Interrupt (disabled)', 'Halt', "Retire$ellipsis") {
+            if ($ch.menu -notcontains $entry) { $failures += "agent menu lacks '$entry': $($ch.menu -join ', ')" }
+          }
+          if ($ch.retireConfirm -notlike '*rehire brings it back*') { $failures += "retire confirm: $($ch.retireConfirm)" }
+          if ($ch.missing) { $failures += "menu entries not found: $($ch.missing -join ', ')" }
+          # sin sondeo: con la org quieta, cada relectura del árbol viene de un frame del WebSocket
+          if (-not ($ch.idle.loads -le $ch.idle.frames)) { $failures += "the tree was re-read without a WebSocket frame: $($ch.idle | ConvertTo-Json -Compress)" }
+          if (-not ($ch.loads -le $ch.frames + 1)) { $failures += "tree reads ($($ch.loads)) exceed WebSocket frames ($($ch.frames)) plus the first read" }
+          "### Org chart (#26, Dioxus)`n- menu: $($ch.menu -join ' / ')`n- orgbar: $($ch.bar) / $($ch.credits)`n- tree reads $($ch.loads), WebSocket frames $($ch.frames), idle: $($ch.idle | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #28: bandeja, preguntas, cola de atención y notificaciones nativas
+          $at = $probe.attention
+          if (-not $at) { $failures += 'the attention stage did not run' }
+          else {
+            $nlog = @($at.notifications)
+            $decided = { param($kind, $decision) @($nlog | Where-Object { $_.type -eq 'notify' -and $_.kind -eq $kind -and $_.decision -eq $decision }).Count }
+            # preferencias por tipo: sin foco se muestran la pregunta, el urgente y las dos banderas; la rutina no
+            if ($at.minimized.minimized -ne $true) { $failures += "the main window did not minimize: $($at.minimized | ConvertTo-Json -Compress)" }
+            if (-not $at.shownMinimized) { $failures += "notifications while minimized: $(($nlog | Where-Object { $_.type -eq 'notify' } | ForEach-Object { "$($_.kind)=$($_.decision)" }) -join ', ')" }
+            if ((& $decided 'routine' 'kind') -lt 1) { $failures += 'routine mail was not filtered by its preference' }
+            if ($at.routineShown -ne $true -or $at.routineRetracted -ne $true) { $failures += "All mail on/off: shown $($at.routineShown), retracted $($at.routineRetracted)" }
+            # con la ventana al frente, un urgente nuevo espera hasta prender notifyWhileFocused
+            if ($at.restored.focused -ne $true -or $at.focusedHeld -ne $true -or $at.focusedShown -ne $true) { $failures += "focus filter: restored $($at.restored | ConvertTo-Json -Compress), held $($at.focusedHeld), shown $($at.focusedShown)" }
+            # deduplicación: cada notificación se muestra una sola vez
+            $twice = @($nlog | Where-Object { $_.type -eq 'notify' -and $_.decision -eq 'shown' } | Group-Object id | Where-Object { $_.Count -gt 1 })
+            if ($twice.Count) { $failures += "notifications shown more than once: $(($twice | ForEach-Object Name) -join ', ')" }
+            if ((& $decided 'urgent-mail' 'duplicate') + (& $decided 'question' 'duplicate') -lt 1) { $failures += 'no repeated pass was deduplicated' }
+            # parpadeo: empieza con una llegada nueva sin foco y para cuando no queda nada
+            $flash = @($nlog | Where-Object { $_.type -eq 'attention' })
+            if (-not @($flash | Where-Object { $_.pulse -eq 'Start' -and $_.started -eq $true -and $_.focused -eq $false }).Count) { $failures += "the taskbar did not flash for a new arrival: $($flash | ConvertTo-Json -Compress)" }
+            if ($at.flashStopped -ne $true) { $failures += 'the taskbar flash did not stop when nothing was pending' }
+            # el clic abre la pregunta en la cola de atención
+            if ($at.click.clicked -ne $true -or $at.clickOpened -notlike 'question:*') { $failures += "notification click: $($at.click | ConvertTo-Json -Compress), opened $($at.clickOpened)" }
+            if ($at.counts.unread -ne 3 -or $at.counts.asks -ne 1 -or $at.counts.attention -ne 5) { $failures += "inbox and attention counts: $($at.counts | ConvertTo-Json -Compress)" }
+            if (@($at.rowKinds | Where-Object { $_ -eq 'ticket' }).Count -ne 2 -or @($at.rowKinds | Where-Object { $_ -eq 'mail' }).Count -ne 2 -or @($at.rowKinds | Where-Object { $_ -eq 'question' }).Count -ne 1) { $failures += "attention rows: $($at.rows -join ', ')" }
+            # preguntas: responder y descartar
+            if (@($at.askOptions).Count -ne 2 -or $at.askText -notlike '*pre-release de Dioxus*') { $failures += "question card: $($at.askText) / $($at.askOptions -join ', ')" }
+            if ($at.answerToast -notlike '*resolved worker*' -or $at.questionGone -ne $true -or $at.questionRetracted -ne $true) { $failures += "answer: $($at.answerToast), gone $($at.questionGone), retracted $($at.questionRetracted)" }
+            if ($at.dismissQuestionToast -notlike '*dismissed worker*' -or $at.question2Gone -ne $true) { $failures += "dismiss question: $($at.dismissQuestionToast), gone $($at.question2Gone)" }
+            # mail urgente: leerlo lo marca leído y sigue a la vista mientras está elegido; responder
+            if ($at.urgentReason -notlike '*CI est*rojo*' -or $at.urgentRead -ne 'retained' -or $at.replyToast -ne 'sent to worker') { $failures += "urgent mail: $($at.urgentReason) / $($at.urgentRead) / $($at.replyToast)" }
+            # bandera: responder la baja sin cambiar el estado; descartar pasa el ticket a blocked
+            if ($at.flagReason -notlike '*certificado de prueba*' -or $at.ticketReplyGone -ne $true -or $at.ticketReplied.status -ne 'in_progress' -or $at.ticketReplied.flagged -ne $false) { $failures += "ticket reply: $($at.flagReason) / $($at.ticketReplied | ConvertTo-Json -Compress)" }
+            if ($at.dismissGoneAtOnce -ne $true -or $at.dismissToast -notlike '*status: blocked' -or $at.ticketDismissed.status -ne 'blocked' -or $at.ticketDismissed.flagged -ne $false) { $failures += "ticket dismiss: $($at.dismissToast) / $($at.ticketDismissed | ConvertTo-Json -Compress)" }
+            # bandeja: leer y archivar al salir, responder y Mark all read
+            if ($at.routineOpened -notlike '*README*' -or $at.routineArchived -ne $true -or $at.inboxReplyToast -ne 'sent to worker' -or $at.urgent2Read -ne $true -or $at.allRead -ne $true -or $at.inboxClosed -ne $true) { $failures += "inbox: opened $($at.routineOpened), archived $($at.routineArchived), reply $($at.inboxReplyToast), read $($at.urgent2Read), all read $($at.allRead)" }
+            if ($at.empty -notlike 'Pending questions*') { $failures += "attention queue not empty at the end: $($at.rowsAfter -join ', ')" }
+          }
+          "### Inbox, questions and attention (#28, Dioxus)`n- notifications: $(($nlog | Where-Object { $_.type -eq 'notify' -and $_.decision -ne 'focused' } | ForEach-Object { "$($_.kind)=$($_.decision)" }) -join ', ')`n- taskbar: $(($flash | ForEach-Object { "$($_.pulse)$(if ($_.started) { ' (flash)' })" }) -join ', ')`n- click: $($at.click | ConvertTo-Json -Compress) -> $($at.clickOpened)`n- rows: $($at.rows -join ', ')`n- tickets: replied $($at.ticketReplied | ConvertTo-Json -Compress), dismissed $($at.ticketDismissed | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #29: docket. Lista, casillas, filtros y totales sin archivados; detalle;
+          # comentar, bajar la bandera, responder la pregunta adjunta y asignar; y los
+          # cambios de los agentes (estado, bandera, pregunta) en vivo por el WebSocket.
+          $dk = $probe.docket
+          if (-not $dk) { $failures += 'the docket stage did not run' }
+          else {
+            $t = $dk.seed.tickets
+            if (-not $t.runtime) { $failures += "docket seed: $($dk.seed | ConvertTo-Json -Compress)" }
+            foreach ($check in 'opened', 'archivedHidden', 'backlogHidden', 'archivedShown', 'archivedHiddenAgain', 'backlogShown', 'refStays',
+                               'blockedLive', 'droppedLeft', 'droppedArchived', 'flagLive', 'bellGlow', 'attentionPaneFull', 'openedFromAttention',
+                               'glowGone', 'questionWaiting', 'questionGone', 'closed') {
+              if ($dk.$check -ne $true) { $failures += "docket.$check was $($dk.$check)" }
+            }
+            # totales sin archivados: lo activo es lo que se lista sin casillas, y mostrar el archivo no lo cambia
+            if ($dk.totals.active -ne @($dk.rows).Count -or $dk.totals.shown -ne @($dk.rows).Count -or $dk.totalsWithArchived.active -ne $dk.totals.active -or $dk.totalsWithArchived.shown -ne $dk.totals.shown -or -not ($dk.totals.archived -ge 1)) { $failures += "docket totals: $($dk.totals | ConvertTo-Json -Compress) / with archived $($dk.totalsWithArchived | ConvertTo-Json -Compress) / rows $(@($dk.rows).Count)" }
+            if ($dk.bell.active -ne $dk.totals.active -or $dk.bell.count -ne "$($dk.totals.active)") { $failures += "docket button: $($dk.bell | ConvertTo-Json -Compress)" }
+            # filtros por estado y por dueño, el arreglo por estado y el sub-ítem bajo su padre
+            if (@($dk.blockedRows | Where-Object { $_ -notlike '*:blocked' }).Count -or $dk.blockedRows -notcontains "$($t.certificado):blocked") { $failures += "status filter: $($dk.blockedRows -join ', ')" }
+            if (($dk.jefeRows -join ',') -ne $t.docs -or ($dk.unassignedRows -join ',') -ne $t.memoria) { $failures += "owner filter: jefe $($dk.jefeRows -join ', '), unassigned $($dk.unassignedRows -join ', ')" }
+            if ($dk.statusGroups -notcontains 'Blocked' -or $dk.statusGroups -notcontains 'In progress' -or $dk.statusGroups[-1] -ne "Backlogged $([char]0x2014) not yet approached") { $failures += "group by status: $($dk.statusGroups -join ', ')" }
+            if ($dk.subItemDepth -ne 1) { $failures += "sub-item depth: $($dk.subItemDepth)" }
+            # detalle: Markdown, decisiones, evidencias y artefactos con sus topes, holders e historial
+            $d = $dk.detail
+            if ($d.title -ne 'Empaquetar el runtime' -or $d.descBold -ne $true -or $d.descRef -ne $t.runtime) { $failures += "docket detail head: $($d.title) / bold $($d.descBold) / ref $($d.descRef)" }
+            if (@($d.decisions).Count -ne 2 -or $d.decisions[0] -notlike '*runtime embebido*' -or $d.decisionsSummary -ne "2 $([char]0xB7) append-only") { $failures += "decisions: $($d.decisions -join ' | ') / $($d.decisionsSummary)" }
+            if (@($d.evidence).Count -ne 2 -or $d.evidenceSummary -ne '2 of 50' -or $d.evidence[0] -notlike 'commit*6e53697*') { $failures += "evidence: $($d.evidence -join ' | ') / $($d.evidenceSummary)" }
+            if (($d.artifacts -join ',') -ne 'medicion.txt' -or $d.artifactSummary -ne '1 of 40') { $failures += "artifacts: $($d.artifacts -join ', ') / $($d.artifactSummary)" }
+            if (($d.holders -join ',') -ne 'jefe') { $failures += "earlier holders: $($d.holders -join ', ')" }
+            if ($d.historyFolded -ne $true -or $d.history -notcontains 'assign' -or $d.history -notcontains 'decision' -or $d.history -notcontains 'evidence' -or $d.historyAssign -notlike '*from: jefe*to: worker*') { $failures += "history: $($d.history -join ', ') / $($d.historyAssign)" }
+            # un artefacto se guarda en Descargas y se revela; nunca se abre
+            if ($dk.artifactToast -notlike 'Shown in folder:*medicion.txt' -or $dk.artifactFile.text -notlike 'runtime 62.8 MB*' -or $ci.docketRevealed -ne $true) { $failures += "artifact: $($dk.artifactToast) / $($dk.artifactFile | ConvertTo-Json -Compress) / explorer $($ci.docketExplorer)" }
+            # comentar
+            if ($dk.replyLabel -notlike 'Reply to jefe*' -or $dk.commentToast -ne 'sent to jefe') { $failures += "comment: $($dk.replyLabel) / $($dk.commentToast)" }
+            # cambios de los agentes en vivo: blocked con su motivo y dropped que archiva
+            if ($dk.blockedReason -notlike '*7-Zip*' -or -not ($dk.liveFrames -ge 1)) { $failures += "live blocked: $($dk.blockedReason), frames $($dk.liveFrames)" }
+            if ($dk.droppedWhy -notlike '*docs/spikes*') { $failures += "dropped reason: $($dk.droppedWhy)" }
+            # bandera: levantada por el agente, abierta desde la cola de atención y bajada por el usuario
+            if ($dk.flagReason -notlike '*62,8 MB*' -or $dk.dismissToast -notlike '*status: blocked' -or $dk.dismissBlocked -notlike '*attention flag dismissed by the user*') { $failures += "flag: $($dk.flagReason) / $($dk.dismissToast) / $($dk.dismissBlocked)" }
+            # pregunta adjunta, respondida desde el panel
+            if ($dk.questionText -notlike '*Cierro este ticket*' -or $dk.answerToast -notlike "*resolved worker*") { $failures += "attached question: $($dk.questionText) / $($dk.answerToast)" }
+            # asignar con Staff… (sin dueño: se contrata en el primer nivel)
+            $mem = $dk.engine.items.($t.memoria)
+            if ($dk.staffDisclosure -notlike 'Assignee unavailable*' -or $dk.staffToast -notlike 'Staffed*' -or -not $dk.staffedOwner -or $mem.owner -ne $dk.staffedOwner -or $mem.status -ne 'open') { $failures += "staff: $($dk.staffDisclosure) / $($dk.staffToast) / $($dk.staffedOwner) / engine $($mem | ConvertTo-Json -Compress)" }
+            # lo que dice el motor al final
+            $st = $dk.engine.items
+            if ($st.($t.runtime).status -ne 'blocked' -or $st.($t.runtime).flagged -ne $false -or $st.($t.lzma).blocked_reason -ne 'El runner no tiene 7-Zip.' -or $st.($t.docs).status -ne 'dropped' -or $st.($t.docs).archived -ne $true) { $failures += "engine state: $($st | ConvertTo-Json -Compress)" }
+          }
+          "### Docket (#29, Dioxus)`n- rows: $($dk.rows -join ', ')`n- totals: $($dk.totals.text) (with archived: $($dk.totalsWithArchived.text))`n- filters: blocked $($dk.blockedRows -join ', ') / jefe $($dk.jefeRows -join ', ') / unassigned $($dk.unassignedRows -join ', ')`n- detail: $($dk.detail | ConvertTo-Json -Compress)`n- actions: $($dk.commentToast) / $($dk.dismissToast) / $($dk.answerToast) / $($dk.staffToast)`n- explorer: $($ci.docketExplorer)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #30: ajustes de la org y de la app, filtro de tiers, proveedores, cuentas y login
+          $su = $probe.setup
+          if (-not $su) { $failures += 'the settings stage (#30) did not run' }
+          else {
+            foreach ($check in 'orgOpened', 'appOpened', 'loginStarting', 'loginCancelled', 'removed', 'appClosed', 'backInOrg', 'headlessUnchanged') {
+              if ($su.$check -ne $true) { $failures += "setup.$check was $($su.$check)" }
+            }
+            # ajustes de la org: lo guardado está en el motor y el panel lo relee
+            $os = $su.orgAfter.settings
+            if ($su.orgShown.compact -ne '80' -or $os.compact_at -ne 70 -or $os.default_top_grant -ne 7 -or $os.default_effort -ne 'medium' -or $os.cascade_hire -ne $false -or $su.orgAfter.orgmd -notlike '# Charter de prueba*') { $failures += "org settings in the engine: $($su.orgAfter | ConvertTo-Json -Compress)" }
+            # headless se guarda en el acto; el motor lo rechaza con las políticas de Fable en 'halt'
+            if ($su.headlessToast -notlike "error:*headless refuses while*") { $failures += "headless: $($su.headlessToast)" }
+            $rr = $su.orgReread
+            if ($rr.compact -ne '70' -or $rr.grant -ne '7' -or $rr.effort -ne 'medium' -or $rr.cascadeHire -ne $false -or $rr.orgmd -notlike '# Charter de prueba*') { $failures += "org settings reread: $($rr | ConvertTo-Json -Compress)" }
+            # contratar: el fixture solo tiene Claude instalado; los tiers de Codex y Antigravity no aparecen
+            $pe = $su.providersEngine
+            if ($pe.claude.offer -ne 'Offer' -or $pe.openai.offer -ne 'Hide' -or $pe.google.offer -ne 'Hide') { $failures += "providers in the engine: $($pe | ConvertTo-Json -Compress)" }
+            $foreign = @($su.orgTiers | Where-Object { $_ -in 'luna', 'sol', 'astra', 'flash', 'pro' })
+            if ((@($su.hireProviders) -join ',') -ne 'claude' -or $su.hireTiers -notcontains 'haiku' -or -not $foreign.Count -or @($su.hireTiers | Where-Object { $_ -in $foreign }).Count) { $failures += "hire filter: offered $($su.hireTiers -join ', ') of $($su.orgTiers -join ', ')" }
+            # proveedores: el codex falso del PATH, detectado por el shell
+            $hc = @($su.harnesses | Where-Object { $_.id -eq 'codex' })[0]
+            $gc = @($su.groups | Where-Object { $_.provider -eq 'openai' })[0]
+            if (-not $hc.detected -or $gc.harness -ne 'true' -or @($su.groups).Count -lt 3) { $failures += "providers panel: $($su.groups | ConvertTo-Json -Compress) / harnesses $($su.harnesses | ConvertTo-Json -Compress)" }
+            # cuentas: una administrada de Codex, su login con el CLI falso, refrescar y quitar
+            if (-not $su.accountId -or -not @($su.accountsAfterAdd | Where-Object { $_.id -eq $su.accountId -and $_.provider -eq 'openai' -and $_.kind -eq 'managed' }).Count) { $failures += "managed account: $($su.accountsAfterAdd | ConvertTo-Json -Compress)" }
+            if ($su.loginIdle.phase -ne 'idle' -or $su.loginRunning.output -notlike '*fake-codex login*') { $failures += "the codex CLI did not run with its fixed arguments: $($su.loginRunning | ConvertTo-Json -Compress)" }
+            if ($su.loginRunning.output -like '*token-leak*' -or $su.loginRunning.output -like '*probe-leak*') { $failures += "the login child inherited scrubbed variables: $($su.loginRunning.output)" }
+            $lc = $su.loginChecks
+            if ($lc.badProvider -notlike '*Unknown login provider*') { $failures += "login with a made-up provider: $($lc.badProvider)" }
+            if (-not $lc.missingId) { $failures += 'no undetected harness to test the login refusal' }
+            elseif ($lc.missing.phase -ne 'error' -or $lc.missing.error -ne 'not-installed' -or $lc.missing.started -ne $false) { $failures += "login of an undetected $($lc.missingId): $($lc.missing | ConvertTo-Json -Compress)" }
+            if ($lc.again.started -ne $false -or $lc.code -notlike '*does not use a pasted code*' -or $lc.harnessLinkBad -ne $true) { $failures += "login checks: $($lc | ConvertTo-Json -Compress)" }
+            if ($su.loginAfter.phase -ne 'idle') { $failures += "login after cancel: $($su.loginAfter | ConvertTo-Json -Compress)" }
+            if ($su.refreshNote -notlike '*: unauthenticated' -or @($su.accountsAfterRemove | Where-Object { $_.id -eq $su.accountId }).Count) { $failures += "account refresh/remove: $($su.refreshNote) / $($su.accountsAfterRemove | ConvertTo-Json -Compress)" }
+            # ajustes de la app: el límite de turnos y los tiempos de turno, guardados y releídos
+            $ra = $su.runtimeAfter
+            if ($ra.max_concurrent_turns -ne 8 -or $ra.working_checkups_enabled -ne $false -or $ra.wait_for_mcp_tools_enabled -ne $true) { $failures += "runtime settings in the engine: $($ra | ConvertTo-Json -Compress)" }
+            if ($su.runtimeReread.limit -ne '8' -or $su.runtimeReread.checkups -ne $false -or $su.runtimeReread.mcp -ne $true -or $su.runtimeReread.notifications -lt 9) { $failures += "runtime settings reread: $($su.runtimeReread | ConvertTo-Json -Compress)" }
+            if ($su.runtimeRestored.max_concurrent_turns -ne $su.runtimeBefore.max_concurrent_turns) { $failures += "turn limit not restored: $($su.runtimeRestored | ConvertTo-Json -Compress)" }
+            # tema: guardado en las preferencias y aplicado en el acto
+            if ($su.themeApplied -ne '#22c4bd' -or $su.themePrefs.visualTheme -ne 'codex' -or $su.themePrefs.visualThemeExplicit -ne $true -or $su.themeBack -ne '#d97757') { $failures += "theme: applied $($su.themeApplied), back $($su.themeBack), prefs $($su.themePrefs | ConvertTo-Json -Compress)" }
+          }
+          # cancelar el login mató el árbol: el CLI falso no llegó a terminar
+          if (Test-Path (Join-Path $fake 'finished.txt')) { $failures += 'the cancelled login left the fake CLI running (finished.txt)' }
+          "### Settings, providers and accounts (#30, Dioxus)`n- org settings: $($su.orgAfter.settings | ConvertTo-Json -Compress)`n- hire tiers: $($su.hireTiers -join ', ') (org: $($su.orgTiers -join ', '))`n- providers: $($su.groups | ConvertTo-Json -Compress)`n- login: $($su.loginRunning.phase) -> '$(($su.loginRunning.output -replace '\s+', ' ').Trim())' -> $($su.loginAfter.phase); refused $($lc.missingId): $($lc.missing.error)`n- runtime: $($su.runtimeAfter | ConvertTo-Json -Compress)`n- theme: $($su.themeApplied)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #12: desk en RSX
+          $desk = $probe.desk
+          foreach ($check in 'opened', 'toolShown', 'markdownBold', 'markdownList', 'injectionBlocked') {
+            if ($desk.$check -ne $true) { $failures += "desk.$check was $($desk.$check)" }
+          }
+          if (-not ($desk.live.later -gt $desk.live.first)) { $failures += "no live node_stream updates in the desk: $($desk.live | ConvertTo-Json -Compress)" }
+          if ($desk.oldestLoaded -ne 1 -or $desk.domRows -lt 1000) { $failures += "long conversation not fully loaded: oldest $($desk.oldestLoaded), rows $($desk.domRows)" }
+          if (-not $desk.scroll -or $desk.scroll.frames -lt 30) { $failures += "scroll was not measured: $($desk.scroll | ConvertTo-Json -Compress)" }
+          "### Desk scroll (WebView2, Dioxus, $($desk.domRows) rows)`n$($desk.scroll | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #27: desk completo
+          $full = $probe.deskFull
+          if (-not $full) { $failures += 'the full desk stage did not run' }
+          else {
+            foreach ($check in 'segmentText', 'mailBold', 'thinkingOpens', 'notNavigated', 'stopShown', 'stillWorking', 'slotBannerGone',
+                               'queuedMarkGone', 'crossCancelled', 'directSwitch', 'directBack', 'halted', 'unhalted', 'haltedBannerGone') {
+              if ($full.$check -ne $true) { $failures += "deskFull.$check was $($full.$check)" }
+            }
+            # contenido: mail con respuesta citada y adjunto, avisos, pensamiento y enlaces a archivos
+            if (($full.mailFrom -join ',') -ne 'User,jefe') { $failures += "mail senders: $($full.mailFrom -join ', ')" }
+            if ($full.replyQuote -ne 'Respuesta 2: la tarea 0 avanza.') { $failures += "quoted reply: $($full.replyQuote)" }
+            if ($full.attachment -notlike '*informe.txt*') { $failures += "attachment: $($full.attachment)" }
+            if ($full.notice -notlike 'Aviso: el l*mite de turnos sub*a 16.') { $failures += "notice segment: $($full.notice)" }
+            if ($full.thinking -notlike '*thought for 5s*') { $failures += "thinking line: $($full.thinking)" }
+            if ($full.mailTime -match 'T\d\d:\d\d' -or -not $full.mailTime) { $failures += "mail time is not local: $($full.mailTime)" }
+            if (@($full.localLinks | Where-Object { $_ -like '*:\*' }).Count -ne 2) { $failures += "local file links: $($full.localLinks -join ', ')" }
+            if (-not ($full.pendingAtOpen -ge 1)) { $failures += "no pending mail rows: $($full.pendingAtOpen)" }
+            # revelar: rutas relativas o inexistentes se muestran como texto, nunca se abren
+            if ($full.revealRelative -ne 'Not an absolute path: uploads/informe.txt') { $failures += "relative path reveal: $($full.revealRelative)" }
+            if ($full.revealMissing -notlike 'No such file:*falta.log') { $failures += "missing file reveal: $($full.revealMissing)" }
+            # estado del turno: en cola por el límite (con la explicación), trabajando con STOP, detenido con reanudar
+            if ($full.idle -ne 'Idle' -or $full.queued -ne 'Queued' -or $full.working -ne 'Active' -or $full.idleAgain -ne 'Idle') { $failures += "turn states: idle $($full.idle), queued $($full.queued), working $($full.working), idle again $($full.idleAgain)" }
+            if ($full.slotBanner -notlike '*concurrency limit (16)*') { $failures += "turn-slot banner: $($full.slotBanner)" }
+            if ($full.stopResult -notlike 'error:*no provider call*') { $failures += "STOP result: $($full.stopResult)" }
+            if ($full.haltedBanner -notlike '*mail is stored unread until this agent is explicitly unhalted*') { $failures += "halted banner: $($full.haltedBanner)" }
+            # enviar: el mensaje queda aceptado en el buzón, también a mitad de turno y detenido
+            if ($full.sendMidTurn.pending -ne $true -or $full.sendMidTurn.cleared -ne $true -or $full.sendMidTurn.mode -ne 'queued (1 ahead)') { $failures += "send mid-turn: $($full.sendMidTurn | ConvertTo-Json -Compress)" }
+            if ($full.sendHalted.pending -ne $true -or $full.sendHalted.mode -notlike 'halted * mail stays unread until unhalt') { $failures += "send while halted: $($full.sendHalted | ConvertTo-Json -Compress)" }
+            # modelo: en cola a mitad de turno, cancelar, y confirmación entre proveedores
+            if ($full.queueTitle -ne "queue worker's switch to sonnet?" -or $full.queuedToast -notlike 'QUEUED, not switched*' -or $full.queuedMark -ne "$([char]0x2192)S") { $failures += "queued switch: $($full.queueTitle) / $($full.queuedToast) / $($full.queuedMark)" }
+            if ($full.cancelToast -notlike 'CANCELLED the queued switch*') { $failures += "cancel queued switch: $($full.cancelToast)" }
+            if ($full.crossTitle -ne 'move worker from Claude to Codex?' -or $full.crossBody -notlike '*knowledge bearer worker@0*') { $failures += "cross-provider confirm: $($full.crossTitle)" }
+            # esfuerzo
+            if (($full.effortLevels -join ',') -ne 'low,medium,high,xhigh,max' -or $full.effortAfter -ne 'low' -or $full.effortToast -notlike '*applies from its next turn') { $failures += "effort: $($full.effortLevels -join ',') / $($full.effortAfter) / $($full.effortToast)" }
+          }
+          # #30: un enlace relativo, de otro esquema o con usuario se muestra como texto, con el motivo
+          $refusedLinks = @($full.linksShown | Where-Object { $_ -like "Link: * $([char]0x2014) *" })
+          if ($refusedLinks.Count -lt 3 -or -not ($full.linksShown -match 'ssh://') -or -not ($full.linksShown -match 'usuario')) { $failures += "links in the desk: $($full.linksShown -join ', ')" }
+          # ningún navegador se abrió antes de la etapa del enlace externo
+          if ($ci.externalBefore -ne $true -or $ci.browsersBeforeExternal -gt $browsersBefore) { $failures += "a browser was opened before the external link stage ($browsersBefore -> $($ci.browsersBeforeExternal) processes)" }
+          # #30: el enlace https se abrió por la vía controlada en Rust, y los raros no
+          $ex = $probe.external
+          if ($ex.toast -ne 'Opened in the browser: https://example.com/orgtree' -or $ex.notNavigated -ne $true) { $failures += "external link: $($ex | ConvertTo-Json -Compress)" }
+          $opened = @($ex.log | Where-Object { $_.opened }); $refused = @($ex.log | Where-Object { $_.refused })
+          if ($opened.Count -ne 1 -or $opened[0].opened -ne 'https://example.com/orgtree' -or $refused.Count -lt 3) { $failures += "external link log: $($ex.log | ConvertTo-Json -Compress)" }
+          if ($ci.externalBrowser -ne $true) { $failures += 'no browser process opened https://example.com/orgtree' }
+          "### External links (#30, Dioxus)`n- opened: $($opened.opened -join ', ') in $($ci.externalBrowserName)`n- refused: $(($refused | ForEach-Object { $_.refused }) -join ' / ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $rv = $probe.reveal
+          if ($rv.toast -notlike 'Shown in folder:*informe.txt' -or $rv.notNavigated -ne $true) { $failures += "reveal of an existing file: $($rv | ConvertTo-Json -Compress)" }
+          Write-Host "Explorer windows after the reveal: $($ci.explorer)"
+          "### Full desk (#27, Dioxus)`n- send: $($full.sendMidTurn | ConvertTo-Json -Compress) / halted: $($full.sendHalted | ConvertTo-Json -Compress)`n- turn: $($full.idle) / $($full.queued) / $($full.working) / halted $($full.halted)`n- reveal: $($full.revealRelative) / $($full.revealMissing) / $($rv.toast)`n- explorer windows: $($ci.explorer) (folder shown: $($ci.revealedFolder))" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #13: desk en otra ventana nativa, borrador compartido y cierre de la principal
+          $mw = $probe.multiwindow
+          if ($mw.composer -ne $true) { $failures += 'no composer in the desk' }
+          if ($mw.mirroredFromPopout -ne $true) { $failures += "the main window did not get the popout's draft: $($mw.mainDraft)" }
+          $pop = $probe.popout
+          if ($pop.opened -ne $true) { $failures += "the desk window did not open: $($pop | ConvertTo-Json -Compress)" }
+          if (-not ($pop.messages -gt 0)) { $failures += 'the desk window shows no messages' }
+          if ($pop.mirroredFromMain -ne $true) { $failures += "the desk window did not get the main window's draft" }
+          if ($pop.fontFamily -notlike '*Segoe UI*') { $failures += "renderer CSS not applied in the desk window: $($pop.fontFamily)" }
+          if ($pop.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the desk window: $($pop.bridge)" }
+          $oc = $probe.owner_close
+          if ($oc.main_visible -ne $false) { $failures += "main window still visible after close: $($oc.main_visible)" }
+          if ($oc.popouts -ne 1) { $failures += "desk windows after closing the main one: $($oc.popouts)" }
+          $after = $probe.popout_after_owner_close
+          if ($after.alive -ne $true -or $after.draft -ne 'escrito en el popout') { $failures += "the desk window did not survive the main close: $($after | ConvertTo-Json -Compress)" }
+          # #14: ventana sin marco, botones, notificación, bandeja, arrastre e instancia única
+          $nat = $probe.native
+          if ($nat.shell.decorated -ne $false) { $failures += "main window is decorated: $($nat.shell.decorated)" }
+          Write-Host "Frame: $($ci.frame)"
+          if ($ci.framed -ne $false) { $failures += "main window has a native frame: $($ci.frame)" }
+          if ($nat.page.controls -lt 3) { $failures += "window controls in RSX: $($nat.page.controls)" }
+          foreach ($check in 'maximized', 'restored') {
+            if ($nat.page.$check -ne $true) { $failures += "native.$check was $($nat.page.$check)" }
+          }
+          if ($nat.shell.notify -ne $true) { $failures += 'the native notification failed' }
+          if ($nat.shell.tray -ne $true) { $failures += 'no tray icon' }
+          $moved = "dx $($ci.dx), dy $($ci.dy) (at $($ci.at), region $($nat.page.drag.region)) $($ci.dragError)"
+          Write-Host "Drag: $moved"
+          if (-not ($ci.dx -ge 60 -and $ci.dy -ge 30)) { $failures += "dragging the header did not move the window: $moved" }
+          $to = $probe.tray_only
+          if ($to.main_visible -ne $false -or $to.popouts -ne 0 -or $ci.aliveInTray -ne $true) { $failures += "with every window closed the app should stay in the tray: $($to | ConvertTo-Json -Compress), alive $($ci.aliveInTray)" }
+          if ($ci.secondExited -ne $true) { $failures += 'the second instance did not exit' }
+          $si = $probe.second_instance
+          if (-not $si -or $si.main_visible -ne $true) { $failures += "the second instance did not bring back the main window: $($si | ConvertTo-Json -Compress)" }
+          "### Native window (#14, Dioxus)`n- drag: $moved`n- second instance: $($si | ConvertTo-Json -Compress)`n- scale: $($nat.shell.scale)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          if (-not $exited) { $failures += 'the app did not exit after Quit'; Stop-Process -Id $p.Id -Force }
+          else {
+            Write-Host "App exited by itself with code $($p.ExitCode)"
+            $enginePort = (Get-Content $port -Raw | ConvertFrom-Json).port
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
+          }
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host "Home window, org chart, inbox and attention, docket, settings and accounts, full desk, desk window and native integration in RSX verified in WebView2"
+
+      # #25: una ventana principal por org, con el motor de fixture. La prueba
+      # (ORGTREE_DIOXUS_PROBE_MODE=windows, src/wprobe.rs) maneja la app compilada en
+      # dos arranques sobre la misma raíz y la misma carpeta de la app: la ventana de
+      # inicio se liga a una org, "New window" abre otra que se liga a otra org, pedir
+      # una tercera desde una ventana con org abre otra ventana, una org abierta se
+      # enfoca sin abrir otra, cerrar una de varias la cierra, y las preferencias
+      # (startAtLogin escribe el valor de Run de HKCU). Entre los arranques, el CI
+      # agrega a la sesión una org que ya no existe en un monitor que ya no está.
+      - name: Windows per organization (Homepage, two more orgs, refocus, close, preferences, restore, error window)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_DIOXUS_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-dioxus\fixture-engine
+          ORGTREE_DIOXUS_DATA: ${{ runner.temp }}\orgtree-dioxus-windows
+          ORGTREE_DIOXUS_PROFILE: ${{ runner.temp }}\orgtree-dioxus-windows-profile
+          ORGTREE_DIOXUS_PROBE: ${{ runner.temp }}\orgtree-dioxus-windows.json
+          ORGTREE_DIOXUS_PROBE_MODE: windows
+        run: |
+          $exe = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
+            Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-dioxus.exe not found" }
+          $out = $env:ORGTREE_DIOXUS_PROBE
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $runName = 'com.kushro.orgtree.dioxus-spike'
+          Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          Write-Host "Primary screen: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds) work area $([System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea)"
+          $failures = @()
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          # Arranca la app y atiende sus marcadores (<salida>.<nombre>) hasta que sale sola.
+          function Run-App($run) {
+            $env:ORGTREE_DIOXUS_WINDOWS_RUN = "$run"
+            Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.run*.json' } | Remove-Item -Force
+            $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+            $deadline = (Get-Date).AddSeconds(480)
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+              foreach ($name in 'three-orgs', 'refocus', 'placed', 'restored', 'error-window') {
+                if (Test-Path "$out.$name") { Start-Sleep -Milliseconds 400; try { Save-Screen "windows-$name" } catch { Write-Host "screenshot: $_" }; Remove-Item "$out.$name" -Force }
+              }
+              Start-Sleep -Milliseconds 300; $p.Refresh()
+            }
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $script:failures += "run ${run}: the app did not finish and quit within 480 s" }
+            else { Write-Host "Run $run exited with $($p.ExitCode)" }
+            # El motor del fixture muere con la app (guardián); se espera que suelte la raíz.
+            Start-Sleep -Seconds 3
+            if (-not (Test-Path $out)) { $script:failures += "run ${run}: no report"; return $null }
+            $raw = Get-Content $out -Raw
+            Copy-Item $out "$out.run$run.json" -Force
+            "### Windows per organization (Dioxus), run $run`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            return ($raw | ConvertFrom-Json)
+          }
+          # ---------------------------------------------------------------- primer arranque
+          $r1 = Run-App 1
+          if ($r1) {
+            if ($r1.error) { $failures += "run 1 error: $($r1.error)" }
+            $h = $r1.home
+            & $check ($h.page.listed -eq $true -and $h.page.homepage -eq $true -and $h.identity.homepage -eq $true -and $h.identity.notificationOwner -eq $true -and $h.windows -eq 1) "home: $($h | ConvertTo-Json -Compress -Depth 5)"
+            & $check ($r1.created.segunda.Ok -eq 'segunda' -and $r1.created.tercera.Ok -eq 'tercera') "creating segunda and tercera: $($r1.created | ConvertTo-Json -Compress)"
+            $bh = $r1.bindHome
+            & $check ($bh.page.agentShown -eq $true -and $bh.identity.org -eq 'spike-fixture' -and $bh.identity.window -eq 1 -and $bh.windows -eq 1) "the Homepage did not bind itself to spike-fixture: $($bh | ConvertTo-Json -Compress -Depth 5)"
+            $nw = $r1.newWindow
+            & $check ($nw.clicked -eq $true -and $nw.window -and $nw.window -ne 1 -and $nw.second.picked.homepage -eq $true -and $nw.second.identity.org -eq 'segunda' -and $nw.second.page.title -like '*segunda*' -and $nw.second.identity.notificationOwner -eq $false) "New window, then segunda in it: $($nw | ConvertTo-Json -Compress -Depth 6)"
+            $rt = $r1.requestTercera
+            & $check ($rt.action -eq 'opened' -and $rt.page.title -like '*tercera*' -and $rt.windows -eq 3 -and $rt.identity.notificationOwner -eq $false) "requestOrg(tercera) from an org window: $($rt | ConvertTo-Json -Compress -Depth 5)"
+            $rf = $r1.refocus
+            $last = @($rf.requests)[-1]
+            & $check ($rf.picked.alreadyOpen -eq $true -and $rf.windowsAfter -eq $rf.windowsBefore -and $rf.stillHomepage -eq $true -and $last.action -eq 'focused' -and $last.window -eq 1) "reopening spike-fixture did not focus its window: $($rf | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($rf.mainFocused -eq $true) "the spike-fixture window was not focused: $($rf.mainFocused)"
+            $co = $r1.closeOne
+            & $check ($co.clicked -eq $true -and $co.closed -eq $true -and $co.windows -eq 3 -and (@($co.session) -join ',') -eq 'org:spike-fixture,org:segunda,org:tercera') "closing one of several windows: $($co | ConvertTo-Json -Compress)"
+            $pf = $r1.prefs
+            & $check ($pf.saved.startAtLogin -eq $true -and $pf.saved.exitOnClose -eq $false -and $pf.afterBadType -eq $true) "preferences: $($pf | ConvertTo-Json -Compress)"
+            & $check ($pf.autostart -like "*$($exe.Name)*--background") "Run value reported by the app: $($pf.autostart)"
+            & $check (@($r1.final.windows).Count -eq 3) "windows before the restart: $($r1.final | ConvertTo-Json -Compress -Depth 5)"
+            $exit = @($r1.logs.exit)[-1]
+            & $check ($exit.path -eq 'quit' -and $exit.trigger -eq 'tray' -and $exit.outcome -eq 'stopped') "run 1 exit: $($exit | ConvertTo-Json -Compress)"
+            & $check ($r1.done -eq $true) 'run 1 did not finish its steps'
+          }
+          # Lo que quedó en disco al salir: preferencias, sesión y el registro de inicio.
+          $profileDir = $env:ORGTREE_DIOXUS_PROFILE
+          $prefsFile = Join-Path $profileDir 'preferences.json'
+          $placementFile = Join-Path $profileDir 'window-placement.json'
+          $prefs = if (Test-Path $prefsFile) { Get-Content $prefsFile -Raw | ConvertFrom-Json } else { $null }
+          & $check ($prefs -and $prefs.startAtLogin -eq $true -and $prefs.exitOnClose -eq $false) "preferences.json after run 1: $($prefs | ConvertTo-Json -Compress)"
+          $runValue = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+          Write-Host "HKCU Run after run 1: $runValue"
+          & $check ($runValue -like "*$($exe.Name)*--background") "HKCU Run value after enabling startAtLogin: $runValue"
+          $layout = if (Test-Path $placementFile) { Get-Content $placementFile -Raw | ConvertFrom-Json } else { $null }
+          Write-Host "window-placement.json after run 1: $($layout | ConvertTo-Json -Compress -Depth 6)"
+          & $check ($layout -and (@($layout.session) -join ',') -eq 'org:spike-fixture,org:segunda,org:tercera') "saved session: $(@($layout.session) -join ',')"
+          # Una ventana guardada de una org que ya no existe, en un monitor que ya no está.
+          if ($layout) {
+            $layout.geometry = @($layout.geometry) + [pscustomobject]@{ key = 'org:ya-no-existe'; placement = [pscustomobject]@{ bounds = [pscustomobject]@{ x = 40000; y = 30000; width = 800; height = 600 }; maximized = $false } }
+            $layout.session = @($layout.session) + 'org:ya-no-existe'
+            $layout | ConvertTo-Json -Depth 8 | Set-Content -Path $placementFile -Encoding utf8
+          }
+          # ---------------------------------------------------------------- segundo arranque
+          $r2 = Run-App 2
+          if ($r2) {
+            if ($r2.error) { $failures += "run 2 error: $($r2.error)" }
+            $rs = $r2.restored
+            $wins = @($rs.windows)
+            & $check ($rs.all -eq $true -and $wins.Count -eq 4) "restored windows: $($wins.Count) ($($rs | ConvertTo-Json -Compress -Depth 6))"
+            $byOrg = @{}; foreach ($w in $wins) { $byOrg[$w.org] = $w }
+            $before = @{}; foreach ($w in @($r1.final.windows)) { $before[$w.org] = $w }
+            foreach ($org in 'spike-fixture', 'segunda', 'tercera') {
+              $a = $before[$org]; $b = $byOrg[$org]
+              if (-not $a -or -not $b) { $failures += "no window for $org before ($([bool]$a)) or after ($([bool]$b)) the restart"; continue }
+              $same = [math]::Abs($a.x - $b.x) -le 2 -and [math]::Abs($a.y - $b.y) -le 2 -and [math]::Abs($a.width - $b.width) -le 2 -and [math]::Abs($a.height - $b.height) -le 2
+              & $check $same "$org was not restored in place: before $($a.x),$($a.y) $($a.width)x$($a.height), after $($b.x),$($b.y) $($b.width)x$($b.height)"
+              & $check ($b.visible -eq $true) "$org restored hidden"
+            }
+            & $check ($byOrg['spike-fixture'].window -eq 1) "the first window of the session did not reopen in the main window: $($byOrg['spike-fixture'] | ConvertTo-Json -Compress)"
+            "- restored: $(($wins | ForEach-Object { "$($_.org) at $($_.x),$($_.y) $($_.width)x$($_.height)" }) -join '; ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            $lost = $byOrg['ya-no-existe']
+            $areas = @($rs.areas)
+            $inside = $lost -and @($areas | Where-Object { $lost.x -ge $_.x -and $lost.y -ge $_.y -and ($lost.x + $lost.width) -le ($_.x + $_.width) -and ($lost.y + $lost.height) -le ($_.y + $_.height) }).Count -ge 1
+            & $check $inside "the window saved off-screen was not brought back: $($lost | ConvertTo-Json -Compress) in $($areas | ConvertTo-Json -Compress)"
+            $pages = $rs.pages
+            $errorPage = if ($lost) { $pages."$($lost.window)" } else { $null }
+            & $check ($errorPage -and $errorPage.error -and $errorPage.agentShown -ne $true) "the window of a deleted org is not an error window: $($errorPage | ConvertTo-Json -Compress)"
+            Write-Host "Error window shows: $($errorPage.error)"
+            $fixturePage = $pages."$($byOrg['spike-fixture'].window)"
+            & $check ($fixturePage.agentShown -eq $true) "restored spike-fixture window: $($fixturePage | ConvertTo-Json -Compress)"
+            & $check ($pages."$($byOrg['segunda'].window)".title -like '*segunda*') "restored segunda window: $($pages."$($byOrg['segunda'].window)" | ConvertTo-Json -Compress)"
+            & $check ($r2.prefs.before.startAtLogin -eq $true -and $r2.prefs.after.startAtLogin -eq $false -and $null -eq $r2.prefs.autostart) "preferences after the restart and startAtLogin off: $($r2.prefs | ConvertTo-Json -Compress)"
+            & $check ($r2.done -eq $true) 'run 2 did not finish its steps'
+          }
+          $runValue = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+          & $check (-not $runValue) "HKCU Run value left after disabling startAtLogin: $runValue"
+          Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Windows per organization verified: Homepage, one window per org, refocus, close, preferences, restore in place and error window'
+
+      # #25: el ciclo de vida del motor sobre el motor de fixture
+      # (ORGTREE_DIOXUS_PROBE_MODE=lifecycle, src/lprobe.rs), en tres arranques sobre
+      # la misma raíz: (1) otro motor tiene la raíz (rechazo con Reintentar), la
+      # conversión simulada con un plazo de silencio corto, una caída con su aviso y la
+      # vuelta, mantenimiento restart y update, y Salir de la bandeja; (2) cerrar la
+      # última ventana con exitOnClose; (3) el fin de la sesión de Windows. En los tres,
+      # ningún proceso de la app queda vivo y el candado de la raíz queda libre.
+      - name: Engine lifecycle (refusal and retry, conversion, crash notice and recovery, maintenance, orderly exits)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_DIOXUS_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-dioxus\fixture-engine
+          ORGTREE_DIOXUS_PROBE_MODE: lifecycle
+        run: |
+          $exe = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
+            Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-dioxus.exe not found" }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          # Como Windows (y el Restart Manager de un instalador): WM_QUERYENDSESSION y después
+          # WM_ENDSESSION(TRUE) a TODAS las ventanas de nivel superior del proceso. tao atiende
+          # WM_ENDSESSION en su ventana oculta de eventos, no en las ventanas de la app.
+          Add-Type @'
+          using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+          public static class Session {
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+            public static string End(int pid) {
+              var wins = new List<IntPtr>();
+              EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid) wins.Add(h); return true; }, IntPtr.Zero);
+              var logoff = new IntPtr(0x80000000L); IntPtr r; int agreed = 0;
+              foreach (var h in wins) { SendMessageTimeout(h, 0x11, IntPtr.Zero, logoff, 2, 5000, out r); if (r != IntPtr.Zero) agreed++; }
+              foreach (var h in wins) { SendMessageTimeout(h, 0x16, new IntPtr(1), logoff, 2, 60000, out r); }
+              return wins.Count + " windows, " + agreed + " agreed to end the session";
+            }
+          }
+          '@
+          # Los procesos descendientes de la app (motor, guardián, hub, WebView2).
+          function Get-Tree($rootPid) {
+            $all = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'msedge.exe' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
+            $tree = @(); $queue = @($rootPid)
+            while ($queue.Count) {
+              $next = @()
+              # Un PID reusado deja procesos viejos (p. ej. vctip.exe del build) con un
+              # ParentProcessId que hoy es de la app: un hijo nace después que su padre.
+              foreach ($id in $queue) { $born = @($all | Where-Object { $_.ProcessId -eq $id })[0].CreationDate; $kids = @($all | Where-Object { $_.ParentProcessId -eq $id -and $_.ProcessId -ne $id -and (-not $born -or $_.CreationDate -ge $born) }); $tree += $kids; $next += @($kids | ForEach-Object { $_.ProcessId }) }
+              $queue = $next
+            }
+            return ,$tree
+          }
+          function Wait-Gone($tree, $seconds) {
+            $deadline = (Get-Date).AddSeconds($seconds)
+            do {
+              $alive = @($tree | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+              if (-not $alive.Count) { return ,@() }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+            return ,$alive
+          }
+          function Lock-Free($root) {
+            $lock = Join-Path $root '.desktop-engine.lock'
+            if (-not (Test-Path $lock)) { return $true }
+            try { $fs = [IO.File]::Open($lock, 'Open', 'Write', 'ReadWrite'); $fs.WriteByte(48); $fs.Flush(); $fs.Close(); return $true } catch { return $false }
+          }
+          $failures = @()
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          $root = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-lifecycle'
+          $out = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-lifecycle.json'
+          $exitReport = "$out.exit.jsonl"
+          $panicLog = Join-Path $root 'diagnostics\desktop-panic.log'
+          $codes = @()
+          Remove-Item $exitReport -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $root | Out-Null
+          # Corre la app en una modalidad, atiende los marcadores (capturas y acciones) y
+          # devuelve el reporte; verifica que no queden procesos del árbol anotado.
+          function Run-Lifecycle($run, $markers, $onMarker) {
+            Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.exit.jsonl' -and $_.Name -notlike '*.run-*.json' } | Remove-Item -Force
+            $env:ORGTREE_DIOXUS_DATA = $root
+            $env:ORGTREE_DIOXUS_PROFILE = Join-Path $env:RUNNER_TEMP "orgtree-dioxus-lifecycle-profile-$run"
+            $env:ORGTREE_DIOXUS_PROBE = $out
+            $env:ORGTREE_DIOXUS_LIFECYCLE_RUN = $run
+            $env:ORGTREE_DIOXUS_EXIT_REPORT = $exitReport
+            Remove-Item $panicLog -ErrorAction SilentlyContinue
+            $started = Get-Date
+            $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $exe.DirectoryName -PassThru
+            # Tomar el handle ya: sin él, ExitCode puede quedar vacío al salir.
+            $null = $p.Handle
+            $script:tree = @()
+            $deadline = $started.AddSeconds(720)
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+              foreach ($name in $markers) {
+                if (Test-Path "$out.$name") {
+                  if ($name -ne 'converting') { Start-Sleep -Milliseconds 400 }
+                  try { Save-Screen "lifecycle-$name" } catch { Write-Host "screenshot: $_" }
+                  & $onMarker $name $p
+                  Remove-Item "$out.$name" -Force -ErrorAction SilentlyContinue
+                }
+              }
+              Start-Sleep -Milliseconds 300; $p.Refresh()
+            }
+            $seconds = [int]((Get-Date) - $started).TotalSeconds
+            if (-not $p.HasExited) {
+              $script:failures += "run ${run}: the app did not quit within 720 s"
+              taskkill /PID $p.Id /T /F 2>&1 | Out-Null
+            }
+            Write-Host "Run $run exited with $($p.ExitCode) after $seconds s"
+            # Las tres salidas son ordenadas y terminan en 0, también el fin de sesión: la
+            # app sale sola tras WM_ENDSESSION (en una sesión real Windows la terminaría
+            # igual, pero la simulación no). Un código >= 0xC0000000 es una excepción
+            # NTSTATUS: 0xC0000409 es un panic con panic = "abort" (fail-fast).
+            $code = $p.ExitCode
+            if ($null -eq $code) { $script:failures += "run ${run}: no exit code" }
+            elseif ($code -ne 0) {
+              $u = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$code), 0)
+              $kind = if ($u -ge 3221225472) { 'an NTSTATUS exception (crash or fail-fast)' } else { 'not 0' }
+              $script:failures += "run ${run}: the app exited with $code ($('0x{0:X8}' -f $u)), $kind"
+            }
+            $script:codes += "${run}: $code"
+            if (Test-Path $panicLog) {
+              Write-Host "===== run ${run}: desktop-panic.log"; Get-Content $panicLog | Write-Host
+              $script:failures += "run ${run}: the app panicked: $((Get-Content $panicLog -Raw).Trim())"
+            }
+            $report = if (Test-Path $out) { Get-Content $out -Raw } else { $null }
+            if ($report) {
+              Copy-Item $out "$out.run-$run.json" -Force
+              "### Engine lifecycle (Dioxus), run $run ($seconds s)`n``````json`n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+              $report = $report | ConvertFrom-Json
+            } else { $script:failures += "run ${run}: no report" }
+            # Ningún proceso del árbol de la app sigue vivo, y el guardián soltó la raíz.
+            $alive = Wait-Gone $script:tree 30
+            & $check ($script:tree.Count -ge 2) "run ${run}: the process tree was not recorded ($($script:tree.Count) processes)"
+            & $check (-not $alive.Count) "run ${run}: orphans after the exit: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')"
+            & $check (Lock-Free $root) "run ${run}: the data root lock is still held after the exit"
+            "- run ${run}: $($script:tree.Count) processes under the app before the exit ($(($script:tree | ForEach-Object { $_.Name }) -join ', ')); left alive: $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append | Write-Host
+            return $report
+          }
+          $exits = { if (Test-Path $exitReport) { @(Get-Content $exitReport | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
+
+          # ---------------------------------------------------------------- 1. full
+          # Otro motor (el mismo fixture) toma la raíz antes que la app.
+          $extOut = Join-Path $env:RUNNER_TEMP 'lifecycle-external.out'
+          $env:ORGTREE_DATA = $root
+          $env:ORGTREE_V2_TOKEN = [guid]::NewGuid().ToString('N')
+          $ext = Start-Process -FilePath $env:ORGTREE_DIOXUS_PYTHON -ArgumentList "`"$env:ORGTREE_DIOXUS_ENGINE_DIR\launch.py`"" -WorkingDirectory $env:ORGTREE_DIOXUS_ENGINE_DIR `
+            -RedirectStandardOutput $extOut -RedirectStandardError "$extOut.err" -PassThru -WindowStyle Hidden
+          # La app nunca hereda ORGTREE_DATA (sería una raíz prohibida) ni el token.
+          Remove-Item Env:ORGTREE_DATA, Env:ORGTREE_V2_TOKEN
+          $deadline = (Get-Date).AddSeconds(150)
+          while (-not ((Test-Path $extOut) -and (Select-String -Path $extOut -Pattern '"type":"ready"' -Quiet)) -and (Get-Date) -lt $deadline -and -not $ext.HasExited) { Start-Sleep -Milliseconds 500; $ext.Refresh() }
+          if (-not (Select-String -Path $extOut -Pattern '"type":"ready"' -Quiet)) { Get-Content "$extOut.err" -Tail 40; throw "the external engine did not become ready" }
+          Write-Host "External engine $($ext.Id) owns $root"
+          $env:ORGTREE_FIXTURE_CONVERT = '4'
+          $env:ORGTREE_FIXTURE_CONVERT_GAP = '2.5'
+          $env:ORGTREE_DIOXUS_CONVERSION_SILENCE_S = '6'
+          $onFull = {
+            param($name, $p)
+            if ($name -eq 'refused') {
+              # Se libera la raíz: el motor externo termina y su guardián suelta el candado.
+              taskkill /PID $ext.Id /T /F 2>&1 | Out-Null
+              $until = (Get-Date).AddSeconds(30)
+              while (-not (Lock-Free $root) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+              New-Item -ItemType File -Force "$out.refused-done" | Out-Null
+            }
+            if ($name -eq 'maintenance') {
+              $script:tree = Get-Tree $p.Id
+              New-Item -ItemType File -Force "$out.maintenance-done" | Out-Null
+            }
+          }
+          $full = Run-Lifecycle 'full' @('refused', 'converting', 'ready', 'engine-down', 'recovered', 'maintenance') $onFull
+          Remove-Item Env:ORGTREE_FIXTURE_CONVERT, Env:ORGTREE_FIXTURE_CONVERT_GAP, Env:ORGTREE_DIOXUS_CONVERSION_SILENCE_S
+          if ($full) {
+            if ($full.error) { $failures += "run full error: $($full.error)" }
+            $rf = $full.refused
+            & $check ($rf.failed -eq $true -and $rf.splash.title -eq 'Otra instancia está usando estos datos' -and $rf.splash.retry -eq $true -and $rf.status.state -eq 'unavailable' -and $rf.status.message -like '*otro motor*') "refusal: $($rf | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.retry.clicked -eq $true -and @($full.logs.retry).Count -ge 1) "the Retry button did not reach the shell: $($full.retry | ConvertTo-Json -Compress), retry log $(@($full.logs.retry).Count)"
+            $phases = @($full.logs.phases)
+            $conv = @($phases | Where-Object { $_.conversion -eq $true })
+            $after = @($phases | Where-Object { -not $_.conversion -and $conv.Count -and $_.ms -gt $conv[-1].ms }) | Select-Object -First 1
+            $gaps = @(); for ($i = 1; $i -lt $conv.Count; $i++) { $gaps += $conv[$i].ms - $conv[$i - 1].ms }
+            if ($after) { $gaps += $after.ms - $conv[-1].ms }
+            $span = if ($after) { $after.ms - $conv[0].ms } else { 0 }
+            $maxGap = ($gaps | Measure-Object -Maximum).Maximum
+            & $check ($conv.Count -ge 4 -and $conv[0].phase -like 'database-convert*') "conversion phases: $($phases | ConvertTo-Json -Compress)"
+            & $check ($span -gt 6000 -and $maxGap -lt 6000) "the conversion window must measure silence: span $span ms, largest gap $maxGap ms"
+            & $check ($full.converting.seen.state -eq 'converting' -and $full.converting.seen.phase -like 'copiando la org*') "the splash did not show the conversion: $($full.converting | ConvertTo-Json -Compress)"
+            "- conversion: $($conv.Count) phases over $span ms, largest gap $maxGap ms (window 6000 ms)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append | Write-Host
+            $rd = $full.ready
+            & $check ($rd.status.state -eq 'ready' -and $null -eq $rd.maintenance -and $rd.page.listed -eq $true -and $rd.page.splash -ne $true) "ready: $($rd | ConvertTo-Json -Compress -Depth 5)"
+            $dn = $full.down
+            $stoppedEvents = @($full.logs.status | Where-Object { $_.state -eq 'stopped' })
+            & $check ($dn.killed -eq $true -and $dn.stopped -eq $true -and $dn.page.notice -like '*se detuvo*' -and $stoppedEvents.Count -ge 1) "engine down: $($dn | ConvertTo-Json -Compress -Depth 6)"
+            $rc = $full.recovered
+            & $check ($rc.back -eq $true -and $rc.page.listed -eq $true -and $rc.status.state -eq 'ready' -and $null -eq $rc.page.notice -and $rc.generation -ge 2) "recovery: $($rc | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($rc.pid -and $rc.pid -ne $rd.pid) "the engine was not replaced: $($rd.pid) -> $($rc.pid)"
+            $mr = $full.maintenanceRestart
+            & $check ($mr.request.status -eq 200 -and $mr.restarted -eq $true -and $mr.pidAfter -ne $mr.pidBefore) "maintenance restart: $($mr | ConvertTo-Json -Compress -Depth 6)"
+            $mu = $full.maintenanceUpdate
+            & $check ($mu.request.status -eq 200 -and $mu.reported -eq $true -and $mu.state -eq 'unavailable' -and $mu.page.maintenance) "maintenance update: $($mu | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.done -eq $true) 'run full did not finish its steps'
+          }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'quit' -and $last.trigger -eq 'tray' -and $last.outcome -eq 'stopped' -and $last.ms -lt 26000) "exit through the tray: $($last | ConvertTo-Json -Compress)"
+
+          # ---------------------------------------------------------------- 2. close
+          $prefsDir = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-lifecycle-profile-close'
+          New-Item -ItemType Directory -Force $prefsDir | Out-Null
+          '{"exitOnClose": true}' | Set-Content -Path (Join-Path $prefsDir 'preferences.json') -Encoding utf8NoBOM
+          $onClose = {
+            param($name, $p)
+            $script:tree = Get-Tree $p.Id
+            New-Item -ItemType File -Force "$out.close-ready-done" | Out-Null
+          }
+          $close = Run-Lifecycle 'close' @('close-ready') $onClose
+          if ($close) { & $check ($close.ready.status.state -eq 'ready' -and $close.ready.exitOnClose -eq $true -and $close.closeClicked -eq $true) "close run: $($close.ready | ConvertTo-Json -Compress -Depth 5), clicked $($close.closeClicked)" }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'quit' -and $last.trigger -eq 'last-window' -and $last.outcome -eq 'stopped') "exit by closing the last window: $($last | ConvertTo-Json -Compress)"
+
+          # ---------------------------------------------------------------- 3. session
+          $onSession = {
+            param($name, $p)
+            $script:tree = Get-Tree $p.Id
+            Write-Host "Session end: $([Session]::End($p.Id))"
+          }
+          $session = Run-Lifecycle 'session' @('session-ready') $onSession
+          if ($session) { & $check ($session.ready.status.state -eq 'ready' -and $session.ready.hwnd) "session run: $($session.ready | ConvertTo-Json -Compress -Depth 5)" }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'session-end' -and $last.outcome -eq 'stopped') "exit at the end of the Windows session: $($last | ConvertTo-Json -Compress)"
+          "- exits: $((& $exits | ForEach-Object { "$($_.path)/$($_.trigger): $($_.outcome) in $($_.ms) ms" }) -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- exit codes: $($codes -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Engine lifecycle verified: refusal and retry, conversion phases, crash notice and recovery, maintenance, and three orderly exits without orphans'
+          # El runner sale con el último $LASTEXITCODE: un taskkill /T anterior (el motor
+          # externo, cuyo árbol ya puede haber muerto en parte) no decide el resultado.
+          exit 0
+
+      # #24: el instalador generado, instalado en silencio en una carpeta descartable
+      # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y
+      # PostgreSQL empaquetados, sobre una raíz de datos nueva y descartable.
+      #
+      # La app corre como un usuario local estándar creado para la prueba, como
+      # una persona real. La cuenta del runner (runneradmin) es el Administrador
+      # integrado de Windows (RID 500), cuyo SID Windows escribe como el alias
+      # "LA" en SDDL: la verificación de ACL de pg-custodian (prototype-guard,
+      # parse_sddl) no reconoce el alias y rechaza la carpeta de secretos del
+      # clúster (acl.not_owner_only). Además corre elevada, y PostgreSQL no corre
+      # con un token de administrador. Con un usuario estándar no pasa ninguna de
+      # las dos cosas y el producto no cambia.
+      - name: Install the NSIS installer and start the installed app (packaged engine on PostgreSQL)
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist -Recurse -Filter *-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw "no NSIS installer in dist" }
+          $target = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-installed'
+          # /D= va último y sin comillas (NSIS).
+          $setup = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$target" -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "the installer exited with $($setup.ExitCode)" }
+          $exe = Join-Path $target 'orgtree-dioxus.exe'
+          $resources = Join-Path $target 'resources'
+          foreach ($file in $exe, "$resources\engine\launch.py", "$resources\engine\runtime\python.exe", "$resources\engine\pg-custodian.exe",
+                   "$resources\engine\postgresql\bin\postgres.exe", "$resources\engine\mailhub\mailhub\serve.py", "$resources\tools\pypg\pgimport.py",
+                   "$resources\tools\pypg\cutover_verify.py", "$resources\build-info.json") {
+            if (-not (Test-Path $file -PathType Leaf)) { throw "not installed: $file" }
+          }
+          if (Test-Path "$resources\ui") { throw "the React renderer should not be in the installer" }
+          $installedMb = (Get-ChildItem $target -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+          Write-Host ("Installed to {0}: {1:N1} MB" -f $target, $installedMb)
+          # La disposición instalada, con las verificaciones del preflight de Electron.
+          Push-Location $env:GITHUB_WORKSPACE
+          $engineDir = ("$resources\engine" -replace '\\', '/')
+          node --input-type=module -e "import { assertRuntimeLayout, runtimeTreeDigest } from './tools/runtime-layout.mjs'; import { assertPostgresRuntime } from './tools/postgres-layout.mjs'; assertRuntimeLayout('$engineDir/runtime', { label: 'installed runtime' }); const installed = runtimeTreeDigest('$engineDir/runtime'), staged = runtimeTreeDigest('apps/desktop-dioxus/target/bundle-resources/engine/runtime'); if (installed.sha256 !== staged.sha256) throw new Error('installed runtime differs from the staged one'); console.log('installed runtime ok', JSON.stringify(installed), JSON.stringify(assertPostgresRuntime('$engineDir')))"
+          if ($LASTEXITCODE -ne 0) { throw "installed layout check failed" }
+          Pop-Location
+
+          # Un usuario local estándar (no administrador) con su propio perfil.
+          $user = 'orgtreespike'
+          # 14 caracteres como máximo: con más, net user pide confirmación.
+          $password = 'Ot1!' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+          net user $user $password /add | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "could not create the local user $user" }
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          # Como una instalación por usuario: la carpeta es del usuario que la usa.
+          icacls $target /grant "${user}:(OI)(CI)M" /Q | Out-Null
+          $run = Join-Path $env:RUNNER_TEMP 'orgtree-dioxus-installed-run'
+          New-Item -ItemType Directory -Force $run | Out-Null
+          icacls $run /grant "${user}:(OI)(CI)F" /Q | Out-Null
+          $data = Join-Path $run 'data'
+          $probeFile = Join-Path $run 'probe.json'
+          function Start-AsUser([string]$file, [string]$arguments, [hashtable]$vars, [string]$cwd) {
+            $psi = [System.Diagnostics.ProcessStartInfo]::new($file, $arguments)
+            $psi.UseShellExecute = $false; $psi.LoadUserProfile = $true; $psi.WorkingDirectory = $cwd
+            $psi.UserName = $user; $psi.Domain = $env:COMPUTERNAME; $psi.Password = $secure
+            # Sin el modo de desarrollo: la app tiene que encontrar sus recursos sola.
+            foreach ($name in 'ORGTREE_DIOXUS_PYTHON', 'ORGTREE_DIOXUS_ENGINE_DIR', 'ORGTREE_DATA', 'ORGTREE_PG_BOOTSTRAP', 'ORGTREE_CODEX', 'ORGTREE_ANTIGRAVITY') { [void]$psi.Environment.Remove($name) }
+            foreach ($name in $vars.Keys) { $psi.Environment[$name] = $vars[$name] }
+            [System.Diagnostics.Process]::Start($psi)
+          }
+          # Crear el perfil y leer dónde quedó.
+          $first = Start-AsUser 'cmd.exe' '/d /c exit 0' @{} $run
+          $first.WaitForExit()
+          $sid = ([System.Security.Principal.NTAccount]::new($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+          $userDir = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid").ProfileImagePath
+          Write-Host "Standard user $user ($sid), profile $userDir"
+          $userVars = @{
+            USERNAME = $user; USERPROFILE = $userDir; HOMEDRIVE = $userDir.Substring(0, 2); HOMEPATH = $userDir.Substring(2)
+            APPDATA = "$userDir\AppData\Roaming"; LOCALAPPDATA = "$userDir\AppData\Local"
+            TEMP = "$userDir\AppData\Local\Temp"; TMP = "$userDir\AppData\Local\Temp"
+          }
+          New-Item -ItemType Directory -Force $userVars.TEMP, $userVars.APPDATA | Out-Null
+          # #30: el PATH de Windows y nada más, como una máquina sin harnesses: el primer uso
+          # explica qué instalar
+          $bare = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem;$env:SystemRoot\System32\WindowsPowerShell\v1.0\"
+          $appVars = $userVars + @{ ORGTREE_DIOXUS_DATA = $data; ORGTREE_DIOXUS_PROBE = $probeFile; ORGTREE_DIOXUS_PROBE_MODE = 'installed'; PATH = $bare }
+
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          # El runner trae PGPASSWORD y PGUSER (su PostgreSQL preinstalado): la app
+          # las recibe y no tiene que pasárselas al motor.
+          Write-Host "libpq variables in the app's environment: $((Get-ChildItem Env:PG* | ForEach-Object Name) -join ', ')"
+          $started = Get-Date
+          $p = Start-AsUser $exe '' $appVars $target
+          $deadline = (Get-Date).AddSeconds(300)
+          $shot = $false; $splash = $false; $onboardShot = $false
+          while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
+            if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) {
+              try { Save-Screen 'installed-splash' } catch { Write-Host "screenshot: $_" }; $splash = $true
+            }
+            if (-not $onboardShot -and (Test-Path "$probeFile.onboarding")) {
+              try { Save-Screen 'onboarding' } catch { Write-Host "screenshot: $_" }; $onboardShot = $true
+            }
+            if (-not $shot -and (Test-Path "$probeFile.installed")) {
+              try { Save-Screen 'installed' } catch { Write-Host "screenshot: $_" }; $shot = $true
+            }
+            Start-Sleep -Milliseconds 300; $p.Refresh()
+          }
+          $seconds = [int]((Get-Date) - $started).TotalSeconds
+          $exited = $p.HasExited
+          if (-not $exited) { try { Save-Screen 'installed-timeout' } catch {}; taskkill /PID $p.Id /T /F | Out-Null }
+
+          $failures = @()
+          $raw = if (Test-Path $probeFile) { Get-Content $probeFile -Raw } else { '{}' }
+          Write-Host "Installed app probe: $raw"
+          "### Installed app (#24, Dioxus)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $probe = $raw | ConvertFrom-Json
+          if (-not $probe.installed) { $failures += "the installed app did not load its UI (startup status: $($probe.startup_status))" }
+          $ui = $probe.installed
+          # #30: el primer uso en una instalación nueva, sin harnesses
+          $ob = $ui.onboarding
+          if ($ob.shown -ne $true) { $failures += 'the first-run setup did not show on a fresh installation' }
+          else {
+            if (@($ob.harnesses).Count -ne 3 -or @($ob.harnesses | Where-Object { $_.detected }).Count -or @($ob.harnesses | Where-Object { -not $_.link }).Count) { $failures += "onboarding harnesses: $($ob.harnesses | ConvertTo-Json -Compress)" }
+            if ($ob.noHarness -notlike 'No supported harness was found*') { $failures += "onboarding without harnesses: $($ob.noHarness)" }
+            if ($ob.themes -ne 5 -or $ob.newOrg -ne $true -or $ob.fontFamily -notlike '*Segoe UI*') { $failures += "onboarding card: $($ob | ConvertTo-Json -Compress)" }
+            if ($ob.skipped -ne $true -or $ob.prefs.onboarded -ne $true) { $failures += "skipping the onboarding: $($ob.skipped) / $($ob.prefs | ConvertTo-Json -Compress)" }
+          }
+          foreach ($check in 'card', 'orgList', 'empty') {
+            if ($ui.$check -ne $true) { $failures += "installed.$check was $($ui.$check)" }
+          }
+          if ($ui.orgs -ne 0) { $failures += "a fresh data root should have no orgs: $($ui.orgs)" }
+          if ($ui.version -ne '0.0.1') { $failures += "version badge: $($ui.version)" }
+          if ($ui.fontFamily -notlike '*Segoe UI*') { $failures += "renderer CSS not applied: $($ui.fontFamily)" }
+          if ($ui.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the webview: $($ui.bridge)" }
+          if ($ui.dataRoot -ne $data) { $failures += "the UI does not show the data root in use: $($ui.dataRoot)" }
+          if ($ui.mode -notlike '*app instalada*') { $failures += "the UI does not say it is the installed app: $($ui.mode)" }
+          $launch = $probe.launch
+          if ($launch.packaged -ne $true -or $launch.bootstrap_postgres -ne $true) { $failures += "not the packaged launch: $($launch | ConvertTo-Json -Compress)" }
+          if ($launch.python -ne "$resources\engine\runtime\python.exe") { $failures += "not the bundled runtime: $($launch.python)" }
+
+          # El motor empaquetado levantó sobre PostgreSQL en la raíz descartable.
+          $backend = Join-Path $data 'store-backend.json'
+          if (Test-Path $backend) {
+            $record = Get-Content $backend -Raw | ConvertFrom-Json
+            Write-Host "store-backend.json: $($record | ConvertTo-Json -Compress)"
+            if ($record.backend -ne 'postgres') { $failures += "store-backend.json chose $($record.backend)" }
+          } else { $failures += "no store-backend.json in $data" }
+          foreach ($path in "$data\pg\cluster\data\PG_VERSION", "$data\pg\cluster\instance.json", "$data\orgtree-product-root.json", "$data\engine-port.json") {
+            if (-not (Test-Path $path)) { $failures += "missing $path" }
+          }
+          $pgVersion = if (Test-Path "$data\pg\cluster\data\PG_VERSION") { (Get-Content "$data\pg\cluster\data\PG_VERSION").Trim() } else { $null }
+          Write-Host "PostgreSQL cluster version: $pgVersion"
+          # El servidor del clúster propio arrancó y se apagó con la app.
+          $pgLog = "$data\pg\cluster\log\postgres.log"
+          if (Test-Path $pgLog) {
+            Write-Host "===== postgres.log"; Get-Content $pgLog | Where-Object { $_ -notmatch 'skipping missing configuration file' } | Write-Host
+            $pgText = Get-Content $pgLog -Raw
+            if ($pgText -notmatch 'database system is ready to accept connections') { $failures += 'the bundled PostgreSQL never accepted connections' }
+            if ($pgText -notmatch 'database system is shut down') { $failures += 'the bundled PostgreSQL did not shut down with the app' }
+          } else { $failures += "missing $pgLog" }
+          # El descriptor engine-paths.json, en la carpeta propia de la app.
+          $paths = Join-Path $userVars.LOCALAPPDATA 'com.kushro.orgtree.dioxus-spike\engine-paths.json'
+          if (Test-Path $paths) {
+            $descriptor = Get-Content $paths -Raw | ConvertFrom-Json
+            Write-Host "engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
+            if ($descriptor.schema -ne 'orgtree.engine-paths/v1' -or $descriptor.data -ne $data -or $descriptor.custodian -ne "$resources\engine\pg-custodian.exe" -or $descriptor.pgBin -ne "$resources\engine\postgresql\bin") {
+              $failures += "unexpected engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
+            }
+          } else { $failures += "no engine-paths.json at $paths" }
+          if (Test-Path "$($userVars.APPDATA)\Orgtree v2") { $failures += "something was written to the installed Orgtree's data folder" }
+
+          # Salir (como desde la bandeja) apaga el motor y PostgreSQL con la app.
+          if (-not $exited) { $failures += "the installed app did not exit after the probe ($seconds s)" }
+          else { Write-Host "Installed app exited by itself with code $($p.ExitCode) after $seconds s" }
+          Start-Sleep -Seconds 3
+          $left = @(Get-Process postgres, python, pg-custodian -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$target*" })
+          if ($left) { $failures += "processes left from the installed app: $(($left | ForEach-Object { "$($_.Name) $($_.Id)" }) -join ', ')" }
+          "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start (PostgreSQL $pgVersion init) to exit: $seconds s`n- run as the standard local user $user" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          if ($failures) {
+            Write-Host "===== files under $data"
+            Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\pg\\cluster\\data\\' } | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
+            # Nunca los secretos del clúster (contraseñas de sus roles).
+            foreach ($log in Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt', '.jsonl', '.json' -and $_.FullName -notmatch '\\secrets\\' -and $_.Length -lt 65536 } | Select-Object -First 25) {
+              Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
+            }
+            # La app descarta stdout y stderr del motor (pueden traer secretos). Para
+            # diagnosticar, el mismo motor empaquetado a mano, como el mismo usuario,
+            # sobre otra raíz descartable.
+            $diag = Join-Path $run 'diagnostic'
+            $engineVars = $userVars + @{ ORGTREE_DATA = $diag; ORGTREE_V2_TOKEN = 'diagnostic-only'; PYTHONUNBUFFERED = '1'; ORGTREE_PG_BOOTSTRAP = '1'
+              ORGTREE_PG_CUSTODIAN = "$resources\engine\pg-custodian.exe"; ORGTREE_P03_PG_BIN = "$resources\engine\postgresql\bin" }
+            # Sin las variables de libpq del runner (la app las quita sola).
+            foreach ($name in 'PGPASSWORD', 'PGUSER') { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            $d = Start-AsUser 'cmd.exe' "/d /c mkdir $diag && $resources\engine\runtime\python.exe $resources\engine\launch.py > $run\diagnostic-stdout.txt 2> $run\diagnostic-stderr.txt" $engineVars "$resources\engine"
+            if (-not $d.WaitForExit(240000)) { Write-Host "diagnostic engine still running after 240 s"; taskkill /PID $d.Id /T /F | Out-Null }
+            Write-Host "===== diagnostic engine stdout"; Get-Content "$run\diagnostic-stdout.txt" -Tail 60
+            Write-Host "===== diagnostic engine stderr"; Get-Content "$run\diagnostic-stderr.txt" -Tail 120
+            throw ($failures -join '; ')
+          }
+          Write-Host "Installed app verified: packaged engine on PostgreSQL, RSX UI loaded, own data root shown"
+
+      # Ningún paso deja un panic de la app registrado (`<datos>\diagnostics\desktop-panic.log`):
+      # todas las raíces de datos de las pruebas están bajo RUNNER_TEMP.
+      - name: No desktop panics in any run
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $logs = @(Get-ChildItem $env:RUNNER_TEMP -Recurse -Filter desktop-panic.log -ErrorAction SilentlyContinue)
+          foreach ($log in $logs) { Write-Host "===== $($log.FullName)"; Get-Content $log.FullName | Write-Host }
+          if ($logs.Count) { throw "the app panicked in $($logs.Count) run(s)" }
+          Write-Host 'No desktop-panic.log under RUNNER_TEMP'
+
+      - name: Report sizes
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem target -Recurse -Filter orgtree-dioxus.exe |
+            Where-Object { $_.FullName -match '\\release\\' } | Select-Object -First 1
+          "### Sizes (Dioxus)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          @(Get-ChildItem dist -Recurse -Filter *.exe) + @($app) |
+            ForEach-Object { "- {0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $staged = 'target\bundle-resources'
+          foreach ($part in 'engine\runtime', 'engine\postgresql', 'engine') {
+            $mb = (Get-ChildItem "$staged\$part" -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
+            "- resources\{0} (uncompressed): {1:N1} MB" -f $part, $mb | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: orgtree-dioxus-screens
+          path: ${{ runner.temp }}/screens/*.png
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: orgtree-dioxus-installed-logs
+          path: |
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.log
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.txt
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.jsonl
+            ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.json
+            !${{ runner.temp }}/orgtree-dioxus-installed-run/**/secrets/**
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orgtree-dioxus-installer
+          path: apps/desktop-dioxus/dist/*.exe
+          if-no-files-found: error
+
+  # #24: solo a mano (workflow_dispatch con prerelease), nunca en un push. Un
+  # pre-release de la rama con su propio tag; main y los releases normales no se tocan.
+  prerelease:
+    needs: windows
+    if: github.event_name == 'workflow_dispatch' && inputs.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: orgtree-dioxus-installer
+          path: installer
+
+      - name: Publish the installer as a GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: dioxus-preview-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          installer=$(ls installer/*.exe | head -n 1)
+          size=$(du -m "$installer" | cut -f1)
+          short=$(echo "$GITHUB_SHA" | cut -c1-7)
+          cat > notes.md <<EOF
+          Vista previa del spike de migración a **Dioxus** (rama \`spike/dioxus\`, commit \`$short\`, [run $GITHUB_RUN_NUMBER]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)).
+
+          **No es un release oficial de Orgtree.** Es un pre-release para probar el spike a mano en Windows.
+
+          ## Qué incluye
+          - La app de escritorio en Dioxus 0.7 (UI en RSX con el CSS del renderer de Orgtree).
+          - El motor Python de Orgtree (\`engine/\`, con el submódulo \`engine/mailhub\`) y su runtime de Python 3.13 embebido.
+          - PostgreSQL 18 y \`pg-custodian\`: en el primer arranque la raíz de datos nace en PostgreSQL.
+          - El instalador baja WebView2 solo si falta.
+
+          ## Datos
+          La app usa su propia raíz de datos, \`%LOCALAPPDATA%\\com.kushro.orgtree.dioxus-spike\\data\`, y la muestra en la pantalla de inicio. Nunca usa ni toca la de Orgtree instalado (\`%APPDATA%\\Orgtree v2\\data\`). Desinstalar la app no borra esa carpeta.
+
+          Instalador: \`$(basename "$installer")\` ($size MB). Se instala por usuario, sin permisos de administrador.
+          EOF
+          gh release create "$TAG" "$installer" --repo "$GITHUB_REPOSITORY" --prerelease --target "$GITHUB_SHA" \
+            --title "Orgtree Dioxus (vista previa $GITHUB_RUN_NUMBER)" --notes-file notes.md
+          echo "Pre-release $TAG: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
