@@ -694,7 +694,7 @@ jobs:
             & $check ($script:tree.Count -ge 2) "run ${run}: the process tree was not recorded ($($script:tree.Count) processes)"
             & $check (-not $alive.Count) "run ${run}: orphans after the exit: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')"
             & $check (Lock-Free $root) "run ${run}: the data root lock is still held after the exit"
-            "- run ${run}: $($script:tree.Count) processes under the app before the exit ($(($script:tree | ForEach-Object { $_.Name }) -join ', ')); left alive: $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "- run ${run}: $($script:tree.Count) processes under the app before the exit ($(($script:tree | ForEach-Object { $_.Name }) -join ', ')); left alive: $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append | Write-Host
             return $report
           }
           $exits = { if (Test-Path $exitReport) { @(Get-Content $exitReport | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
@@ -742,7 +742,7 @@ jobs:
             $maxGap = ($gaps | Measure-Object -Maximum).Maximum
             & $check ($conv.Count -eq 4 -and $conv[0].phase -like 'database-convert*') "conversion phases: $($phases | ConvertTo-Json -Compress)"
             & $check ($span -gt 6000 -and $maxGap -lt 6000) "the conversion window must measure silence: span $span ms, largest gap $maxGap ms"
-            "- conversion: $($conv.Count) phases over $span ms, largest gap $maxGap ms (window 6000 ms)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            "- conversion: $($conv.Count) phases over $span ms, largest gap $maxGap ms (window 6000 ms)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append | Write-Host
             $rd = $full.ready.page
             & $check ($rd.status.state -eq 'ready' -and $rd.maintenanceFn -eq 'function' -and $null -eq $rd.maintenance -and $rd.listed -eq $true) "ready: $($rd | ConvertTo-Json -Compress)"
             $dn = $full.down
