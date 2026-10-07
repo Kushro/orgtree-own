@@ -20,6 +20,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 | 10 | #27 Desk completo en RSX | El desk de #12 en uso real: compositor, contenido y estado del turno |
 | 11 | #28 Bandeja, preguntas y atención en RSX | Mail, preguntas y cola de atención, con notificaciones nativas con clic |
 | 12 | #29 Docket en RSX | Lista, detalle y acciones del docket compartido de tickets |
+| 13 | #30 Cuentas, proveedores y ajustes en RSX | Usar la app instalada desde cero: harnesses, login, cuentas, ajustes y primer uso |
 
 ## Decisiones de diseño ya tomadas
 
@@ -29,7 +30,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 
 ## Fuera del alcance
 
-El lienzo WebGL del organigrama (con pan y zoom), docket, mail y demás vistas; tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, updater. El empaquetado del runtime de Python y PostgreSQL entró con #24.
+El plan dejó afuera la galería y los documentos, las audiencias, los watchdogs, las presentaciones, OpenRouter, el explorador de disco, el lienzo WebGL del organigrama y la integración con el sistema (tarea de arranque, instalación para todos los usuarios, upgrade desde Electron, updater). Lo que además quedó fuera de cada issue está consolidado al final, en [Qué falta para la paridad](#qué-falta-para-la-paridad).
 
 ## Cómo compilar
 
@@ -479,8 +480,125 @@ Fuera del recorte: subir y borrar adjuntos del ticket, la búsqueda de referenci
 
 **Líneas** (sin comentarios, líneas en blanco ni tests): `docket.rs` 1.330, `engine-client/src/docket.rs` 200 (tipos) y unas 90 nuevas en `org.rs` (el contexto, la apertura y los enlaces), frente a 2.864 de TSX: `docket.tsx` 2.004, `reflinks.tsx` 281, `refmd.tsx` 244, `workrefs.tsx` 180, `quickstaff.ts` 90 y `docketdesc.tsx` 65, más los tipos de `types.ts` y lo que no se puede aislar (`staffingoptions.ts`, `workrefresolve.ts`, `docketwindow.ts`, la apertura del docket en `App.tsx`). El TSX hace más (ver arriba); el RSX suma decisiones, holders e historial, y escribe cada atributo en su línea.
 
-El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluidos el organigrama de #26, el desk completo de #27, la bandeja, las preguntas y la atención de #28 y el docket de #29), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
+### Cuentas, proveedores y ajustes (#30)
+
+Lo necesario para usar la app instalada desde cero, en RSX con las clases del renderer y su `styles.css` sin cambios. Sigue `main/harnesses.ts`, `main/providerlogin.ts`, `canvas/accounts.tsx`, `canvas/accountsregistry.tsx`, `canvas/onboarding.tsx`, `desktopsettings.tsx`, `settingskit.tsx`, `themes.tsx`, el `SettingsPanel` de `App.tsx` y `api.ts`.
+
+**Harnesses** (`src/harnesses.rs`). Es el código del spike de Tauri (#21), que no depende del framework: busca `claude`, `codex` y `agy` en el `PATH` (con `.exe`, `.cmd` y `.bat`) y en las ubicaciones conocidas (`ORGTREE_CODEX`, `ORGTREE_ANTIGRAVITY`, la carpeta del instalador de Antigravity). Solo mira si están: nunca lanza, instala ni contacta a un proveedor, y la ruta no sale del shell. Los enlaces oficiales de instalación son los de `HARNESS_LINKS` y están fijos en el código.
+
+**Login de proveedores** (`src/login.rs`). También es el de Tauri, con el estado tipado para RSX (`LoginStatus`, el `ProviderLoginStatus` del contrato). Las reglas de `providerlogin.ts`:
+
+- el hijo lo lanza el shell, nunca el motor, y solo si el harness está detectado (si no, `not-installed`);
+- los argumentos son fijos (`claude auth login --claudeai`, `codex login`; Antigravity abre su CLI en una terminal visible). De la página solo pasan el proveedor, validado contra la lista, y la carpeta de perfil de la cuenta, que elige `CLAUDE_CONFIG_DIR` o `CODEX_HOME` y tiene que ser absoluta y escribible;
+- el token del escritorio nunca llega al hijo: el shell no lo tiene en su entorno y además quita `ORGTREE_V2_TOKEN`, `ORGTREE_DESKTOP_TOKEN` y la variable de la prueba;
+- el código pegado (solo Claude) va únicamente al stdin del hijo;
+- cancelar mata el árbol entero (`taskkill /T /F`; en Linux, el grupo de procesos), y al salir de la app (`LoopDestroyed`) se cancelan todos;
+- un login que termina bien se verifica contra el motor (`/api/providers?force=true&force_provider=…` o la identidad de la cuenta), con el header del token.
+
+**Ajustes de la app** (`src/settings.rs`). El botón "App settings" del inicio abre `AccountsPanel` con tres pestañas:
+
+| Pestaña | Qué tiene | Endpoints (igual que `api.ts`) |
+|---|---|---|
+| Providers | Cada proveedor: estado (instalado, sesión, versión), lo que detecta el shell, el enlace oficial si falta, el interruptor del usuario, los tiers y sus cuentas | `GET /api/providers`, `PUT /api/providers/{id}/enabled`, `GET /api/accounts` |
+| Runtime | Las notificaciones de #28, el límite de turnos de la máquina (`max_concurrent_turns`, 1–512) y los tiempos de turno del motor: revisar a un agente que lleva 20 minutos trabajando, esperar las herramientas MCP, los recordatorios del docket y los procesos calientes | `GET` y `PUT /api/app-settings/runtime`, una clave por pedido |
+| Display | El tema (los cinco del renderer o un color propio), guardado en `preferences.json` y aplicado en todas las ventanas | — |
+
+El tema pone las mismas variables que `applyTheme` (`--accent`, `--accent-hover`, `--org-accent`…) en una hoja propia de cada ventana, que se entera del cambio por un canal (`tokio::sync::watch`), como el borrador compartido de #13. Sin una elección explícita sigue al primer proveedor instalado (`defaultThemeForProviders`).
+
+**Cuentas por proveedor**, como `AccountRegistrySection` y `AddAccountDialog`:
+
+| Acción | Endpoint | Como en el renderer |
+|---|---|---|
+| Listar | `GET /api/accounts` | Cada cuenta con su estado de sesión, sus agentes y su origen |
+| Agregar | `POST /api/accounts` `{provider, kind, path?, key?}` | Una cuenta administrada (perfil propio), una carpeta importada o una clave de API, que sale del campo al enviarla |
+| Iniciar sesión | el login de arriba, con la carpeta de la cuenta | `ProviderSignIn`: el estado se relee cada 800 ms; Cancel mata el árbol |
+| Refrescar | `GET /api/accounts/{id}/identity` | El aviso dice el resultado (`authenticated`, `unauthenticated`) |
+| Quitar | `DELETE /api/accounts/{id}` | Sus agentes pasan a la cuenta por defecto del proveedor; la cuenta por defecto no se puede quitar |
+
+**Contratar filtra los tiers.** El diálogo de #26 pide `/api/providers` al abrirse y aplica `familyOffer`: un proveedor no instalado o apagado por el usuario no aparece; uno instalado que no puede contratar aparece deshabilitado con su motivo. Mientras no llega la respuesta, o si falla, se ofrece todo, como el renderer: el motor rechaza igual en la puerta (`provider_hire_gate`).
+
+**Ajustes de la org** (`src/orgsettings.rs`). El engranaje de la barra de la org abre `SettingsPanel` con Basic (el tope y el valor por defecto de los grants de primer nivel, el umbral de compactación, el esfuerzo por defecto y el charter `org.md`), Policies (el costo de contratar y de asignar que sube por la cadena) y Autonomy (`headless`, que se guarda en el acto). Como el renderer, el panel lee del árbol y guarda solo lo editado, con un solo botón: `POST /api/orgs/{slug}/settings` con las mismas claves y `PUT /api/orgs/{slug}/orgmd` si el charter cargó entero (una lectura cortada deja el editor deshabilitado). Lo guardado vuelve por el WebSocket de la org.
+
+**Primer uso.** Una instalación sin orgs que nunca terminó el primer uso muestra la tarjeta de `onboarding.tsx` (`showOnboarding`), mínima:
+
+- los tres harnesses, cada uno instalado o no, y para los que faltan un botón "Official setup" con su enlace oficial fijo; sin ninguno, el aviso del panel de proveedores ("No supported harness was found…");
+- el tema;
+- la primera org (`NewOrg`), que al crearse termina el primer uso (`onboardingCreate`);
+- "skip setup for now" y "finish setup", que guardan `onboarded` en las preferencias del escritorio.
+
+Quedan afuera "start at login", "exit when the last window closes" (el spike no tiene esas preferencias) y poblar los documentos de charter.
+
+**Enlaces externos** (`src/external.rs`). Antes los enlaces `http(s)` del contenido de los agentes se mostraban como texto. Ahora siguen a Electron (`routeExternal` y `setWindowOpenHandler` en `main/windows.ts`, con `externalHttpUrl` de `policy.ts` y `shell.openExternal`), por una sola vía en Rust:
+
+- la página corta el clic en la captura (por la trampa de `webbrowser::open` de #27) y manda el `href`;
+- Rust lo valida con el parser de `url`: solo `http` y `https`, con host, sin usuario ni contraseña y nunca el origen del motor;
+- abre la URL normalizada con `ShellExecuteW`, nunca el texto crudo.
+
+Una ruta relativa, `file:`, `javascript:`, `ssh:` o una URL con credenciales se muestra como texto con el motivo. Las rutas a archivos siguen con su vía propia (revelar, nunca abrir). Vale para el desk, la bandeja, la cola de atención y el docket, y para los enlaces oficiales de los harnesses.
+
+**Cliente Rust.** Suma `put`, `providers`, `set_provider_enabled`, `runtime_settings`, `set_runtime`, `accounts`, `add_account`, `account_identity`, `remove_account`, `save_org_settings`, `org_md` y `put_org_md`, y los tipos (`ProvidersPayload`, `ProviderInfo` con `offer()`, `RuntimeSettings`, `AccountRegistry`, `AccountRow`, `NewAccount`, `OrgSettings`…). Un proveedor o una cuenta con una forma inesperada se saltea sin borrar a los demás. `tests/ops.rs` prueba ruta, verbo, cuerpo y token de cada pedido contra el servidor falso, y `familyOffer` con los cuatro casos.
+
+**Motor de fixture.** No cambia, salvo dos enlaces raros más en la respuesta sembrada (`ssh:` y una URL con usuario). Ya declaraba solo a Claude instalado, así que el filtro de tiers se ve sin tocar nada más.
+
+**Verificado en WebView2** (run [37615625482](https://github.com/Kushro/orgtree-own/actions/runs/37615625482): todo lo de abajo pasó salvo dos verificaciones de la propia prueba, corregidas en `a2f3a7c`, cuyo run [37617157981](https://github.com/Kushro/orgtree-own/actions/runs/37617157981) quedó en curso al pausar el proyecto; la app instalada y su primer uso todavía no corrieron en el CI, porque el paso se saltea si falla el smoke), con un `codex.cmd` falso en el `PATH` de la app que repite sus argumentos, avisa si heredó el token y tarda 30 s:
+
+- los ajustes de la org: compactación 70 %, grant por defecto 7, esfuerzo `medium`, el costo de contratar apagado y un charter nuevo quedan en el motor y el panel los relee al volver a abrirlo; `headless` se guarda en el acto y, con las políticas de Fable de fábrica (`halt`), el motor lo rechaza y el aviso dice por qué;
+- contratar ofrece solo los tiers de Claude, aunque la org tiene también los de Codex y Antigravity;
+- el panel de proveedores muestra a Codex "Not installed" según el motor y detectado por el shell, con su enlace oficial;
+- una cuenta administrada de Codex se agrega; su login se niega con un harness no detectado (`not-installed`) y con un proveedor inventado, arranca `codex login` (la salida dice `fake-codex login`, sin el token), no deja empezar un segundo, rechaza un código pegado, y cancelar vuelve a `idle` y mata el árbol: el CLI falso nunca escribe su marca;
+- refrescar la cuenta dice `unauthenticated` y quitarla la saca del motor;
+- el límite de turnos en 8 y dos tiempos de turno cambiados quedan en el motor y el panel los relee; después vuelven a como estaban;
+- el tema Codex Teal se aplica en el acto (`--accent` = `#22c4bd`) y queda en las preferencias;
+- en el desk, un enlace relativo, uno `ssh:` y uno con usuario se muestran como texto con el motivo; al final, el `https` abre el navegador del sistema en esa URL (el CI lo encuentra por su línea de comandos) y ningún navegador se abrió antes;
+- la app instalada, con el `PATH` de Windows y nada más, abre el primer uso: los tres harnesses sin instalar con sus enlaces, el aviso, los cinco temas y la primera org; saltearlo lo guarda y muestra el inicio.
+
+La prueba también corrió localmente en Linux (WebKitGTK bajo Xvfb), salvo la cuenta administrada: el guard del registro de cuentas (`_reject_secrets` en `accounts.py`) toma una ruta POSIX larga y sin puntos por un valor opaco con forma de credencial y rechaza la cuenta. En Windows las barras invertidas cortan la ruta y no pasa; queda anotado para el motor. El ciclo del login con un `codex` falso lo cubre además un test de `login.rs` en Linux.
+
+Capturas por marcador: `org-settings`, `hire-filter`, `providers`, `login`, `runtime`, `theme`, `external` y, en la app instalada, `onboarding`.
+
+Fuera del recorte: el uso por proveedor (las barras de límites), OpenRouter, el hub de mail, "Default org settings", las pestañas Developer y About, "Run Orgtree as administrator", el arranque con la sesión, las actualizaciones automáticas, staffing, los documentos de charter, las marcas de capacidad, los dos carriles por proveedor (`apikey_fallback` y `subscription_inference`), el selector de carpetas para importar una cuenta, y en la org las pestañas Hire defaults, Connections e History, las políticas de Fable y la reanudación automática. El techo de un turno y el límite de silencio que `AGENTS.md` ubica en Runtime no existen en el motor de este fork (solo `ORGTREE_TURN_TIMEOUT`), así que el panel muestra los tiempos de turno que el motor sí expone.
+
+**Líneas** (sin comentarios, líneas en blanco ni tests): `settings.rs` 823, `orgsettings.rs` 216, `login.rs` 410, `harnesses.rs` 71, `external.rs` 58 y `engine-client/src/settings.rs` 276 (tipos), más unas 90 en `home.rs` (el primer uso) y unas 65 en `org.rs` (el filtro, el engranaje y los enlaces): unas 2.010. Lo equivalente en TSX y en el main de Electron suma 1.826: `accounts.tsx` 660, `accountsregistry.tsx` 294, `providerlogin.ts` 284, `themes.tsx` 196, `settingskit.tsx` 145, `onboarding.tsx` 118, `desktopsettings.tsx` 111 y `harnesses.ts` 18, más lo que no se puede aislar (el `SettingsPanel` de `App.tsx`, `familyOffer` en `shared.ts`, `externalHttpUrl` y el ruteo de `windows.ts`, los tipos de `types.ts`). El TSX hace bastante más (ver arriba); el login en Rust es el mismo código que en Tauri.
+
+El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluidos el organigrama de #26, el desk completo de #27, la bandeja, las preguntas y la atención de #28, el docket de #29 y las cuentas, los proveedores y los ajustes de #30), instala el instalador y prueba la app instalada (#24, con el primer uso de #30), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
 
 **Estilos:** por ahora la ventana base usa CSS en línea. La decisión entre reutilizar `apps/desktop/renderer/src/styles.css` o adoptar rust-ui con Tailwind se toma cuando se construya la primera vista real (#11), porque recién ahí se ve cuánto del CSS actual aplica.
+
+## Qué falta para la paridad
+
+Lo que quedó fuera de cada issue, consolidado por área. Nada de esto es un bloqueo del framework: son vistas y detalles que el recorte no reescribió en RSX. Lo que sí necesitó rodeos está en cada sección (la trampa de `spawn`, `webbrowser::open`, el toast con clic, la instancia única).
+
+**Fuera de todo el spike** (lo dejó afuera el plan, y #30 lo repite): la galería y los documentos (con su lector y las presentaciones), las audiencias, los watchdogs, OpenRouter, el explorador de disco y el uso por proveedor (las barras de límites y su modal).
+
+**Organigrama (#11, #26).**
+- El lienzo WebGL con pan y zoom de `OrgCanvas.tsx`, y mover arrastrando (acá se elige el superior en un diálogo).
+- Los submenús y la navegación por teclado del menú de agente, los pins y popouts de paneles, la compactación, los filtros y la vista circular.
+- Las opciones avanzadas de una org nueva (carpetas y hubs de mail), el buscador de orgs y la lista de orgs de la bandeja.
+- La tarjeta de cada agente con su tier y su cuenta (`AgentName`), y el panel de ajustes del agente (el selector de modelo quedó en el compositor del desk).
+
+**Desk (#12, #27).**
+- Subir adjuntos desde el compositor, responder citando un mensaje, el aviso pasivo (Alt+N) y el historial del compositor.
+- Las pestañas de inbox, docket e historial del desk, y la tarjeta propia de cada variante de evento (`EventCard`): el desk muestra el tipo y el cuerpo.
+
+**Bandeja, preguntas y atención (#28).**
+- El desk del agente al lado de la cola (`AgentDeskPanel`), la carpeta `record`, los pedidos de audiencia y el historial de pedidos resueltos.
+- Adjuntos en las respuestas, la búsqueda y el paginado de la bandeja, la barra arrastrable de créditos y los avisos de documentos.
+- Varias ventanas dueñas de las notificaciones (acá la principal es la única).
+
+**Docket (#29).**
+- Subir y borrar adjuntos de un ticket, la búsqueda de referencias que no están cargadas y los tokens de documentos y de mail.
+- Las secciones de aceptación, revisión de integración y hallazgos; el plegado de categorías y sub-ítems; el orden por creación o por cambio de estado; y el docket de un agente en su desk.
+- Pendiente de decisión: los controles del usuario para cambiar el estado, asignar a mano, levantar la bandera y adjuntar una pregunta, que el renderer tampoco tiene y el motor no expone.
+
+**Cuentas, proveedores y ajustes (#30).**
+- En la app: Default org settings, el hub de mail, Developer y About, "Run Orgtree as administrator", el arranque con la sesión y salir al cerrar la última ventana, las actualizaciones automáticas, staffing, los documentos de charter (también al terminar el primer uso), el tamaño del texto y el resto de Display, y el contraste y los colores de agentes.
+- En los proveedores: las marcas de capacidad, los carriles `apikey_fallback` y `subscription_inference`, el selector de carpetas para importar una cuenta y el uso de cada cuenta.
+- En la org: Hire defaults, Connections, History, las políticas de Fable y la reanudación automática.
+
+**Escritorio (#13, #14, #24).**
+- Portales: una ventana no puede renderizar dentro de otra; cada una tiene su VirtualDom y su copia del estado compartido.
+- El escalado a 125 % y 150 %, que el runner no permite probar.
+- La tarea de arranque del sistema, la instalación para todos los usuarios, el upgrade desde una instalación de Electron, el updater y un AppUserModelID propio en el acceso directo (los toasts usan el de PowerShell).
+- La cuenta Administrador integrada (`LA` en SDDL) que `prototype-guard` no reconoce: es del motor y le pasa igual a Electron.
