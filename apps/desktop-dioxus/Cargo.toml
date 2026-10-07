@@ -9,7 +9,7 @@ publish = false
 # Standalone crate: keep it out of any parent workspace. The engine
 # supervisor is a member so both share one lockfile and target dir.
 [workspace]
-members = ["engine-host"]
+members = ["engine-host", "engine-client"]
 
 [dependencies]
 dioxus = { version = "0.7.10", features = ["desktop"] }

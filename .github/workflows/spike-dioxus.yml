@@ -41,11 +41,11 @@ jobs:
       - name: Install engine dependencies
         run: python -m pip install -r ../../tools/runtime-requirements.in
 
-      - name: Engine supervisor tests (fake and real engine)
+      - name: Engine supervisor and client tests (fake and real engine)
         env:
           FAKE_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
           ORGTREE_TEST_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
-        run: cargo test -p orgtree-engine-host -- --include-ignored --nocapture
+        run: cargo test -p orgtree-engine-host -p orgtree-engine-client -- --include-ignored --nocapture
 
       - uses: cargo-bins/cargo-binstall@main
 
