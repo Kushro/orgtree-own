@@ -18,6 +18,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 | 8 | #24 Instalador autónomo con motor, runtime y PostgreSQL | Instalar y usar sin preparar nada |
 | 9 | #26 Organigrama y operaciones sobre agentes en RSX | Una vista con estado, menú y operaciones reales |
 | 10 | #27 Desk completo en RSX | El desk de #12 en uso real: compositor, contenido y estado del turno |
+| 11 | #28 Bandeja, preguntas y atención en RSX | Mail, preguntas y cola de atención, con notificaciones nativas con clic |
 
 ## Decisiones de diseño ya tomadas
 
@@ -345,7 +346,69 @@ Fuera del recorte: subir adjuntos desde el compositor, responder citando un mens
 
 **Líneas** (sin comentarios, líneas en blanco ni tests): `desk.rs` 1.281 y `reveal.rs` 86, frente a 241 del `desk.rs` de #12. Lo equivalente en TSX suma 4.218: `desk.tsx` 3.003, `convo.ts` 890, `events/segments.tsx` 132, `effort.tsx` 62, `mailpreview.tsx` 61, `haltcontrol.tsx` 39 y `replypreview.tsx` 31, más las partes que no se pueden aislar (el cambio de modelo en `modals.tsx`, `md()` y el revelado en `canvas/shared.ts`, `EventCard`). El TSX sigue haciendo más (ver arriba), y en RSX cada atributo va en su línea.
 
-El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluidos el organigrama de #26 y el desk completo de #27), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
+### Bandeja, preguntas y atención (#28)
+
+Lo que el usuario tiene que atender, en RSX con las clases del renderer y su CSS sin cambios: `styles.css` y, ahora también, la hoja propia de la vista de atención (`attention/attention.css`, con `include_str!`). Siguen `canvas/mail.tsx`, `canvas/asks.tsx`, `attention/` (`AttentionQueue.tsx`, `feed.ts`, `AttentionView.tsx`), la bandeja de `App.tsx`, `notifications.ts` y `api.ts`.
+
+**Bandeja del usuario** (`src/inbox.rs`). La campana de la barra de la org (`iconbtn ask-bell`) cuenta el mail sin leer y los pedidos abiertos, y brilla con un urgente. Abre el panel de `App.tsx`: las carpetas `inbox` y `sent`, la lista (`mailrow`, con `unread`, `urgent` y `ask`) y el panel de lectura (`mailer-head`, la razón del urgente en `urgent-why`, el cuerpo en Markdown seguro y la caja de respuesta).
+
+| Acción | Endpoint (igual que `api.ts`) | Como en el renderer |
+|---|---|---|
+| Leer y archivar | `POST /inbox/read` `{ids}` | Un mail se archiva al salir de él (elegir otro o cerrar la bandeja), como `leave` en `MailList`. La marca es optimista y vuelve atrás con el error (`markReadNow`) |
+| Archivar todo | `POST /inbox/clear` | "Mark all read" |
+| Responder | `POST /nodes/{remitente}/message` `{text, target, client_op}` | `replyMessage`: el `target` es la identidad del mail (`{kind:'mail', org, box:'user', id}`) y el motor arma la cita. Con un recibo durable el original queda leído |
+| Responder una pregunta | `POST /nodes/{nid}/batch` `{revs, answers, credits?, scope?}` | `BatchAsk`: la tarjeta compuesta del agente, con pestañas de preguntas (opciones, Other, Skip), créditos y alcance; se va en el clic (`asksubmitted`) y vuelve si falla |
+| Descartar una pregunta | el mismo `/batch`, con todas las pestañas saltadas | La ✕ de `BatchAsk`: el agente se entera y puede volver a preguntar |
+
+Las preguntas viajan en la bandeja como filas propias (`askMailRow`), mezcladas con el mail, y su panel es la tarjeta. Salen de `openAsks`: la tarjeta de cada nodo del árbol y, para un agente que el árbol no trae, la que se arma con las filas sueltas de la cabecera (`composeBatch`). El panel de créditos no tiene la barra arrastrable de `CreditAsk`: se concede lo pedido, se niega o se salta.
+
+**Cola de atención** (`src/attention.rs`). La barra de la org suma el selector `Chart` / `Attention` de `AttentionView.tsx`, con lo que espera en la cola. La cola es la de `feed.ts`: tickets con la bandera de atención (`manual_attention`, de todos los grupos), mail urgente sin leer y preguntas abiertas, del más nuevo al más viejo. Cada fila usa la de su lista de origen (`docket-row` para un ticket, `mailrow` para el mail y las preguntas) y su panel es el de su detalle.
+
+- **La bandera queda arriba** hasta que el usuario responde o la descarta. Responder (`POST /work-items/{wid}/reply` `{body}`) le escribe al asignado y el motor baja la bandera sin cambiar el estado. "Dismiss with no comment" (`POST /work-items/{wid}/dismiss-attention` `{set_rev}`) la saca de la lista en el clic, el ticket pasa a `blocked` y vuelve con el error si el motor se niega.
+- Abrir un mail urgente lo marca leído, y queda a la vista mientras siga elegido (`retainSelected`).
+- Cuando lo elegido se resuelve, la selección pasa a la fila de abajo, o a la de arriba (`nextSelection`). Sin selección se abre la primera, como el renderer.
+
+La bandeja y los tickets se piden con el árbol, al abrir la org y con cada frame del WebSocket, sin sondeo.
+
+**Notificaciones nativas** (`src/notify.rs`), con la lógica de `useNativeNotifications` y del lado nativo de Electron:
+
+- **Una sola dueña.** La pasada global (`GET /api/desktop/notifications` con todas sus páginas, la barra de tareas, retirar y mostrar) corre en la ventana principal, cada 5 s y con cada frame de una org abierta. Los desks en otra ventana no la repiten.
+- **Preferencias por tipo** de `packages/contracts/notifications.ts` (`notificationEnabled`, con el `routineNotifications` viejo), en `preferences.json` de la carpeta propia de la app. El inicio tiene el grupo "Notifications" de los ajustes de escritorio (`SetGroup` y `SetToggle`). Apagar un tipo retira lo que ya se mostró de ese tipo.
+- **Con Orgtree enfocado** no se notifica, salvo `notifyWhileFocused`. Una pregunta cuya tarjeta está en pantalla ya llegó al usuario (`questionVisible`).
+- **Deduplicación** por `org` + `id`. Lo mostrado se recuerda en `notifications-seen.json` mientras siga pendiente, así que reiniciar la app no repite alertas.
+- **Retirar las resueltas.** Lo que sale de la proyección se saca del centro de notificaciones.
+- **El clic** vuelve a leer la proyección (el sistema puede retener un banner ya resuelto), muestra la principal y abre el elemento: una pregunta, un ticket con bandera o un urgente en la cola de atención; el resto del mail, en la bandeja; un agente congelado, en su desk.
+- **Barra de tareas.** Parpadea (`request_user_attention`, `Critical`) con cada llegada nueva si la ventana no tiene el foco, y para cuando no queda nada pendiente. Cuenta la proyección entera, no la filtrada por preferencias: silenciar un tipo no quiere decir que dejó de esperar.
+
+**Bloqueo y cómo se rodeó.** `notify-rust` no da el clic en Windows. El toast se arma con WinRT directo, como el spike de Tauri en #21: `ToastNotification` con tag y grupo propios para poder retirarlo (`History.RemoveGroupedTagWithId`) y el evento `Activated`, que corre en un hilo de WinRT y manda el tag por un canal a la principal. Los toasts mostrados se guardan vivos mientras estén en el centro de notificaciones, para que el handler siga suscripto. El instalador de dx no registra un AppUserModelID propio en el acceso directo, y un id sin registrar no muestra nada: se usa el de PowerShell, el mismo que `notify-rust`. Fuera de Windows se usa `notify-rust`, sin clic.
+
+**Trampa de Dioxus.** Las cajas de respuesta lanzan el envío en el scope de la vista (por la trampa de `spawn` de #26), y sus señales también nacen ahí (`Signal::new_in_scope`): si no, Dioxus avisa que una señal de un hijo se usa desde el padre, y el texto no podría volver a la caja cuando la fila ya se fue.
+
+**Cliente Rust.** Suma `inbox`, `mark_read`, `clear_inbox`, `reply_mail`, `resolve_batch`, `answer_ask`, `work_items`, `dismiss_attention`, `reply_work_item` y `notifications`, y los tipos (`InboxPayload`, `AskInfo`, `AskTab`, `WorkItem`, `DesktopNotice`…). La tarjeta de cada nodo y los pedidos de la cabecera entran al árbol de forma tolerante: una forma inesperada queda vacía y no rompe el árbol. `tests/ops.rs` prueba ruta, verbo, cuerpo y token de cada pedido contra el servidor falso, y las páginas de las notificaciones.
+
+**Motor de fixture.** `POST /api/fixture/attention` `{kind}` hace que `worker` le escriba al usuario (urgente o de rutina), le pregunte, o levante la bandera en dos tickets. Todo pasa por el ledger real (`post_mail`, `ask_user`, `work_create`, `work_update`), así que la bandeja, la proyección de notificaciones y el WebSocket ven lo mismo que con un agente de verdad. `engine/` no cambia.
+
+**Verificado en WebView2** (run [37601442161](https://github.com/Kushro/orgtree-own/actions/runs/37601442161)):
+
+- con la ventana minimizada, el agente le escribe un urgente y uno de rutina, le pregunta y levanta la bandera en dos tickets: se muestran la pregunta, el urgente y las dos banderas, el de rutina queda filtrado por su tipo, y la barra de tareas empieza a parpadear (`started`, sin foco);
+- una pasada siguiente no repite nada (`duplicate`); "All mail" muestra el de rutina y, apagado otra vez, se retira;
+- con la ventana al frente, un urgente nuevo espera (`focused`) hasta prender "Notify while focused";
+- la campana cuenta 4 (3 sin leer y la pregunta) y la cola, 5 filas: 2 tickets, 2 urgentes y la pregunta;
+- el clic simulado en la notificación de la pregunta (lo mismo que llama `Activated`; el CI no puede hacer clic en el centro de notificaciones) abre la cola con la pregunta elegida;
+- responder la pregunta la saca de la cola y retira su notificación; abrir un urgente lo marca leído y queda a la vista mientras está elegido; responderlo llega a `worker`;
+- responder un ticket baja la bandera y lo deja `in_progress`; descartar el otro lo saca en el clic y lo pasa a `blocked`; una pregunta nueva se descarta con la ✕;
+- en la bandeja, el de rutina se archiva al salir de él, el segundo urgente se responde y "Mark all read" deja la bandeja sin nada sin leer;
+- al final la cola está vacía, cada notificación resuelta se retiró y la barra de tareas paró (`Stop`).
+
+El primer push falló solo por la verificación de la rutina filtrada: la pasada la saca de los elegibles antes de decidir, como el renderer, y no quedaba registrada. El registro la anota ahora.
+
+Capturas por marcador: `taskbar` (la ventana minimizada con la barra de tareas parpadeando), `notification-click` (la cola tras el clic, con la pregunta elegida), `attention` (el panel de un ticket con la bandera) e `inbox` (la bandeja con un mail abierto).
+
+Fuera del recorte: el desk del agente a la derecha de la cola (`AgentDeskPanel`), la carpeta `record`, los pedidos de audiencia, adjuntos en las respuestas, el aviso pasivo, el historial de pedidos resueltos en la bandeja, el resto del panel del ticket (historial, adjuntos, aceptación) y los avisos de documentos.
+
+**Líneas** (sin comentarios, líneas en blanco ni tests): `inbox.rs` 591, `attention.rs` 275 y `notify.rs` 426, más 264 nuevas en `org.rs` (el contexto con las acciones, la carga, el selector y el clic) y 52 en `home.rs` (los ajustes): 1.608. Lo equivalente en TSX suma 3.299: `mail.tsx` 1.266, `asks.tsx` 765, `AttentionQueue.tsx` 335, `AttentionView.tsx` 217, `notifications.ts` 160, `asksubmitted.ts` 162, `feed.ts` 124, `openasks.ts` 96, `mailread.ts` 84, `attndismiss.ts` 51 y `contracts/notifications.ts` 39, más el lado nativo de Electron (`main/notifications.ts` 115 y `taskbar-attention.ts` 78) y la bandeja dentro de `App.tsx`, que no se puede aislar. El TSX hace bastante más (ver arriba: carpetas, búsqueda, paginado, referencias, la barra de créditos, el desk de la cola, varias ventanas dueñas).
+
+El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluidos el organigrama de #26, el desk completo de #27 y la bandeja, las preguntas y la atención de #28), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
 
