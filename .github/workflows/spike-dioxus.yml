@@ -348,6 +348,9 @@ jobs:
             $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
             $graphics.Dispose(); $bitmap.Dispose()
           }
+          # El runner trae PGPASSWORD y PGUSER (su PostgreSQL preinstalado): la app
+          # las recibe y no tiene que pasárselas al motor.
+          Write-Host "libpq variables in the app's environment: $((Get-ChildItem Env:PG* | ForEach-Object Name) -join ', ')"
           $started = Get-Date
           $p = Start-AsUser $exe '' $appVars $target
           $deadline = (Get-Date).AddSeconds(300)
@@ -416,8 +419,9 @@ jobs:
           "### Installed app (#24)`n- installed size: $([math]::Round($installedMb, 1)) MB`n- first start (PostgreSQL init) to exit: $seconds s`n- run as the standard local user $user" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           if ($failures) {
             Write-Host "===== files under $data"
-            Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
-            foreach ($log in Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt', '.jsonl', '.json' } | Select-Object -First 25) {
+            Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\pg\\cluster\\data\\' } | ForEach-Object { "{0} ({1} bytes)" -f $_.FullName, $_.Length }
+            # Nunca los secretos del clúster (contraseñas de sus roles).
+            foreach ($log in Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt', '.jsonl', '.json' -and $_.FullName -notmatch '\\secrets\\' } | Select-Object -First 25) {
               Write-Host "===== $($log.FullName)"; Get-Content $log.FullName -Tail 40
             }
             # La app descarta stdout y stderr del motor (pueden traer secretos). Para
@@ -426,7 +430,9 @@ jobs:
             $diag = Join-Path $run 'diagnostic'
             $engineVars = $userVars + @{ ORGTREE_DATA = $diag; ORGTREE_V2_TOKEN = 'diagnostic-only'; PYTHONUNBUFFERED = '1'; ORGTREE_PG_BOOTSTRAP = '1'
               ORGTREE_PG_CUSTODIAN = "$resources\engine\pg-custodian.exe"; ORGTREE_P03_PG_BIN = "$resources\engine\postgresql\bin" }
-            $d = Start-AsUser 'cmd.exe' "/d /c $resources\engine\runtime\python.exe $resources\engine\launch.py > $run\diagnostic-stdout.txt 2> $run\diagnostic-stderr.txt" $engineVars "$resources\engine"
+            # Sin las variables de libpq del runner (la app las quita sola).
+            foreach ($name in 'PGPASSWORD', 'PGUSER') { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            $d = Start-AsUser 'cmd.exe' "/d /c mkdir $diag && $resources\engine\runtime\python.exe $resources\engine\launch.py > $run\diagnostic-stdout.txt 2> $run\diagnostic-stderr.txt" $engineVars "$resources\engine"
             if (-not $d.WaitForExit(240000)) { Write-Host "diagnostic engine still running after 240 s"; taskkill /PID $d.Id /T /F | Out-Null }
             Write-Host "===== diagnostic engine stdout"; Get-Content "$run\diagnostic-stdout.txt" -Tail 60
             Write-Host "===== diagnostic engine stderr"; Get-Content "$run\diagnostic-stderr.txt" -Tail 120
@@ -465,6 +471,7 @@ jobs:
             ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.txt
             ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.jsonl
             ${{ runner.temp }}/orgtree-dioxus-installed-run/**/*.json
+            !${{ runner.temp }}/orgtree-dioxus-installed-run/**/secrets/**
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4

@@ -129,6 +129,15 @@ impl EngineOptions {
     }
 }
 
+/// Variables de conexión de libpq que el motor no hereda cuando usa el
+/// PostgreSQL empaquetado: su clúster se conecta solo con el passfile del
+/// custodio, y libpq le daría prioridad a cualquiera de estas.
+pub const LIBPQ_ENV: [&str; 19] = [
+    "PGPASSWORD", "PGPASSFILE", "PGUSER", "PGHOST", "PGHOSTADDR", "PGPORT", "PGDATABASE", "PGSERVICE",
+    "PGSERVICEFILE", "PGOPTIONS", "PGAPPNAME", "PGSSLMODE", "PGREQUIRESSL", "PGREQUIREAUTH", "PGCHANNELBINDING",
+    "PGCONNECT_TIMEOUT", "PGTARGETSESSIONATTRS", "PGLOADBALANCEHOSTS", "PGSYSCONFDIR",
+];
+
 #[cfg(windows)]
 const PYTHON_EXE: &str = "python.exe";
 #[cfg(not(windows))]
@@ -457,6 +466,12 @@ impl Engine {
         }
         if let Some(postgres) = &options.postgres {
             command.env("ORGTREE_PG_CUSTODIAN", &postgres.custodian).env("ORGTREE_P03_PG_BIN", &postgres.bin);
+            // libpq prefiere estas variables al passfile del custodio: un PGPASSWORD
+            // del sistema (los runners de GitHub traen PGPASSWORD=root) rompe la
+            // conexión al clúster propio con "password authentication failed".
+            for name in LIBPQ_ENV {
+                command.env_remove(name);
+            }
         }
         if options.bootstrap_postgres {
             command.env("ORGTREE_PG_BOOTSTRAP", "1");

@@ -197,10 +197,16 @@ fn postgres_y_bootstrap_llegan_al_motor_y_no_se_heredan() {
         let mut options = fake_options("pg-packaged");
         options.postgres = Some(PostgresRuntime::locate(&resources.join("engine")).unwrap());
         options.bootstrap_postgres = true;
+        // libpq preferiría estas al passfile del custodio: el motor empaquetado no las hereda.
+        std::env::set_var("PGPASSWORD", "root");
+        std::env::set_var("PGUSER", "postgres");
         let engine = Engine::start(&options).expect("ready");
+        std::env::remove_var("PGPASSWORD");
+        std::env::remove_var("PGUSER");
         let (_, body) = engine.get("/api/desktop/identity", Duration::from_secs(5)).unwrap();
         let value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(value["pg"]["ORGTREE_PG_BOOTSTRAP"], "1");
+        assert!(value["pg"]["PGPASSWORD"].is_null() && value["pg"]["PGUSER"].is_null(), "{body}");
         let postgres = options.postgres.as_ref().unwrap();
         assert_eq!(Path::new(value["pg"]["ORGTREE_PG_CUSTODIAN"].as_str().unwrap()), postgres.custodian);
         assert_eq!(Path::new(value["pg"]["ORGTREE_P03_PG_BIN"].as_str().unwrap()), postgres.bin);
