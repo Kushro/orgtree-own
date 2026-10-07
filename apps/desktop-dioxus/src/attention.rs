@@ -15,11 +15,11 @@
 //! - **preguntas** abiertas (`openAsks`), con la misma tarjeta que la bandeja.
 //!
 //! Cuando el elemento elegido se resuelve, la selección pasa al de abajo, o
-//! al de arriba (`nextSelection`). Fuera del recorte: el desk del agente a la
-//! derecha (`AgentDeskPanel`) y el resto del panel del ticket (historial,
-//! adjuntos, aceptación).
+//! al de arriba (`nextSelection`). El panel de un ticket es el del docket
+//! (#29), con "Open in docket". Fuera del recorte: el desk del agente a la
+//! derecha (`AgentDeskPanel`).
 
-use crate::inbox::{ask_mail_row, one_line, open_asks, MailPane, MailRowView};
+use crate::inbox::{ask_mail_row, open_asks, MailPane, MailRowView};
 use crate::org::Ctx;
 use dioxus::prelude::*;
 use orgtree_engine_client::{AskInfo, MailRow, WorkItem};
@@ -147,7 +147,7 @@ pub(crate) fn AttentionQueue() -> Element {
                         div { class: "mailer-read attn-mread", "data-attn-detail": "{detail}",
                             match current {
                                 None => rsx! { div { class: "dim pad mailer-none", if rows.is_empty() { "" } else { "Select an entry to see it." } } },
-                                Some(Entry { kind: Kind::Ticket(item), .. }) => rsx! { div { class: "attn-cell docket-modal", TicketPane { key: "{item.slug}", item } } },
+                                Some(Entry { kind: Kind::Ticket(item), .. }) => rsx! { div { class: "attn-cell docket-modal", crate::docket::DocketPane { key: "{item.slug}", row: item } } },
                                 Some(Entry { kind: Kind::Mail(m), key, .. }) => rsx! { MailPane { key: "{key}", unread: !retained_key(&live, &key), m, reply: true } },
                                 Some(Entry { kind: Kind::Question(ask), key, .. }) => rsx! { MailPane { key: "{key}", m: ask_mail_row(&ask), unread: true, ask } },
                             }
@@ -225,96 +225,5 @@ fn AttnCell(row: Entry, selected: bool, retained: bool) -> Element {
                 MailRowView { m: ask_mail_row(&ask), selected, unread: true, ask: true, onpick: pick }
             }
         },
-    }
-}
-
-/// Lo esencial de `DocketPane` para un ticket con bandera: el título, el
-/// estado, la descripción, la bandera con "Dismiss with no comment" y la
-/// respuesta al asignado.
-#[component]
-fn TicketPane(item: WorkItem) -> Element {
-    let ctx = use_context::<Ctx>();
-    // en el scope de la vista: la respuesta termina aunque el ticket deje la lista
-    let mut draft = use_hook(|| Signal::new_in_scope(String::new(), ctx.scope));
-    let mut busy = use_hook(|| Signal::new_in_scope(false, ctx.scope));
-    let owner = item.owner_node();
-    let flag = item.manual_attention.clone();
-    let by = flag.as_ref().and_then(|f| f.by.as_ref()).and_then(|b| b.get("node")).and_then(|n| n.as_str()).unwrap_or("@user").to_string();
-    let can_dismiss = item.attention_sources.iter().any(|s| s == "manual") || flag.is_some();
-    let dismiss_item = item.clone();
-    let reply_item = item.clone();
-    let mut send = move || {
-        let text = draft.peek().trim().to_string();
-        if text.is_empty() || *busy.peek() {
-            return;
-        }
-        busy.set(true);
-        draft.set(String::new());
-        let item = reply_item.clone();
-        ctx.spawn(async move {
-            if let Err(error) = ctx.reply_ticket(&item, &text).await {
-                let _ = draft.try_write().map(|mut d| *d = text);
-                ctx.toast(vec![format!("error: {error}")], None);
-            }
-            let _ = busy.try_write().map(|mut b| *b = false);
-        });
-    };
-    let mut send_key = send.clone();
-    rsx! {
-        div { class: "mailer-head docket-pane-head", "data-ticket": "{item.slug}",
-            b { "{item.title}" }
-            span { class: "spacer" }
-        }
-        div { class: "dim docket-pane-sub docket-pane-sub-attn",
-            span { class: "docket-status status-{item.status} attention", "Needs attention" }
-            " {item.slug}"
-            if let Some(owner) = owner.clone() {
-                " · Assigned to {owner}"
-            }
-        }
-        if let Some(objective) = item.objective.clone().filter(|o| !o.is_empty()) {
-            section { class: "docket-desc",
-                div { class: "docket-detail-section-head", h4 { class: "docket-detail-section-title dim docket-list-heading", "DESCRIPTION" } }
-                div { class: "docket-detail-section-body", div { class: "docket-desc-body", "{objective}" } }
-            }
-        }
-        if let Some(flag) = flag {
-            section { class: "docket-detail-section",
-                div { class: "docket-detail-section-head", h4 { class: "docket-detail-section-title dim", "MANUAL ATTENTION" } }
-                div { class: "docket-detail-section-body",
-                    div { class: "docket-attention-box",
-                        div { class: "docket-question-head docket-attention-head",
-                            span { "Manual attention from {by}" }
-                            if can_dismiss {
-                                button { r#type: "button", class: "badge docket-dismiss", title: "clear this manually-raised flag",
-                                    onclick: move |_| ctx.dismiss(dismiss_item.clone()),
-                                    "Dismiss with no comment"
-                                }
-                            }
-                        }
-                        div { class: "docket-attention-body", "{one_line(&flag.reason, 2000)}" }
-                    }
-                }
-            }
-        }
-        if owner.is_some() {
-            section { class: "docket-detail-section",
-                div { class: "docket-detail-section-head", h4 { class: "docket-detail-section-title dim", "REPLY" } }
-                div { class: "docket-detail-section-body",
-                    div { class: "mail-reply",
-                        textarea { rows: 2, value: "{draft}", placeholder: "reply to {owner.clone().unwrap_or_default()}…",
-                            oninput: move |e| draft.set(e.value()),
-                            onkeydown: move |e: KeyboardEvent| {
-                                if e.key() == Key::Enter && !e.modifiers().shift() {
-                                    e.prevent_default();
-                                    send_key();
-                                }
-                            },
-                        }
-                        button { class: "mail-reply-send", disabled: draft().trim().is_empty() || busy(), onclick: move |_| send(), "reply" }
-                    }
-                }
-            }
-        }
     }
 }

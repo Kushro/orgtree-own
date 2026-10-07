@@ -219,6 +219,9 @@ pub struct TreePayload {
     /// de toda la org, también de agentes que el árbol no trae.
     #[serde(default, deserialize_with = "crate::attention::lenient")]
     pub asks: Vec<crate::AskInfo>,
+    /// Docket (#29): el número del botón del docket en la barra de la org.
+    #[serde(default, deserialize_with = "crate::attention::lenient")]
+    pub work_items_summary: Option<crate::WorkSummary>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

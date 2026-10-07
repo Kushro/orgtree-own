@@ -100,7 +100,7 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (engine, home, org chart, inbox and attention, full desk, desk window and native integration in RSX)
+      - name: Smoke test (engine, home, org chart, inbox and attention, docket, full desk, desk window and native integration in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -113,6 +113,8 @@ jobs:
           # y simula los estados del turno (POST /api/fixture/turn-state).
           # Bandeja y atención (#28): POST /api/fixture/attention hace que el agente le
           # escriba al usuario, le pregunte y levante la bandera en dos tickets.
+          # Docket (#29): POST /api/fixture/docket siembra tickets por el ledger real y
+          # hace que los agentes cambien un estado, levanten la bandera o pregunten.
           ORGTREE_FIXTURE_LIVE: '1'
           ORGTREE_FIXTURE_MESSAGES: '1200'
         run: |
@@ -170,7 +172,7 @@ jobs:
             $after = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$after)
             $ci.dx = $after.L - $before.L; $ci.dy = $after.T - $before.T; $ci.at = "$($pt.X),$($pt.Y)"
           }
-          $deadline = (Get-Date).AddSeconds(420)
+          $deadline = (Get-Date).AddSeconds(540)
           $shots = @{}
           while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
             # la prueba deja un marcador y espera 3 s: capturas del inicio, del organigrama
@@ -178,7 +180,8 @@ jobs:
             # en cola por el límite de turnos, detenido) y de las dos ventanas
             # #28: la barra de tareas parpadeando (ventana minimizada), la cola tras el clic en
             # la notificación, el panel de un ticket con bandera y la bandeja
-            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'taskbar', 'notification-click', 'attention', 'inbox', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
+            # #29: el docket con el detalle de un ticket y con una bandera abierta desde la cola
+            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'taskbar', 'notification-click', 'attention', 'inbox', 'docket', 'docket-flag', 'desk', 'desk-content', 'desk-queued', 'desk-halted', 'popout') {
               if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
                 try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
               }
@@ -195,6 +198,18 @@ jobs:
                 # cerrar esas ventanas para que no tapen el resto de la prueba
                 (New-Object -ComObject Shell.Application).Windows() | Where-Object { try { $_.Document.Folder.Self.Path -like '*-fixture-files*' } catch { $false } } | ForEach-Object { $_.Quit() }
               } catch { $ci.explorer = "error: $_" }
+            }
+            # #29: guardar un artefacto lo deja en Descargas y abre su carpeta con el archivo seleccionado
+            if (-not $shots['docket-artifact'] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).docket-artifact")) {
+              $shots['docket-artifact'] = $true
+              Start-Sleep -Milliseconds 1500
+              try { Save-Screen 'docket-artifact' } catch { Write-Host "screenshot: $_" }
+              try {
+                $explorer = @((New-Object -ComObject Shell.Application).Windows() | ForEach-Object { try { $_.Document.Folder.Self.Path } catch {} })
+                $ci.docketExplorer = $explorer -join ' | '
+                $ci.docketRevealed = [bool]($explorer | Where-Object { $_ -and $_ -like '*\Downloads\Orgtree\spike-fixture\*' })
+                (New-Object -ComObject Shell.Application).Windows() | Where-Object { try { $_.Document.Folder.Self.Path -like '*\Downloads\Orgtree*' } catch { $false } } | ForEach-Object { $_.Quit() }
+              } catch { $ci.docketExplorer = "error: $_" }
             }
             if (-not $ci.native -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).native")) {
               $ci.native = $true
@@ -297,6 +312,54 @@ jobs:
             if ($at.empty -notlike 'Pending questions*') { $failures += "attention queue not empty at the end: $($at.rowsAfter -join ', ')" }
           }
           "### Inbox, questions and attention (#28, Dioxus)`n- notifications: $(($nlog | Where-Object { $_.type -eq 'notify' -and $_.decision -ne 'focused' } | ForEach-Object { "$($_.kind)=$($_.decision)" }) -join ', ')`n- taskbar: $(($flash | ForEach-Object { "$($_.pulse)$(if ($_.started) { ' (flash)' })" }) -join ', ')`n- click: $($at.click | ConvertTo-Json -Compress) -> $($at.clickOpened)`n- rows: $($at.rows -join ', ')`n- tickets: replied $($at.ticketReplied | ConvertTo-Json -Compress), dismissed $($at.ticketDismissed | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # #29: docket. Lista, casillas, filtros y totales sin archivados; detalle;
+          # comentar, bajar la bandera, responder la pregunta adjunta y asignar; y los
+          # cambios de los agentes (estado, bandera, pregunta) en vivo por el WebSocket.
+          $dk = $probe.docket
+          if (-not $dk) { $failures += 'the docket stage did not run' }
+          else {
+            $t = $dk.seed.tickets
+            if (-not $t.runtime) { $failures += "docket seed: $($dk.seed | ConvertTo-Json -Compress)" }
+            foreach ($check in 'opened', 'archivedHidden', 'backlogHidden', 'archivedShown', 'archivedHiddenAgain', 'backlogShown', 'refStays',
+                               'blockedLive', 'droppedLeft', 'droppedArchived', 'flagLive', 'bellGlow', 'attentionPaneFull', 'openedFromAttention',
+                               'glowGone', 'questionWaiting', 'questionGone', 'closed') {
+              if ($dk.$check -ne $true) { $failures += "docket.$check was $($dk.$check)" }
+            }
+            # totales sin archivados: lo activo es lo que se lista sin casillas, y mostrar el archivo no lo cambia
+            if ($dk.totals.active -ne @($dk.rows).Count -or $dk.totals.shown -ne @($dk.rows).Count -or $dk.totalsWithArchived.active -ne $dk.totals.active -or $dk.totalsWithArchived.shown -ne $dk.totals.shown -or -not ($dk.totals.archived -ge 1)) { $failures += "docket totals: $($dk.totals | ConvertTo-Json -Compress) / with archived $($dk.totalsWithArchived | ConvertTo-Json -Compress) / rows $(@($dk.rows).Count)" }
+            if ($dk.bell.active -ne $dk.totals.active -or $dk.bell.count -ne "$($dk.totals.active)") { $failures += "docket button: $($dk.bell | ConvertTo-Json -Compress)" }
+            # filtros por estado y por dueño, el arreglo por estado y el sub-ítem bajo su padre
+            if (@($dk.blockedRows | Where-Object { $_ -notlike '*:blocked' }).Count -or $dk.blockedRows -notcontains "$($t.certificado):blocked") { $failures += "status filter: $($dk.blockedRows -join ', ')" }
+            if (($dk.jefeRows -join ',') -ne $t.docs -or ($dk.unassignedRows -join ',') -ne $t.memoria) { $failures += "owner filter: jefe $($dk.jefeRows -join ', '), unassigned $($dk.unassignedRows -join ', ')" }
+            if ($dk.statusGroups -notcontains 'Blocked' -or $dk.statusGroups -notcontains 'In progress' -or $dk.statusGroups[-1] -ne "Backlogged $([char]0x2014) not yet approached") { $failures += "group by status: $($dk.statusGroups -join ', ')" }
+            if ($dk.subItemDepth -ne 1) { $failures += "sub-item depth: $($dk.subItemDepth)" }
+            # detalle: Markdown, decisiones, evidencias y artefactos con sus topes, holders e historial
+            $d = $dk.detail
+            if ($d.title -ne 'Empaquetar el runtime' -or $d.descBold -ne $true -or $d.descRef -ne $t.runtime) { $failures += "docket detail head: $($d.title) / bold $($d.descBold) / ref $($d.descRef)" }
+            if (@($d.decisions).Count -ne 2 -or $d.decisions[0] -notlike '*runtime embebido*' -or $d.decisionsSummary -ne "2 $([char]0xB7) append-only") { $failures += "decisions: $($d.decisions -join ' | ') / $($d.decisionsSummary)" }
+            if (@($d.evidence).Count -ne 2 -or $d.evidenceSummary -ne '2 of 50' -or $d.evidence[0] -notlike 'commit*6e53697*') { $failures += "evidence: $($d.evidence -join ' | ') / $($d.evidenceSummary)" }
+            if (($d.artifacts -join ',') -ne 'medicion.txt' -or $d.artifactSummary -ne '1 of 40') { $failures += "artifacts: $($d.artifacts -join ', ') / $($d.artifactSummary)" }
+            if (($d.holders -join ',') -ne 'jefe') { $failures += "earlier holders: $($d.holders -join ', ')" }
+            if ($d.historyFolded -ne $true -or $d.history -notcontains 'assign' -or $d.history -notcontains 'decision' -or $d.history -notcontains 'evidence' -or $d.historyAssign -notlike '*from: jefe*to: worker*') { $failures += "history: $($d.history -join ', ') / $($d.historyAssign)" }
+            # un artefacto se guarda en Descargas y se revela; nunca se abre
+            if ($dk.artifactToast -notlike 'Shown in folder:*medicion.txt' -or $dk.artifactFile.text -notlike 'runtime 62.8 MB*' -or $ci.docketRevealed -ne $true) { $failures += "artifact: $($dk.artifactToast) / $($dk.artifactFile | ConvertTo-Json -Compress) / explorer $($ci.docketExplorer)" }
+            # comentar
+            if ($dk.replyLabel -notlike 'Reply to jefe*' -or $dk.commentToast -ne 'sent to jefe') { $failures += "comment: $($dk.replyLabel) / $($dk.commentToast)" }
+            # cambios de los agentes en vivo: blocked con su motivo y dropped que archiva
+            if ($dk.blockedReason -notlike '*7-Zip*' -or -not ($dk.liveFrames -ge 1)) { $failures += "live blocked: $($dk.blockedReason), frames $($dk.liveFrames)" }
+            if ($dk.droppedWhy -notlike '*docs/spikes*') { $failures += "dropped reason: $($dk.droppedWhy)" }
+            # bandera: levantada por el agente, abierta desde la cola de atención y bajada por el usuario
+            if ($dk.flagReason -notlike '*62,8 MB*' -or $dk.dismissToast -notlike '*status: blocked' -or $dk.dismissBlocked -notlike '*attention flag dismissed by the user*') { $failures += "flag: $($dk.flagReason) / $($dk.dismissToast) / $($dk.dismissBlocked)" }
+            # pregunta adjunta, respondida desde el panel
+            if ($dk.questionText -notlike '*Cierro este ticket*' -or $dk.answerToast -notlike "*resolved worker*") { $failures += "attached question: $($dk.questionText) / $($dk.answerToast)" }
+            # asignar con Staff… (sin dueño: se contrata en el primer nivel)
+            $mem = $dk.engine.items.($t.memoria)
+            if ($dk.staffDisclosure -notlike 'Assignee unavailable*' -or $dk.staffToast -notlike 'Staffed*' -or -not $dk.staffedOwner -or $mem.owner -ne $dk.staffedOwner -or $mem.status -ne 'open') { $failures += "staff: $($dk.staffDisclosure) / $($dk.staffToast) / $($dk.staffedOwner) / engine $($mem | ConvertTo-Json -Compress)" }
+            # lo que dice el motor al final
+            $st = $dk.engine.items
+            if ($st.($t.runtime).status -ne 'blocked' -or $st.($t.runtime).flagged -ne $false -or $st.($t.lzma).blocked_reason -ne 'El runner no tiene 7-Zip.' -or $st.($t.docs).status -ne 'dropped' -or $st.($t.docs).archived -ne $true) { $failures += "engine state: $($st | ConvertTo-Json -Compress)" }
+          }
+          "### Docket (#29, Dioxus)`n- rows: $($dk.rows -join ', ')`n- totals: $($dk.totals.text) (with archived: $($dk.totalsWithArchived.text))`n- filters: blocked $($dk.blockedRows -join ', ') / jefe $($dk.jefeRows -join ', ') / unassigned $($dk.unassignedRows -join ', ')`n- detail: $($dk.detail | ConvertTo-Json -Compress)`n- actions: $($dk.commentToast) / $($dk.dismissToast) / $($dk.answerToast) / $($dk.staffToast)`n- explorer: $($ci.docketExplorer)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           # #12: desk en RSX
           $desk = $probe.desk
           foreach ($check in 'opened', 'toolShown', 'markdownBold', 'markdownList', 'injectionBlocked') {
@@ -391,7 +454,7 @@ jobs:
             try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
           }
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Home window, org chart, inbox and attention, full desk, desk window and native integration in RSX verified in WebView2"
+          Write-Host "Home window, org chart, inbox and attention, docket, full desk, desk window and native integration in RSX verified in WebView2"
 
       # #24: el instalador generado, instalado en silencio en una carpeta descartable
       # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y

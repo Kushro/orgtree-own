@@ -3,6 +3,7 @@
 
 mod attention;
 mod desk;
+mod docket;
 mod home;
 mod icons;
 mod inbox;

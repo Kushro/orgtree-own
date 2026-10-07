@@ -189,6 +189,12 @@ pub(crate) struct Ctx {
     pub(crate) inbox_open: Signal<bool>,
     pub(crate) inbox_sel: Signal<Option<String>>,
     pub(crate) attn_sel: Signal<Option<String>>,
+    // Docket (#29).
+    pub(crate) docket_open: Signal<bool>,
+    pub(crate) docket_sel: Signal<Option<String>>,
+    /// Las dos casillas del docket: el archivo y el backlog se piden solo con ellas.
+    pub(crate) docket_archived: Signal<bool>,
+    pub(crate) docket_backlog: Signal<bool>,
 }
 
 impl Ctx {
@@ -196,7 +202,7 @@ impl Ctx {
         dioxus::core::Runtime::current().spawn(self.scope, task);
     }
 
-    fn ids(self) -> (Client, String) {
+    pub(crate) fn ids(self) -> (Client, String) {
         (self.client.peek().clone(), self.slug.peek().clone())
     }
 
@@ -304,14 +310,79 @@ impl Ctx {
         });
     }
 
-    /// La respuesta a un ticket (`replyWorkItem`): mail al asignado; la
-    /// bandera baja sin cambiar el estado.
-    pub(crate) async fn reply_ticket(self, item: &WorkItem, text: &str) -> Result<(), String> {
+    /// La respuesta a un ticket (`replyWorkItem`): mail al dueño (o al
+    /// participante elegido); la bandera baja sin cambiar el estado. El aviso
+    /// dice lo que hizo el motor, no lo que se pidió (`notice`, `deferred`).
+    pub(crate) async fn reply_ticket_to(self, item: &str, text: &str, to: Option<String>, notice: bool) -> Result<(), String> {
         let (client, slug) = self.ids();
-        let result = client.reply_work_item(&slug, &item.slug, text).await.map_err(|e| e.to_string())?;
-        let to = result.get("to").and_then(|v| v.as_str()).unwrap_or("the assignee").to_string();
-        self.toast(vec![format!("sent to {to}")], None);
+        let reply = orgtree_engine_client::WorkReply { body: text.to_string(), to: to.clone(), notice };
+        let result = client.reply_work_item_to(&slug, item, &reply).await.map_err(|e| e.to_string())?;
+        let to = result.to.or(to).unwrap_or_else(|| "the assignee".to_string());
+        let mut lines = vec![if result.deferred == Some(true) {
+            format!("{to} is archived — the reply waits for rehire")
+        } else if result.notice == Some(true) {
+            format!("sent to {to} as a notice")
+        } else {
+            format!("sent to {to}")
+        }];
+        lines.extend(result.warnings);
+        self.toast(lines, None);
         Ok(())
+    }
+
+    /// `GET …/work-items/{wid}`: el ticket entero, para su panel.
+    pub(crate) async fn work_item(self, item: &str) -> Result<WorkItem, String> {
+        let (client, slug) = self.ids();
+        client.work_item(&slug, item).await.map_err(|e| e.to_string())
+    }
+
+    /// Relee solo la lista del docket (una casilla cambió). El resto llega
+    /// con el árbol, por el WebSocket.
+    pub(crate) fn reload_work(mut self) {
+        let (client, slug) = self.ids();
+        let (archived, backlog) = (*self.docket_archived.peek(), *self.docket_backlog.peek());
+        self.spawn(async move {
+            if let Ok(items) = client.work_items_view(&slug, archived, backlog).await {
+                // otra casilla pudo cambiar mientras tanto: esa relectura gana
+                if (*self.docket_archived.peek(), *self.docket_backlog.peek()) == (archived, backlog) {
+                    let _ = self.work.try_write().map(|mut w| *w = Some(items));
+                }
+            }
+        });
+    }
+
+    /// Abre el docket, con un ticket elegido si se pide (una referencia, la
+    /// cola de atención). Si el ticket está en un grupo cerrado, prende su
+    /// casilla, como `goToItem`.
+    pub(crate) fn open_docket(mut self, item: Option<String>) {
+        if let Some(slug) = &item {
+            let place = self.work.peek().as_ref().and_then(|w| {
+                w.extra.get("references").and_then(|r| r.as_array()).and_then(|refs| {
+                    refs.iter().find(|r| r.get("slug").and_then(|s| s.as_str()) == Some(slug.as_str())).map(|r| {
+                        (r.get("archived").and_then(|a| a.as_bool()).unwrap_or(false), r.get("status").and_then(|s| s.as_str()) == Some("backlogged"))
+                    })
+                })
+            });
+            let mut reload = false;
+            if place.is_some_and(|p| p.0) && !*self.docket_archived.peek() {
+                self.docket_archived.set(true);
+                reload = true;
+            } else if place.is_some_and(|p| !p.0 && p.1) && !*self.docket_backlog.peek() {
+                self.docket_backlog.set(true);
+                reload = true;
+            }
+            if reload {
+                self.reload_work();
+            }
+        }
+        if item.is_some() || !*self.docket_open.peek() {
+            self.docket_sel.set(item);
+        }
+        self.docket_open.set(true);
+    }
+
+    pub(crate) fn close_docket(mut self) {
+        self.docket_open.set(false);
     }
 
     pub(crate) fn toast(mut self, lines: Vec<String>, undo: Option<Undo>) {
@@ -359,7 +430,8 @@ impl Ctx {
 async fn load_tree(client: &Client, slug: &str, ctx: Ctx, mut sync: Signal<Sync>) {
     let (mut tree, mut inbox, mut work) = (ctx.tree, ctx.inbox, ctx.work);
     let (mut read_here, mut dismissing, mut submitted) = (ctx.read_here, ctx.dismissing, ctx.submitted);
-    let (result, mail, items) = tokio::join!(client.tree(slug), client.inbox(slug), client.work_items(slug));
+    let (archived, backlog) = (*ctx.docket_archived.peek(), *ctx.docket_backlog.peek());
+    let (result, mail, items) = tokio::join!(client.tree(slug), client.inbox(slug), client.work_items_view(slug, archived, backlog));
     let result = result.map_err(|e| e.to_string());
     sync.write().loads += 1;
     if result.is_ok() || !tree.peek().as_ref().is_some_and(|t| t.is_ok()) {
@@ -418,6 +490,10 @@ pub fn OrgView(slug: String) -> Element {
         inbox_open: use_signal(|| false),
         inbox_sel: use_signal(|| None),
         attn_sel: use_signal(|| None),
+        docket_open: use_signal(|| false),
+        docket_sel: use_signal(|| None),
+        docket_archived: use_signal(|| false),
+        docket_backlog: use_signal(|| false),
     };
     use_context_provider(|| ctx);
     let mut tz = ctx.tz;
@@ -444,16 +520,26 @@ pub fn OrgView(slug: String) -> Element {
         let mut eval = document::eval(
             "if (window.__dxAttnLinks) document.removeEventListener('click', window.__dxAttnLinks, true); \
              window.__dxAttnLinks = e => { \
-               const a = e.target && e.target.closest && e.target.closest('.dx-inbox a[href], .dx-attn a[href]'); \
+               const a = e.target && e.target.closest && e.target.closest('.dx-inbox a[href], .dx-attn a[href], .dx-docket a[href]'); \
                if (!a) return; \
                e.preventDefault(); \
                e.stopPropagation(); \
-               dioxus.send(a.getAttribute('data-local-path') || ('link:' + a.getAttribute('href'))); \
+               const item = a.getAttribute('data-ref-item'), agent = a.getAttribute('data-ref-agent'); \
+               dioxus.send(item ? 'ref-item:' + item : agent ? 'ref-agent:' + agent : a.getAttribute('data-local-path') || ('link:' + a.getAttribute('href'))); \
              }; \
              document.addEventListener('click', window.__dxAttnLinks, true); \
              await new Promise(() => {});",
         );
         while let Ok(target) = eval.recv::<String>().await {
+            // una referencia del docket (#29): un ticket se abre en el docket; un agente, en su desk
+            if let Some(item) = target.strip_prefix("ref-item:") {
+                ctx.open_docket(Some(item.to_string()));
+                continue;
+            }
+            if let Some(node) = target.strip_prefix("ref-agent:") {
+                route.set(Route::Desk { org: ctx.slug.peek().clone(), node: node.to_string() });
+                continue;
+            }
             match target.strip_prefix("link:") {
                 Some(href) => ctx.toast(vec![format!("Link: {href}")], None),
                 None => match crate::reveal::reveal(&target) {
@@ -541,6 +627,7 @@ pub fn OrgView(slug: String) -> Element {
                     }
                     span { style: "flex: 1" }
                     ViewToggle { attention: attention_count }
+                    crate::docket::DocketBell {}
                     crate::inbox::InboxBell {}
                 }
                 crate::native::WindowControls {}
@@ -548,6 +635,9 @@ pub fn OrgView(slug: String) -> Element {
             div { class: "dx-org-body", {body} }
             if (ctx.inbox_open)() {
                 crate::inbox::InboxPanel {}
+            }
+            if (ctx.docket_open)() {
+                crate::docket::DocketPanel {}
             }
             Toasts {}
         }

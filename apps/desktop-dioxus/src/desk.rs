@@ -103,41 +103,74 @@ impl MailView {
 /// (`C:\…`) queda inerte, con la ruta en `data-local-path`: un clic lo revela
 /// (`revealFileFromEvent`), nunca navega ni lo abre.
 pub(crate) fn markdown(text: &str) -> String {
+    markdown_with(text, None)
+}
+
+/// `markdown` con las referencias del docket (#29): `linkify` recibe un texto
+/// de la prosa (fuera de enlaces y bloques de código) y, si nombra tickets o
+/// agentes, devuelve el HTML con sus enlaces (`refmd.tsx`, `linkifyRefs`).
+pub(crate) fn markdown_with(text: &str, linkify: Option<&dyn Fn(&str) -> Option<String>>) -> String {
     use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag, TagEnd};
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
     let mut local = false;
+    let (mut in_link, mut in_block) = (0usize, false);
     let text = crate::reveal::normalize_links(text);
     let events = Parser::new_ext(&text, options).map(|event| match event {
-        Event::Start(Tag::Link { ref dest_url, .. }) => match crate::reveal::local_path(dest_url) {
-            Some(native) => {
-                local = true;
-                let native = attr(&native);
-                Event::Html(CowStr::from(format!(
-                    "<a href=\"#\" class=\"local-file\" data-local-path=\"{native}\" title=\"Show in folder — {native}\">"
-                )))
+        Event::Start(Tag::Link { ref dest_url, .. }) => {
+            in_link += 1;
+            match crate::reveal::local_path(dest_url) {
+                Some(native) => {
+                    local = true;
+                    let native = attr(&native);
+                    Event::Html(CowStr::from(format!(
+                        "<a href=\"#\" class=\"local-file\" data-local-path=\"{native}\" title=\"Show in folder — {native}\">"
+                    )))
+                }
+                None => event,
             }
+        }
+        Event::End(TagEnd::Link) => {
+            in_link = in_link.saturating_sub(1);
+            if local {
+                local = false;
+                Event::Html(CowStr::from("</a>"))
+            } else {
+                event
+            }
+        }
+        Event::Start(Tag::CodeBlock(_)) => {
+            in_block = true;
+            event
+        }
+        Event::End(TagEnd::CodeBlock) => {
+            in_block = false;
+            event
+        }
+        Event::Text(ref t) if in_link == 0 && !in_block => match linkify.and_then(|f| f(t)) {
+            Some(linked) => Event::Html(CowStr::from(linked)),
             None => event,
         },
-        Event::End(TagEnd::Link) if local => {
-            local = false;
-            Event::Html(CowStr::from("</a>"))
-        }
+        Event::Code(ref t) if in_link == 0 => match linkify.and_then(|f| f(t)) {
+            Some(linked) => Event::Html(CowStr::from(format!("<code>{linked}</code>"))),
+            None => event,
+        },
         other => other,
     });
     let mut out = String::new();
     html::push_html(&mut out, events);
     ammonia::Builder::default()
         .link_rel(Some("noopener noreferrer"))
-        .add_tag_attributes("a", &["class", "data-local-path"])
+        .add_tag_attributes("a", &["class", "data-local-path", "data-ref-item", "data-ref-agent"])
+        .add_tag_attributes("span", &["class"])
         .clean(&out)
         .to_string()
 }
 
 /// Escapa un valor para un atributo HTML.
-fn attr(text: &str) -> String {
+pub(crate) fn attr(text: &str) -> String {
     text.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
@@ -219,7 +252,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 }
 
 /// Segundos UTC de un ISO 8601 (`2026-10-07T12:00:00.123Z`, `…+00:00`).
-fn parse_iso(at: &str) -> Option<i64> {
+pub(crate) fn parse_iso(at: &str) -> Option<i64> {
     let num = |range: std::ops::Range<usize>| at.get(range)?.parse::<i64>().ok();
     let (y, mo, d, h, mi, s) = (num(0..4)?, num(5..7)?, num(8..10)?, num(11..13)?, num(14..16)?, num(17..19)?);
     let mut rest = &at[19..];

@@ -279,6 +279,123 @@ def _install_attention() -> None:
     api.app.router.routes.insert(0, api.app.router.routes.pop())
 
 
+#: Los tickets que siembra ``POST /api/fixture/docket`` ``{kind: "seed"}`` (#29).
+DOCKET = {
+    "runtime": ("Empaquetar el runtime", "in_progress"),
+    "lzma": ("Comprimir con LZMA", "open"),
+    "certificado": ("Esperar el certificado", "blocked"),
+    "docs": ("Documentar el spike", "open"),
+    "memoria": ("Medir la memoria", "backlogged"),
+    "win10": ("Probar en Windows 10", "in_progress"),
+}
+DOCKET_BLOCKED = "Falta el certificado de firma del proveedor."
+DOCKET_DROPPED = "Windows 10 quedó fuera del soporte del spike."
+
+
+def _install_docket() -> None:
+    """`POST /api/fixture/docket` ``{kind, ...}`` (solo en este fixture, #29).
+
+    Todo pasa por el ledger real, como un agente con la herramienta del docket
+    (``work_create``, ``work_update``, ``work_assign``, ``work_decision``,
+    ``work_evidence``, ``work_artifact_record`` y ``ask_user``), así que la
+    lista, el detalle y el WebSocket ven lo mismo que con agentes de verdad:
+
+    - ``seed``: contrata a ``jefe`` y siembra seis tickets con estados, dueños,
+      un sub-ítem, decisiones, evidencias, un artefacto, historial y un holder
+      anterior (``runtime`` pasa de ``jefe`` a ``worker``). Uno sin dueño queda
+      en el backlog (para "Staff…") y otro termina ``dropped`` (se archiva en
+      el acto). Devuelve los slugs.
+    - ``status`` ``{slug, status, reason?}``: el dueño cambia el estado;
+    - ``flag`` ``{slug, reason}``: el dueño levanta la bandera de atención;
+    - ``question`` ``{slug}``: ``worker`` adjunta una pregunta al ticket.
+    """
+    from fastapi import HTTPException
+    from orgtree import api, store, workevidence
+    from orgtree.ledger import USER
+
+    def slug_of(result: dict) -> str:
+        return str(result.get("slug") or (result.get("item") or {}).get("slug"))
+
+    def owner_of(org, slug: str) -> str:
+        item, _ = org._work_find(slug)
+        return str((item.get("owner") or {}).get("node") or AGENT)
+
+    def seed(org) -> dict:
+        if "jefe" not in org.nodes:
+            org.hire(USER, None, "haiku", 0, "jefe")
+        slugs: dict[str, str] = {}
+
+        def create(key: str, actor: str, owner, **extra) -> str:
+            title, status = DOCKET[key]
+            start = "open" if status == "dropped" else status
+            result = org.work_create(actor, title, objective=(
+                f"**Problema:** {title.lower()} frena la pre-release.\n\n"
+                f"**Solución:** hacerlo en `{title.lower().replace(' ', '-')}` y "
+                "registrar lo hecho en el docket."), owner=owner, status=start,
+                done_so_far=["revisé el alcance"], working_on_next=["empezar"], **extra)
+            slugs[key] = slug_of(result)
+            return slugs[key]
+
+        runtime = create("runtime", "jefe", "jefe")
+        # un holder anterior: el ticket pasa de jefe a worker
+        org.work_assign(USER, runtime, AGENT, notify=False)
+        org.work_update(AGENT, runtime, done_so_far=["armé el runtime embebido", "medí 62,8 MB"],
+                        working_on_next=["comprimir con LZMA"], status="in_progress")
+        org.work_decision(AGENT, runtime, "Se usa el runtime embebido de Python 3.13, no el del sistema.")
+        org.work_decision(AGENT, runtime, "LZMA sólido para el instalador: tarda 90 s pero ahorra 40 MB.")
+        org.work_evidence(AGENT, runtime, "commit", "6e53697", note="runtime armado")
+        org.work_evidence(AGENT, runtime, "log", "ci/runtime.log", note="digest verificado")
+        # un artefacto: bytes guardados como lo hace la API, y su registro
+        adir = Path(api._work_artifact_dir(ORG, runtime))
+        adir.mkdir(parents=True, exist_ok=True)
+        src = adir / "fuente-medicion.txt"
+        src.write_text("runtime 62.8 MB\npostgresql 141.3 MB\n", encoding="utf-8")
+        sha, size = workevidence.file_digest(str(src))
+        stored = f"{sha.split(':', 1)[1][:12]}-medicion.txt"
+        src.rename(adir / stored)
+        org.work_artifact_record(AGENT, runtime, "medicion.txt", size, stored, sha)
+        create("lzma", AGENT, AGENT, parent=runtime)
+        create("certificado", AGENT, AGENT, blocked_reason=DOCKET_BLOCKED)
+        create("docs", "jefe", "jefe")
+        create("memoria", USER, None)
+        win10 = create("win10", AGENT, AGENT)
+        org.work_update(AGENT, win10, done_so_far=["probé el instalador"], working_on_next=["nada más"],
+                        status="dropped", dropped_reason=DOCKET_DROPPED)
+        return {"tickets": slugs}
+
+    def run(body: dict) -> dict:
+        kind = str(body.get("kind") or "")
+        with store.write_org(ORG) as org:
+            if kind == "seed":
+                result = seed(org)
+            elif kind == "status":
+                slug, status = str(body["slug"]), str(body["status"])
+                reason = body.get("reason")
+                org.work_update(owner_of(org, slug), slug, done_so_far=["avancé"], working_on_next=["seguir"],
+                                status=status,
+                                blocked_reason=reason if status == "blocked" else None,
+                                dropped_reason=reason if status == "dropped" else None)
+                result = {"slug": slug, "status": status}
+            elif kind == "flag":
+                slug = str(body["slug"])
+                org.work_update(owner_of(org, slug), slug, done_so_far=["avancé"], working_on_next=["esperar"],
+                                attention=True, attention_reason=str(body.get("reason") or "¿Seguimos?"))
+                result = {"slug": slug, "flagged": True}
+            elif kind == "question":
+                slug = str(body["slug"])
+                org.ask_user(AGENT, questions=[{"question": "¿Cierro este ticket?", "header": "Cierre",
+                                                "options": [{"label": "Sí"}, {"label": "No"}]}],
+                             work_item=slug)
+                result = {"slug": slug, "question": True}
+            else:
+                raise HTTPException(422, "kind must be seed, status, flag or question")
+            store.save_org(org)
+        return result
+
+    api.app.add_api_route("/api/fixture/docket", run, methods=["POST"])
+    api.app.router.routes.insert(0, api.app.router.routes.pop())
+
+
 def _live_frames() -> None:
     from orgtree import supervisor
     time.sleep(8)  # supervisor.stream se conecta al hub del WebSocket al arrancar
@@ -297,6 +414,7 @@ def seeded_load_app():
     _stub_providers()
     _install_turn_state()
     _install_attention()
+    _install_docket()
     _seed()
     if os.environ.get("ORGTREE_FIXTURE_LIVE") == "1":
         threading.Thread(target=_live_frames, name="fixture-live", daemon=True).start()

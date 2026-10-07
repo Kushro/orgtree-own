@@ -6,9 +6,11 @@
 //! motor. El token nunca llega al webview.
 
 mod attention;
+mod docket;
 mod types;
 
 pub use attention::*;
+pub use docket::*;
 pub use types::*;
 
 use futures_util::{SinkExt, StreamExt};
@@ -267,7 +269,69 @@ impl Client {
     /// `GET /api/orgs/{slug}/work-items-view` — `getWorkItems` (api.ts) sin
     /// caché condicional: la respuesta entera.
     pub async fn work_items(&self, slug: &str) -> Result<WorkItemsPayload, ClientError> {
-        self.get(&format!("/api/orgs/{}/work-items-view", encode(slug))).await
+        self.work_items_view(slug, false, false).await
+    }
+
+    /// `GET /api/orgs/{slug}/work-items-view[?archived=1][&backlogged=1]` —
+    /// `getWorkItems(slug, archived, backlogged)` (api.ts). Los dos grupos se
+    /// piden solo con su casilla (`include_archived`): sin ella, la lista y
+    /// sus totales no cuentan lo archivado.
+    pub async fn work_items_view(&self, slug: &str, archived: bool, backlogged: bool) -> Result<WorkItemsPayload, ClientError> {
+        let flags: Vec<&str> = [(archived, "archived=1"), (backlogged, "backlogged=1")].into_iter().filter(|f| f.0).map(|f| f.1).collect();
+        let query = if flags.is_empty() { String::new() } else { format!("?{}", flags.join("&")) };
+        self.get(&format!("/api/orgs/{}/work-items-view{query}", encode(slug))).await
+    }
+
+    /// `GET /api/orgs/{slug}/work-items/{wid}` — `getWorkItem` (api.ts): el
+    /// ticket entero (decisiones, evidencias, artefactos, historial y holders),
+    /// que la lista liviana no trae.
+    pub async fn work_item(&self, slug: &str, item: &str) -> Result<WorkItem, ClientError> {
+        let payload: WorkItemPayload = self.get(&format!("/api/orgs/{}/work-items/{}", encode(slug), encode(item))).await?;
+        Ok(payload.item)
+    }
+
+    /// `POST /api/orgs/{slug}/work-items/{wid}/reply` `{body, to?, notice?}` —
+    /// `replyWorkItem` (api.ts): un comentario al dueño o a un participante.
+    pub async fn reply_work_item_to(&self, slug: &str, item: &str, reply: &WorkReply) -> Result<WorkReplyResult, ClientError> {
+        let path = format!("/api/orgs/{}/work-items/{}/reply", encode(slug), encode(item));
+        let body = serde_json::to_value(reply).expect("WorkReply siempre se serializa");
+        self.post(&path, &body).await
+    }
+
+    /// `GET /api/orgs/{slug}/work-items/{wid}/quick-staff` — la vista previa
+    /// de "Staff…" (`quickStaffPath` en quickstaff.ts) para un ticket del backlog.
+    pub async fn quick_staff_preview(&self, slug: &str, item: &str) -> Result<QuickStaffPreview, ClientError> {
+        self.get(&format!("/api/orgs/{}/work-items/{}/quick-staff", encode(slug), encode(item))).await
+    }
+
+    /// `POST /api/orgs/{slug}/work-items/{wid}/quick-staff` — `quickStaffEntry`
+    /// (quickstaff.ts): asigna el ticket del backlog (o se lo pide al asignado).
+    pub async fn quick_staff(&self, slug: &str, item: &str, selection: &QuickStaffSelection) -> Result<QuickStaffResult, ClientError> {
+        let path = format!("/api/orgs/{}/work-items/{}/quick-staff", encode(slug), encode(item));
+        let body = serde_json::to_value(selection).expect("QuickStaffSelection siempre se serializa");
+        self.post(&path, &body).await
+    }
+
+    /// `GET /api/orgs/{slug}/work-items/{wid}/artifacts/{aid}` —
+    /// `workItemArtifactUrl` (api.ts): los bytes de un artefacto.
+    pub async fn artifact_bytes(&self, slug: &str, item: &str, artifact: &str) -> Result<Vec<u8>, ClientError> {
+        self.bytes(&format!("/api/orgs/{}/work-items/{}/artifacts/{}", encode(slug), encode(item), encode(artifact))).await
+    }
+
+    /// `GET /api/orgs/{slug}/work-items/{wid}/attachments/{aid}` —
+    /// `workItemAttachmentUrl` (api.ts): los bytes de un adjunto del ticket.
+    pub async fn attachment_bytes(&self, slug: &str, item: &str, attachment: &str) -> Result<Vec<u8>, ClientError> {
+        self.bytes(&format!("/api/orgs/{}/work-items/{}/attachments/{}", encode(slug), encode(item), encode(attachment))).await
+    }
+
+    /// Un `GET` que devuelve el cuerpo crudo (una descarga).
+    pub async fn bytes(&self, path: &str) -> Result<Vec<u8>, ClientError> {
+        let response = self.http.get(format!("{}{path}", self.origin)).send().await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response.bytes().await?.to_vec());
+        }
+        self.json::<serde_json::Value>(response).await.map(|_| Vec::new())
     }
 
     /// `POST /api/orgs/{slug}/work-items/{wid}/dismiss-attention` `{set_rev}` —
@@ -281,9 +345,8 @@ impl Client {
     /// `POST /api/orgs/{slug}/work-items/{wid}/reply` `{body}` — `replyWorkItem`
     /// (api.ts): mail al asignado. Una respuesta del usuario baja la bandera
     /// sin cambiar el estado del ticket.
-    pub async fn reply_work_item(&self, slug: &str, item: &str, body: &str) -> Result<serde_json::Value, ClientError> {
-        let path = format!("/api/orgs/{}/work-items/{}/reply", encode(slug), encode(item));
-        self.post(&path, &serde_json::json!({ "body": body })).await
+    pub async fn reply_work_item(&self, slug: &str, item: &str, body: &str) -> Result<WorkReplyResult, ClientError> {
+        self.reply_work_item_to(slug, item, &WorkReply { body: body.to_string(), ..WorkReply::default() }).await
     }
 
     /// `GET /api/desktop/notifications` con todas sus páginas, como

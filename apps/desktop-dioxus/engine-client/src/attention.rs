@@ -189,6 +189,61 @@ pub struct WorkItem {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub rev: Option<u64>,
+    // Docket (#29): el resto de lo que lista y muestra el docket.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub reviewer: Option<Value>,
+    #[serde(default)]
+    pub participants: Vec<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub reply_recipients: Option<Vec<crate::Recipient>>,
+    #[serde(default)]
+    pub created_by: Option<Value>,
+    #[serde(default)]
+    pub last_updater: Option<Value>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub done_so_far: Vec<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub working_on_next: Vec<String>,
+    /// La última actualización del docket: la edad de la fila y la regla del archivo.
+    #[serde(default)]
+    pub docket_at: Option<String>,
+    #[serde(default)]
+    pub status_at: Option<String>,
+    #[serde(default)]
+    pub legacy_status: Option<String>,
+    #[serde(default)]
+    pub waiting_reason: Option<String>,
+    #[serde(default)]
+    pub dropped_reason: Option<String>,
+    #[serde(default)]
+    pub owner_state: Option<String>,
+    /// El ticket padre (sub-ítems), o `None` en el primer nivel.
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub objective_notice: Option<Value>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub questions: Vec<crate::WorkQuestion>,
+    /// Solo en el detalle (`GET …/work-items/{wid}`): la lista trae filas
+    /// livianas (`view: list`) y el detalle se pide al abrir el ticket.
+    #[serde(default)]
+    pub view: Option<String>,
+    #[serde(default)]
+    pub view_revision: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub scope: Vec<crate::ScopeRow>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub evidence: Vec<crate::Evidence>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub artifacts: Vec<crate::Artifact>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub attachments: Vec<crate::ItemAttachment>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub holders: Vec<crate::Holder>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub history: Vec<Value>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -213,6 +268,11 @@ pub struct WorkItemsPayload {
     pub archived: Option<Vec<WorkItem>>,
     #[serde(default)]
     pub backlogged: Option<Vec<WorkItem>>,
+    /// Docket (#29): los totales del docket entero.
+    #[serde(default, deserialize_with = "lenient")]
+    pub counts: Option<crate::WorkCounts>,
+    #[serde(default)]
+    pub revision: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

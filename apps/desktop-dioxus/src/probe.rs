@@ -17,6 +17,11 @@
 //!   la cola de atención (responder y descartar preguntas, responder y
 //!   descartar banderas) y la bandeja (leer, archivar, responder y "Mark all
 //!   read");
+//! - #29, docket: el fixture siembra tickets por el ledger real; la lista con
+//!   las casillas, los filtros y los totales sin archivados; el detalle
+//!   (decisiones, evidencias, artefactos, holders e historial); comentar,
+//!   bajar la bandera, responder la pregunta adjunta y asignar con "Staff…";
+//!   y los cambios de los agentes (estado, bandera, pregunta) en vivo;
 //! - #12, desk en RSX: la conversación, la herramienta, el Markdown sanitizado,
 //!   el texto en vivo, la carga de páginas anteriores hasta el primer mensaje y
 //!   los cuadros de un scroll de punta a punta;
@@ -405,6 +410,201 @@ if (home.agentShown) {
   await waitFor(() => document.querySelector('.dx-agent[data-node="worker"]'), 10000);
 }
 
+// #29: docket. El fixture siembra tickets por el ledger real, como agentes con
+// la herramienta del docket; el usuario los lee, filtra, comenta, descarta la
+// bandera, responde la pregunta adjunta y asigna con "Staff…". Los cambios de
+// los agentes (estado, bandera, pregunta) llegan solos por el WebSocket.
+const dk = r.docket = {};
+if (home.agentShown) {
+  const call = async message => { dioxus.send(message); return await dioxus.recv() };
+  const orgView = () => document.querySelector('.dx-org-view');
+  const toasts = () => [...document.querySelectorAll('.dx-org-view .toast')].map(t => t.textContent);
+  const toastWith = text => waitFor(() => toasts().find(t => t.includes(text)), 15000);
+  const panel = () => document.querySelector('.dx-docket');
+  const rowEls = () => [...document.querySelectorAll('.dx-docket .dx-docket-list .docket-row')];
+  const rows = () => rowEls().map(e => e.getAttribute('data-ticket'));
+  const rowEl = slug => document.querySelector(`.dx-docket .docket-row[data-ticket="${slug}"]`);
+  const read = () => document.querySelector('.dx-docket .dx-docket-read');
+  const totals = () => { const t = document.querySelector('.dx-docket .dx-docket-totals'); return t ? { text: t.textContent, active: Number(t.dataset.active), attention: Number(t.dataset.attention), shown: Number(t.dataset.shown), archived: Number(t.dataset.archived) } : null };
+  const frames = () => Number(orgView() ? orgView().dataset.frames : NaN);
+  const choose = (sel, value) => { const el = document.querySelector(sel); if (el) setValue(el, value, 'change'); return !!el };
+  const tick = (sel, on) => { const box = document.querySelector(sel); if (box && box.checked !== on) box.click() };
+  const typeIn = async (area, text) => {
+    setValue(area, text);
+    await timeout(300);
+    area.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+  };
+  const pick = async slug => {
+    const el = rowEl(slug);
+    if (!el) return false;
+    if (!el.classList.contains('on')) el.click();
+    return !!(await waitFor(() => read() && read().querySelector(`.docket-pane-head[data-ticket="${slug}"][data-full="true"]`), 15000));
+  };
+  const section = name => read() && read().querySelector(`[data-section="${name}"]`);
+  const reason = () => (read() && read().querySelector('.dx-state-reason') || {}).textContent || null;
+
+  dk.seed = await call({ docketSeed: { kind: 'seed' } });
+  const t = (dk.seed && dk.seed.tickets) || {};
+  // 1. Se abre desde el botón de la barra de la org, con el archivo y el backlog afuera.
+  const bell = await waitFor(() => document.querySelector('.dx-org-view .dx-docket-bell'), 5000);
+  await waitFor(() => bell && Number(bell.dataset.active) > 2, 10000);
+  dk.bell = bell ? { attention: Number(bell.dataset.attention), active: Number(bell.dataset.active), count: (bell.querySelector('.eye-count') || {}).textContent || null } : null;
+  if (bell) bell.click();
+  dk.opened = !!(await waitFor(() => rowEl(t.runtime), 15000));
+  dk.rows = rows();
+  dk.totals = totals();
+  dk.archivedHidden = !rowEl(t.win10);
+  dk.backlogHidden = !rowEl(t.memoria);
+  // 2. Las casillas: el archivo y el backlog se agregan al final; los totales no cambian.
+  tick('.dx-docket .docket-showarchived input', true);
+  dk.archivedShown = !!(await waitFor(() => rowEl(t.win10) && rowEl(t.win10).closest('[data-section="archive"]'), 10000));
+  dk.totalsWithArchived = totals();
+  tick('.dx-docket .docket-showarchived input', false);
+  dk.archivedHiddenAgain = !!(await waitFor(() => !rowEl(t.win10), 10000));
+  tick('.dx-docket .docket-showbacklog input', true);
+  dk.backlogShown = !!(await waitFor(() => rowEl(t.memoria) && rowEl(t.memoria).closest('[data-section="backlog"]'), 10000));
+  // 3. Filtros por estado y por dueño, y el arreglo por estado.
+  choose('#dx-docket-status', 'blocked'); await timeout(500);
+  dk.blockedRows = rowEls().map(e => e.getAttribute('data-ticket') + ':' + e.getAttribute('data-status'));
+  dk.totalsFiltered = totals();
+  choose('#dx-docket-status', ''); choose('#dx-docket-owner', 'jefe'); await timeout(500);
+  dk.jefeRows = rows();
+  choose('#dx-docket-owner', 'Unassigned'); await timeout(500);
+  dk.unassignedRows = rows();
+  choose('#dx-docket-owner', ''); choose('#dx-docket-group', 'status'); await timeout(500);
+  dk.statusGroups = [...document.querySelectorAll('.dx-docket .docket-group-head > span:first-child')].map(e => e.textContent);
+  choose('#dx-docket-group', 'none'); await timeout(500);
+  dk.subItemDepth = rowEl(t.lzma) ? Number(rowEl(t.lzma).dataset.depth) : null;
+  // 4. El detalle: descripción, decisiones, evidencias, artefactos, holders e historial.
+  if (await pick(t.runtime)) {
+    const p = read();
+    dk.detail = {
+      title: (p.querySelector('.docket-pane-head b') || {}).textContent || null,
+      descBold: !!p.querySelector('.dx-docket-desc strong'),
+      descRef: (p.querySelector('.dx-docket-desc a.docket-ref') || {}).textContent || null,
+      done: [...p.querySelectorAll('.mark-done li')].map(e => e.textContent),
+      decisions: [...p.querySelectorAll('.dx-decisions li')].map(e => e.textContent),
+      decisionsSummary: (section('decisions')?.querySelector('.docket-detail-section-summary') || {}).textContent || null,
+      evidence: [...p.querySelectorAll('.dx-evidence li')].map(e => e.textContent),
+      evidenceSummary: (section('evidence')?.querySelector('.docket-detail-section-summary') || {}).textContent || null,
+      artifacts: [...p.querySelectorAll('.dx-artifacts .dx-file-chip')].map(e => e.getAttribute('data-file')),
+      artifactSummary: (section('artifacts')?.querySelector('.docket-detail-section-summary') || {}).textContent || null,
+      holders: [...p.querySelectorAll('.dx-holders li')].map(e => e.getAttribute('data-holder')),
+      historyFolded: !!(section('history') && section('history').querySelector('.docket-detail-section-body[hidden]')),
+    };
+    const toggle = section('history') && section('history').querySelector('.docket-detail-toggle');
+    if (toggle) toggle.click();
+    await timeout(400);
+    dk.detail.history = [...p.querySelectorAll('.dx-history li')].map(e => e.getAttribute('data-op'));
+    dk.detail.historyAssign = (p.querySelector('.dx-history li[data-op="assign"]') || {}).textContent || null;
+    dioxus.send({ pause: 'docket' });
+    await timeout(3000);
+    // un artefacto se guarda en Descargas y se revela en el Explorador; nunca se abre
+    const chip = p.querySelector('.dx-artifacts .dx-file-chip');
+    if (chip) {
+      chip.click();
+      dk.artifactToast = await toastWith('Shown in folder');
+      const path = dk.artifactToast ? dk.artifactToast.replace(/^Shown in folder: /, '') : null;
+      dk.artifactFile = path ? await call({ readDownload: path }) : null;
+      dioxus.send({ pause: 'docket-artifact' });
+      await timeout(3000);
+    }
+    // una referencia en la descripción abre ese ticket (acá, el mismo)
+    const ref = p.querySelector('.dx-docket-desc a.docket-ref');
+    if (ref) {
+      ref.click();
+      dk.refStays = !!(await waitFor(() => read() && read().querySelector(`.docket-pane-head[data-ticket="${t.runtime}"]`), 3000));
+    }
+  }
+  // 5. Comentar: la respuesta va al dueño del ticket.
+  if (await pick(t.docs)) {
+    dk.replyLabel = (read().querySelector('.docket-reply-label') || {}).textContent || null;
+    const area = read().querySelector('.mail-reply textarea');
+    if (area) {
+      await typeIn(area, '¿Cómo va la documentación?');
+      dk.commentToast = await toastWith('sent to jefe');
+    }
+  }
+  // 6. El dueño (un agente) pasa un ticket a blocked con su motivo: llega en vivo.
+  if (await pick(t.lzma)) {
+    const before = frames();
+    dk.statusChange = await call({ docketSeed: { kind: 'status', slug: t.lzma, status: 'blocked', reason: 'El runner no tiene 7-Zip.' } });
+    dk.blockedLive = !!(await waitFor(() => rowEl(t.lzma) && rowEl(t.lzma).dataset.status === 'blocked', 15000));
+    dk.blockedReason = await waitFor(() => { const why = reason(); return why && why.includes('7-Zip') && why }, 15000);
+    dk.liveFrames = frames() - before;
+  }
+  // 7. dropped: deja la lista en el acto y queda en el archivo, con por qué terminó.
+  dk.dropped = await call({ docketSeed: { kind: 'status', slug: t.docs, status: 'dropped', reason: 'Lo cubre docs/spikes/dioxus.md.' } });
+  dk.droppedLeft = !!(await waitFor(() => !rowEl(t.docs), 15000));
+  tick('.dx-docket .docket-showarchived input', true);
+  dk.droppedArchived = !!(await waitFor(() => rowEl(t.docs) && rowEl(t.docs).closest('[data-section="archive"]'), 10000));
+  if (await pick(t.docs)) dk.droppedWhy = await waitFor(() => { const why = reason(); return why && why.includes('docs/spikes') && why }, 10000);
+  tick('.dx-docket .docket-showarchived input', false);
+  // 8. Bandera: el agente la levanta y llega en vivo; la cola de atención (#28) abre el docket.
+  dk.flag = await call({ docketSeed: { kind: 'flag', slug: t.runtime, reason: '¿Publico el runtime de 62,8 MB?' } });
+  dk.flagLive = !!(await waitFor(() => rowEl(t.runtime) && rowEl(t.runtime).classList.contains('attention'), 15000));
+  dk.bellGlow = !!(await waitFor(() => document.querySelector('.dx-org-view .dx-docket-bell.glow'), 10000));
+  document.querySelector('.dx-docket-overlay').click();
+  await waitFor(() => !panel(), 5000);
+  const attnTab = document.querySelector('.dx-org-view .orgview-tab[data-view="attention"]');
+  if (attnTab) attnTab.click();
+  const attnRow = await waitFor(() => document.querySelector(`.dx-attn [data-attn-row="ticket:${t.runtime}"]`), 10000);
+  if (attnRow) {
+    attnRow.querySelector('.mailrow').click();
+    dk.attentionPaneFull = !!(await waitFor(() => document.querySelector(`.dx-attn .attn-mread .docket-pane-head[data-ticket="${t.runtime}"][data-full="true"]`), 10000));
+    const open = await waitFor(() => document.querySelector('.dx-attn .attn-mread .dx-open-docket'), 5000);
+    if (open) open.click();
+    dk.openedFromAttention = !!(await waitFor(() => panel() && read() && read().querySelector(`.docket-pane-head[data-ticket="${t.runtime}"]`), 10000));
+  }
+  // 9. Bajar la bandera: "Dismiss with no comment" pasa el ticket a blocked con su motivo.
+  const dismiss = await waitFor(() => read() && read().querySelector('.docket-dismiss'), 10000);
+  dk.flagReason = (read() && read().querySelector('.docket-attention-body') || {}).textContent || null;
+  dioxus.send({ pause: 'docket-flag' });
+  await timeout(3000);
+  if (dismiss) {
+    dismiss.click();
+    dk.dismissToast = await toastWith('dismissed the attention flag');
+    dk.dismissBlocked = await waitFor(() => { const why = reason(); return rowEl(t.runtime) && rowEl(t.runtime).dataset.status === 'blocked' && why && why.includes('dismissed') && why }, 15000);
+    dk.glowGone = !!(await waitFor(() => !document.querySelector('.dx-org-view .dx-docket-bell.glow'), 10000));
+  }
+  // 10. Una pregunta adjunta al ticket se responde desde su panel.
+  dk.question = await call({ docketSeed: { kind: 'question', slug: t.certificado } });
+  if (await pick(t.certificado)) {
+    dk.questionWaiting = !!(await waitFor(() => rowEl(t.certificado) && rowEl(t.certificado).querySelector('.docket-qwait'), 10000));
+    const card = await waitFor(() => read().querySelector('.docket-question-box .askcard'), 15000);
+    dk.questionText = card ? (card.querySelector('.ask-q') || {}).textContent : null;
+    if (card) {
+      card.querySelector('.ask-row[data-option="Sí"]').click();
+      await timeout(300);
+      card.querySelector('.ask-submit').click();
+      dk.answerToast = await toastWith("resolved worker's batch");
+      dk.questionGone = !!(await waitFor(() => !read().querySelector('.docket-question-box .askcard'), 15000));
+    }
+  }
+  // 11. Asignar: "Staff…" en el ticket sin dueño del backlog.
+  if (await pick(t.memoria)) {
+    const tier = await waitFor(() => read().querySelector('.dx-staff-tier'), 15000);
+    dk.staffDisclosure = (read().querySelector('.dx-staff-disclosure') || {}).textContent || null;
+    if (tier) {
+      setValue(tier, 'haiku', 'change');
+      await timeout(400);
+      const go = read().querySelector('.dx-staff-go');
+      if (go) go.click();
+      dk.staffToast = await toastWith('Staffed');
+      dk.staffedOwner = (await waitFor(() => { const el = rowEl(t.memoria); return el && el.dataset.owner !== 'Unassigned' && !el.closest('[data-section="backlog"]') && el }, 15000) || { dataset: {} }).dataset.owner || null;
+    }
+  }
+  dk.totalsEnd = totals();
+  dk.engine = await call({ docketState: true });
+  dk.toasts = toasts();
+  tick('.dx-docket .docket-showbacklog input', false);
+  document.querySelector('.dx-docket-overlay').click();
+  dk.closed = !!(await waitFor(() => !panel(), 5000));
+  const chartTab = document.querySelector('.dx-org-view .orgview-tab[data-view="chart"]');
+  if (chartTab) chartTab.click();
+  await waitFor(() => document.querySelector('.dx-agent[data-node="worker"]'), 10000);
+}
+
 // #12: desk
 const desk = r.desk = {};
 const card = document.querySelector('.dx-agent[data-node="worker"]');
@@ -696,6 +896,34 @@ async fn attention_probe(client: &orgtree_engine_client::Client, message: &serde
         }
         return Some(json!({ "clicked": tag.is_some(), "tag": tag, "source_id": found.and_then(|n| n.source_id) }));
     }
+    // #29: el fixture siembra el docket o un agente lo cambia (`POST /api/fixture/docket`)
+    if let Some(body) = message.get("docketSeed") {
+        return Some(match client.post::<serde_json::Value>("/api/fixture/docket", body).await {
+            Ok(value) => value,
+            Err(e) => json!({ "error": e.to_string() }),
+        });
+    }
+    // #29: lo que dice el motor de cada ticket, para compararlo con la vista
+    if message.get("docketState").is_some() {
+        let work = client.work_items_view("spike-fixture", true, true).await.ok()?;
+        let all = [Some(&work.items), work.archived.as_ref(), work.backlogged.as_ref()];
+        let state: serde_json::Map<String, serde_json::Value> = all
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|i| (i.slug.clone(), json!({ "status": i.status, "owner": i.owner_node(), "flagged": i.manual_attention.is_some(), "blocked_reason": i.blocked_reason, "archived": i.archived })))
+            .collect();
+        return Some(json!({ "items": state, "counts": work.counts }));
+    }
+    // #29: el archivo que se guardó en Descargas (solo ahí), para ver que es el artefacto
+    if let Some(path) = message.get("readDownload").and_then(|v| v.as_str()) {
+        let inside = std::path::Path::new(path).components().any(|c| c.as_os_str() == "Orgtree");
+        return Some(match std::fs::read_to_string(path) {
+            Ok(text) if inside => json!({ "exists": true, "text": text }),
+            Ok(_) => json!({ "exists": true, "outside": true }),
+            Err(e) => json!({ "exists": false, "error": e.to_string() }),
+        });
+    }
     if let Some(slug) = message.get("workItem").and_then(|v| v.as_str()) {
         let work = client.work_items("spike-fixture").await.ok()?;
         let all = [Some(&work.items), work.attention.as_ref(), work.archived.as_ref(), work.backlogged.as_ref()];
@@ -929,7 +1157,7 @@ pub fn Probe() -> Element {
             }
         };
         // `native` ya quedó guardado con la parte del shell durante la pausa.
-        for key in ["home", "chart", "attention", "desk", "deskFull", "multiwindow", "reveal", "error"] {
+        for key in ["home", "chart", "attention", "docket", "desk", "deskFull", "multiwindow", "reveal", "error"] {
             if let Some(value) = report.get(key) {
                 record(key, value.clone());
             }

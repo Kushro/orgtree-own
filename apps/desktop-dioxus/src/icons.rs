@@ -8,6 +8,8 @@ const SETTINGS: &str = "M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l
 const DELETE: &str = "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6zM19 4h-3.5l-1-1h-5l-1 1H5v2h14z";
 const HOME: &str = "M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z";
 const MAIL: &str = "M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2m0 4-8 5-8-5V6l8 5 8-5z";
+// AssignmentOutlined, el `DocketIcon` del renderer.
+const DOCKET: &str = "M7 15h7v2H7zm0-4h10v2H7zm0-4h10v2H7zm12-4h-4.18C14.4 1.84 13.3 1 12 1s-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2m-7-.25c.41 0 .75.34.75.75s-.34.75-.75.75-.75-.34-.75-.75.34-.75.75-.75M19 19H5V5h14z";
 const BELL: &str = "M12 22c1.1 0 2-.9 2-2h-4c0 1.1.89 2 2 2m6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1z";
 
 #[component]
@@ -48,4 +50,9 @@ pub fn MailIcon() -> Element {
 #[component]
 pub fn BellIcon() -> Element {
     rsx! { Icon { path: BELL } }
+}
+
+#[component]
+pub fn DocketIcon() -> Element {
+    rsx! { Icon { path: DOCKET } }
 }

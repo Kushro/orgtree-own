@@ -3,7 +3,7 @@
 //! mismo cuerpo que el renderer (`apps/desktop/renderer/src/api.ts`), con el
 //! token como header.
 
-use orgtree_engine_client::{BatchAnswer, Client, ClientError, NoticeIdentity, OpRequest, SendMessage};
+use orgtree_engine_client::{BatchAnswer, Client, ClientError, NoticeIdentity, OpRequest, QuickStaffSelection, SendMessage, WorkReply};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -139,6 +139,32 @@ fn ok(method: &str, path: &str) -> (u16, Value) {
             // una forma rara en la cabecera no rompe el árbol
             "asks": "no es una lista"
         })),
+        // docket (#29)
+        ("GET", "/api/orgs/spike-fixture/work-items-view?archived=1&backlogged=1") => (200, json!({
+            "counts": { "attention": 0, "active": 1, "archived": 1, "backlogged": 1 }, "now": "", "revision": "r1",
+            "items": [{ "slug": "empaquetar-el-runtime", "title": "Empaquetar", "status": "in_progress", "rev": 8, "view": "list",
+                        "owner": { "node": "worker" }, "done_so_far": ["armé"], "working_on_next": [], "parent": null }],
+            "archived": [{ "slug": "probar-en-windows-10", "title": "Win10", "status": "dropped", "archived": true, "dropped_reason": "fuera" }],
+            "backlogged": [{ "slug": "medir-la-memoria", "title": "Memoria", "status": "backlogged", "owner": null }]
+        })),
+        ("GET", "/api/orgs/spike-fixture/work-items/empaquetar-el-runtime") => (200, json!({ "item": {
+            "slug": "empaquetar-el-runtime", "title": "Empaquetar", "status": "in_progress", "rev": 8,
+            "scope": [{ "seq": 1, "at": "2026-10-07T10:00:00Z", "by": { "node": "worker" }, "kind": "decision", "text": "Runtime embebido", "supersedes": null, "superseded_by": null }],
+            "evidence": [{ "at": "2026-10-07T10:00:00Z", "by": { "node": "worker" }, "kind": "commit", "ref": "6e53697", "note": "armado" }],
+            "artifacts": [{ "id": "r1", "name": "medicion.txt", "bytes": 36, "sha256": "sha256:9f", "scope": "item", "visible": true },
+                          { "visible": false, "scope": "named" }],
+            "holders": [{ "node": "jefe", "generation": 0, "from": "2026-10-07T10:00:00Z", "derived": true }, { "node": "worker", "generation": 0 }],
+            "history": [{ "at": "2026-10-07T10:00:00Z", "by": "@user", "op": "assign", "from": { "node": "jefe" }, "to": { "node": "worker" } }],
+            "reply_recipients": [{ "node": "worker", "role": "owner", "state": "live" }],
+            // una sección con una forma rara no rompe el ticket
+            "questions": "no es una lista"
+        } })),
+        ("GET", p) if p.ends_with("/quick-staff") => (200, json!({
+            "mode": "top_level", "configured_mode": "request", "owner": {}, "fallback": true, "disclosure": "Assignee unavailable",
+            "models": [{ "tier": "haiku", "seat": 1, "efforts": ["low", "high"], "accounts": [], "default_ok": true }]
+        })),
+        ("POST", p) if p.ends_with("/quick-staff") => (200, json!({ "message": "Staffed medir-la-memoria at top level; ticket moved to Open.", "assigned_to": "medir-la-memoria" })),
+        ("GET", p) if p.contains("/artifacts/") => (200, json!("runtime 62.8 MB")),
         _ => (404, json!({ "detail": "no existe" })),
     }
 }
@@ -332,4 +358,71 @@ async fn las_notificaciones_se_leen_con_todas_sus_paginas() {
     assert!(active.contains(&NoticeIdentity { org: "spike-fixture".into(), id: "n2".into() }));
     let paths: Vec<String> = log.lock().unwrap().iter().map(|s| s.path.clone()).collect();
     assert_eq!(paths, ["/api/desktop/notifications", "/api/desktop/notifications?offset=1"]);
+}
+
+#[tokio::test]
+async fn el_docket_como_el_renderer() {
+    let (client, log) = fake_engine(ok).await;
+    // la lista con los dos grupos pedidos aparte, y sus totales
+    let work = client.work_items_view("spike-fixture", true, true).await.unwrap();
+    assert_eq!(last(&log).path, "/api/orgs/spike-fixture/work-items-view?archived=1&backlogged=1");
+    let counts = work.counts.clone().unwrap();
+    assert_eq!((counts.active, counts.archived, counts.backlogged), (1, 1, 1));
+    assert_eq!(work.items[0].view.as_deref(), Some("list"));
+    assert_eq!(work.archived.as_ref().unwrap()[0].dropped_reason.as_deref(), Some("fuera"));
+    assert!(work.backlogged.as_ref().unwrap()[0].owner_node().is_none());
+    // sin casillas, la ruta no pide los grupos
+    let _ = client.work_items_view("spike-fixture", false, false).await;
+    assert_eq!(last(&log).path, "/api/orgs/spike-fixture/work-items-view");
+
+    // el detalle: decisiones, evidencias, artefactos, holders e historial
+    let item = client.work_item("spike-fixture", "empaquetar-el-runtime").await.unwrap();
+    assert_eq!(last(&log).path, "/api/orgs/spike-fixture/work-items/empaquetar-el-runtime");
+    assert_eq!(item.scope[0].text.as_deref(), Some("Runtime embebido"));
+    assert_eq!(item.evidence[0].reference.as_deref(), Some("6e53697"));
+    assert_eq!(item.artifacts.len(), 2);
+    assert_eq!(item.artifacts[1].visible, Some(false));
+    assert_eq!(item.holders.iter().map(|h| h.node.as_str()).collect::<Vec<_>>(), ["jefe", "worker"]);
+    assert_eq!(item.history.len(), 1);
+    assert!(item.questions.is_empty());
+    assert_eq!(item.reply_recipients.unwrap()[0].role, "owner");
+
+    // comentar: `replyWorkItem` con el destinatario elegido
+    let reply = WorkReply { body: "¿Cómo va?".into(), to: Some("worker".into()), notice: false };
+    let sent = client.reply_work_item_to("spike-fixture", "empaquetar-el-runtime", &reply).await.unwrap();
+    assert_eq!(sent.to.as_deref(), Some("worker"));
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/orgs/spike-fixture/work-items/empaquetar-el-runtime/reply"));
+    assert_eq!(seen.body, Some(json!({ "body": "¿Cómo va?", "to": "worker" })));
+    let notice = WorkReply { body: "fyi".into(), to: None, notice: true };
+    client.reply_work_item_to("spike-fixture", "empaquetar-el-runtime", &notice).await.unwrap();
+    assert_eq!(last(&log).body, Some(json!({ "body": "fyi", "notice": true })));
+
+    // asignar: "Staff…" en un ticket del backlog, como quickStaffEntry
+    let preview = client.quick_staff_preview("spike-fixture", "medir-la-memoria").await.unwrap();
+    assert_eq!(last(&log).path, "/api/orgs/spike-fixture/work-items/medir-la-memoria/quick-staff");
+    assert_eq!((preview.mode.as_str(), preview.models[0].tier.as_str()), ("top_level", "haiku"));
+    let selection = QuickStaffSelection {
+        request_id: "7d3f8a6e-1b2c-4d5e-8f90-123456789abc".into(),
+        mode: preview.mode.clone(),
+        configured_mode: preview.configured_mode.clone(),
+        owner: preview.owner.clone(),
+        tier: Some("haiku".into()),
+        ..QuickStaffSelection::default()
+    };
+    let staffed = client.quick_staff("spike-fixture", "medir-la-memoria", &selection).await.unwrap();
+    assert_eq!(staffed.assigned_to.as_deref(), Some("medir-la-memoria"));
+    let seen = last(&log);
+    assert_eq!((seen.method.as_str(), seen.path.as_str()), ("POST", "/api/orgs/spike-fixture/work-items/medir-la-memoria/quick-staff"));
+    assert_eq!(seen.body, Some(json!({ "request_id": "7d3f8a6e-1b2c-4d5e-8f90-123456789abc", "mode": "top_level",
+                                       "configured_mode": "request", "owner": {}, "tier": "haiku" })));
+
+    // un artefacto se descarga crudo, con el token
+    let bytes = client.artifact_bytes("spike-fixture", "empaquetar-el-runtime", "r1").await.unwrap();
+    assert_eq!(bytes, br#""runtime 62.8 MB""#);
+    let seen = last(&log);
+    assert_eq!((seen.path.as_str(), seen.token.as_deref()), ("/api/orgs/spike-fixture/work-items/empaquetar-el-runtime/artifacts/r1", Some(TOKEN)));
+    // un 404 trae su detail
+    let missing = client.work_item("spike-fixture", "no-existe").await.unwrap_err();
+    assert!(matches!(missing, ClientError::Status { status: 404, .. }));
 }
