@@ -145,6 +145,10 @@
       };
       const numbers = (msgs.innerText.match(/(?:Mensaje|Respuesta) (\d+)/g) || []).map(m => Number(m.split(' ')[1]));
       out.newestLoaded = numbers.length ? Math.max(...numbers) : null;
+      // pausa para la captura del CI: el desk con la conversación larga a la vista
+      scroller.scrollTop = scroller.scrollHeight / 2;
+      document.title = 'orgtree-probe-pause:desk';
+      await timeout(3000);
     }
     return out;
   })() : { skipped: true };

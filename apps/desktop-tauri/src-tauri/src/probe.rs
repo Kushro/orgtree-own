@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 pub const PAGE_PREFIX: &str = "orgtree-probe:";
 pub const CLOSE_PREFIX: &str = "orgtree-probe-closed:";
 pub const RECONNECT_PREFIX: &str = "orgtree-probe-reconnected:";
+pub const PAUSE_PREFIX: &str = "orgtree-probe-pause:";
 
 pub struct Probe {
     out: PathBuf,
@@ -125,15 +126,29 @@ impl Probe {
         )
     }
 
+    /// La página pide una captura (`orgtree-probe-pause:<nombre>`): deja el
+    /// archivo `<salida>.<nombre>` para que el CI saque la captura en ese momento.
+    pub fn record_pause(&self, title: &str) {
+        let Some(name) = title.strip_prefix(PAUSE_PREFIX) else { return };
+        let mut marker = self.out.clone().into_os_string();
+        marker.push(format!(".{name}"));
+        let _ = std::fs::write(marker, b"");
+    }
+
     /// Guarda el resultado de la página. Devuelve `true` la primera vez, para
     /// que el shell siga con la etapa de cierre de la ventana dueña.
-    pub fn record_page(&self, title: &str) -> bool {
+    pub fn record_page(&self, title: &str, shell: serde_json::Value) -> bool {
         let Some(json) = title.strip_prefix(PAGE_PREFIX) else { return false };
         let mut page = self.page.lock().unwrap();
         if page.is_some() {
             return false;
         }
-        *page = Some(serde_json::from_str(json).unwrap_or(serde_json::Value::Null));
+        let mut value: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+        if let Some(object) = value.as_object_mut() {
+            // Estado del shell al terminar la página: cuántas ventanas de popout siguen abiertas.
+            object.insert("shell_after".into(), shell);
+        }
+        *page = Some(value);
         // Reporte parcial: si la etapa de cierre no llega, queda esta evidencia.
         let report = serde_json::json!({ "page": page.clone(), "echo": *self.hits.lock().unwrap() });
         let _ = std::fs::write(&self.out, serde_json::to_vec_pretty(&report).unwrap_or_default());

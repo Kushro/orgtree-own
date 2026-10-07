@@ -306,6 +306,25 @@ fn open_popout(app: &tauri::AppHandle, url: &Url, features: NewWindowFeatures) -
     }
 }
 
+/// `window.close()` desde JS (el renderer cierra así un popout al volver a
+/// acoplarlo): WebView2 dispara `WindowCloseRequested` y wry destruye solo el
+/// HWND contenedor del webview, no la ventana de Tauri, que queda vacía. Con el
+/// contenedor destruido, el controlador de WebView2 se cierra y `url()` falla:
+/// este vigilante lo detecta y destruye la ventana.
+fn reap_closed_popouts(app: tauri::AppHandle) {
+    std::thread::Builder::new()
+        .name("orgtree-popout-reaper".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            for (label, window) in app.webview_windows() {
+                if label.starts_with(POPOUT_PREFIX) && window.url().is_err() {
+                    let _ = window.destroy();
+                }
+            }
+        })
+        .expect("no se pudo crear el vigilante de popouts");
+}
+
 /// Cerrar la ventana dueña con popouts abiertos la oculta en lugar de
 /// destruirla: los popouts viven en el contexto de JavaScript del dueño, y
 /// Electron también los conserva ("Main close preserves all popouts").
@@ -325,7 +344,9 @@ fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &str) {
     let state = app.state::<Shell>();
     let probe = state.probe.lock().unwrap();
     let Some(probe) = probe.as_ref() else { return };
-    if probe.record_page(title) {
+    if title.starts_with(probe::PAUSE_PREFIX) {
+        probe.record_pause(title);
+    } else if probe.record_page(title, serde_json::json!({ "popouts": popout_labels(app, None).len() })) {
         probe_owner_close(app.clone());
     } else if title.starts_with(probe::CLOSE_PREFIX) {
         let shell = serde_json::json!({
@@ -416,6 +437,7 @@ fn main() {
                     }
                 })
                 .build()?;
+            reap_closed_popouts(handle.clone());
             start_engine(handle);
             Ok(())
         })

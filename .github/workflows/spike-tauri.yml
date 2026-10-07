@@ -110,9 +110,9 @@ jobs:
           $shot = $false
           # El reporte final incluye la reconexión tras la caída del motor (#5).
           while (-not ((Test-Path $env:ORGTREE_TAURI_PROBE) -and (Select-String -Path $env:ORGTREE_TAURI_PROBE -Pattern '"reconnect"' -Quiet)) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
-            # captura del desk con la conversación larga apenas termina la primera etapa
-            if (-not $shot -and (Test-Path $env:ORGTREE_TAURI_PROBE)) { try { Save-Screen 'desk' } catch { Write-Host "screenshot: $_" }; $shot = $true }
-            Start-Sleep -Seconds 1; $p.Refresh()
+            # captura del desk con la conversación larga: la prueba deja un marcador y espera 3 s
+            if (-not $shot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).desk")) { try { Save-Screen 'desk' } catch { Write-Host "screenshot: $_" }; $shot = $true }
+            Start-Sleep -Milliseconds 500; $p.Refresh()
           }
           try { Save-Screen 'after-reconnect' } catch { Write-Host "screenshot: $_" }
           if ($p.HasExited) {
@@ -169,6 +169,8 @@ jobs:
             if ($dp.$check -ne $true) { $failures += "deskPopout.$check was $($dp.$check)" }
           }
           if (-not ($dp.messagesInChild -gt 0)) { $failures += 'the popped-out desk shows no messages' }
+          # window.close() desde JS tiene que cerrar la ventana nativa: queda solo el popout de la primitiva
+          if ($probe.page.shell_after.popouts -ne 1) { $failures += "popout windows still open after the desk redocked: $($probe.page.shell_after.popouts) (expected 1)" }
           $rc = $probe.reconnect
           if (-not $rc) { $failures += 'reconnect stage did not report' }
           else {
