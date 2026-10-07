@@ -1,31 +1,35 @@
 //! Prueba de diagnóstico del spike, solo con `ORGTREE_TAURI_PROBE=<archivo>`.
 //!
-//! Cuando la ventana carga el origen del motor, inyecta un script que verifica
-//! la autenticación por cookie desde el webview real (WebView2 en el CI):
+//! Cuando la ventana carga el origen del motor, inyecta `probe.js`, que
+//! verifica desde el webview real (WebView2 en el CI):
 //!
-//! - `nav`: status HTTP de la navegación a `/` (401 = la cookie no llegó);
-//! - `http`: `fetch('/api/desktop/identity')` desde la página;
-//! - `ws`: WebSocket a `/api/orgs/<x>/ws` (`close:4401` = rechazado);
-//! - `echo`: pedidos a un servidor local en otro puerto, que registra si llegó
-//!   la cookie: desde la página (control positivo, mismo sitio) y desde un
-//!   iframe `sandbox="allow-scripts"` como los del HTML de agentes (no debe
-//!   llevarla).
+//! - #3, cookie: `nav` (status de la navegación, 401 = la cookie no llegó),
+//!   `http` (`fetch` a `/api/desktop/identity`), `ws` (WebSocket a una org),
+//!   y `echo`, un servidor local en otro puerto que registra si llegó la
+//!   cookie desde la página (control positivo) y desde un iframe
+//!   `sandbox="allow-scripts"` como los del HTML de agentes (no debe llevarla);
+//! - #6, popouts: la secuencia de `renderer/src/popout.tsx` (`window.open`,
+//!   shell escrito en el hijo, estilos clonados, DOM del dueño movido al hijo,
+//!   borrador compartido).
 //!
-//! El script devuelve el resultado en `document.title`, sin IPC, y Rust lo
-//! escribe en el archivo junto con lo que vio el servidor de eco. El token no
-//! se escribe nunca: solo si la cookie llegó o no.
+//! El script devuelve el resultado en `document.title`, sin IPC. Después Rust
+//! pide cerrar la ventana dueña y anota qué pasó con el popout (etapa
+//! `owner_close`), y recién ahí escribe el archivo. El token no se escribe
+//! nunca: solo si la cookie llegó o no.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-const TITLE_PREFIX: &str = "orgtree-probe:";
+pub const PAGE_PREFIX: &str = "orgtree-probe:";
+pub const CLOSE_PREFIX: &str = "orgtree-probe-closed:";
 
 pub struct Probe {
     out: PathBuf,
     echo_port: u16,
     hits: Arc<Mutex<Vec<serde_json::Value>>>,
+    page: Mutex<Option<serde_json::Value>>,
 }
 
 impl Probe {
@@ -59,44 +63,50 @@ impl Probe {
                 }
             })
             .ok()?;
-        Some(Probe { out, echo_port, hits })
+        Some(Probe { out, echo_port, hits, page: Mutex::new(None) })
     }
 
+    /// Script de la página del motor.
     pub fn script(&self) -> String {
+        include_str!("probe.js")
+            .replace("__ECHO__", &self.echo_port.to_string())
+            .replace("__PREFIX__", PAGE_PREFIX)
+    }
+
+    /// Script que reporta, ya cerrada la ventana dueña, si el popout sigue vivo
+    /// y su borrador sigue en el mismo contexto de JavaScript.
+    pub fn close_script() -> String {
         format!(
-            r#"(async () => {{
-  const echo = 'http://127.0.0.1:{port}';
-  const r = {{}};
-  try {{ r.nav = performance.getEntriesByType('navigation')[0].responseStatus }} catch (e) {{ r.nav = String(e) }}
-  try {{ r.http = (await fetch('/api/desktop/identity')).status }} catch (e) {{ r.http = String(e) }}
-  r.ws = await new Promise(done => {{
-    const socket = new WebSocket(`ws://${{location.host}}/api/orgs/probe/ws`);
-    const timer = setTimeout(() => done('timeout'), 10000);
-    socket.onopen = () => {{ clearTimeout(timer); socket.close(); done('open') }};
-    socket.onclose = event => {{ clearTimeout(timer); done('close:' + event.code) }};
-  }});
-  try {{ await fetch(echo + '/top', {{ mode: 'no-cors', credentials: 'include' }}) }} catch (e) {{}}
-  r.iframe = await new Promise(done => {{
-    const frame = document.createElement('iframe');
-    frame.setAttribute('sandbox', 'allow-scripts');
-    frame.srcdoc = `<script>fetch('${{echo}}/iframe', {{ mode: 'no-cors', credentials: 'include' }})
-      .then(() => 'sent', e => 'error:' + e)
-      .then(result => parent.postMessage({{ probeIframe: result, origin: String(self.origin) }}, '*'))<\/script>`;
-    addEventListener('message', event => {{ if (event.data && event.data.probeIframe) done(event.data) }});
-    setTimeout(() => done('timeout'), 10000);
-    document.documentElement.appendChild(frame);
-  }});
-  document.title = '{prefix}' + JSON.stringify(r);
-}})();"#,
-            port = self.echo_port,
-            prefix = TITLE_PREFIX
+            "(() => {{ const w = window.__orgtreeProbePopout; let r = {{}};\
+             try {{ r.childOpen = !!w && !w.closed; r.draft = w.document.querySelector('textarea').value }} catch (e) {{ r.error = String(e) }}\
+             document.title = '{CLOSE_PREFIX}' + JSON.stringify(r) }})();"
         )
     }
 
-    pub fn record_title(&self, title: &str) {
-        let Some(json) = title.strip_prefix(TITLE_PREFIX) else { return };
-        let page: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
-        let report = serde_json::json!({ "page": page, "echo": *self.hits.lock().unwrap() });
+    /// Guarda el resultado de la página. Devuelve `true` la primera vez, para
+    /// que el shell siga con la etapa de cierre de la ventana dueña.
+    pub fn record_page(&self, title: &str) -> bool {
+        let Some(json) = title.strip_prefix(PAGE_PREFIX) else { return false };
+        let mut page = self.page.lock().unwrap();
+        if page.is_some() {
+            return false;
+        }
+        *page = Some(serde_json::from_str(json).unwrap_or(serde_json::Value::Null));
+        // Reporte parcial: si la etapa de cierre no llega, queda esta evidencia.
+        let report = serde_json::json!({ "page": page.clone(), "echo": *self.hits.lock().unwrap() });
+        let _ = std::fs::write(&self.out, serde_json::to_vec_pretty(&report).unwrap_or_default());
+        true
+    }
+
+    /// Cierra el reporte con la etapa de cierre y lo escribe.
+    pub fn record_close(&self, title: &str, shell: serde_json::Value) {
+        let Some(json) = title.strip_prefix(CLOSE_PREFIX) else { return };
+        let page_side: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+        let report = serde_json::json!({
+            "page": self.page.lock().unwrap().clone(),
+            "echo": *self.hits.lock().unwrap(),
+            "owner_close": { "shell": shell, "page": page_side },
+        });
         let _ = std::fs::write(&self.out, serde_json::to_vec_pretty(&report).unwrap_or_default());
     }
 }

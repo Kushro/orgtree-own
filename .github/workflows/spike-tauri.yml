@@ -79,17 +79,21 @@ jobs:
           if (-not $exe) { throw "orgtree-tauri.exe not found" }
           $p = Start-Process -FilePath $exe.FullName -PassThru
           $deadline = (Get-Date).AddSeconds(90)
-          while (-not (Test-Path $env:ORGTREE_TAURI_PROBE) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+          # El reporte final incluye la etapa de cierre de la ventana dueña (#6).
+          while (-not ((Test-Path $env:ORGTREE_TAURI_PROBE) -and (Select-String -Path $env:ORGTREE_TAURI_PROBE -Pattern 'owner_close' -Quiet)) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
             Start-Sleep -Seconds 1; $p.Refresh()
           }
-          if ($p.HasExited) { throw "app exited early with code $($p.ExitCode)" }
+          if ($p.HasExited) {
+            if (Test-Path $env:ORGTREE_TAURI_PROBE) { Write-Host "Partial probe: $(Get-Content $env:ORGTREE_TAURI_PROBE -Raw)" }
+            throw "app exited early with code $($p.ExitCode)"
+          }
           $port = Join-Path $env:ORGTREE_TAURI_DATA 'engine-port.json'
           if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
           Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
-          if (-not (Test-Path $env:ORGTREE_TAURI_PROBE)) { throw "the cookie probe did not report within 90 s" }
+          if (-not (Test-Path $env:ORGTREE_TAURI_PROBE)) { throw "the WebView2 probe did not report within 90 s" }
           $raw = Get-Content $env:ORGTREE_TAURI_PROBE -Raw
-          Write-Host "Cookie probe: $raw"
-          "### Cookie probe (WebView2)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          Write-Host "WebView2 probe: $raw"
+          "### WebView2 probe (cookie, popouts)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           $probe = $raw | ConvertFrom-Json
           $failures = @()
           if ($probe.page.nav -eq 401) { $failures += 'navigation to the engine was not authenticated (401)' }
@@ -101,9 +105,24 @@ jobs:
           if ($top.Count -ne 1 -or -not $top[0].cookie) { $failures += 'positive control failed: the engine page did not send the cookie' }
           if ($frame.Count -ne 1) { $failures += 'the sandboxed iframe request never arrived' }
           elseif ($frame[0].cookie) { $failures += 'the sandboxed iframe sent the desktop cookie' }
+          # #6: popouts con window.open y portales (secuencia de renderer/src/popout.tsx)
+          $pop = $probe.page.popout
+          foreach ($check in 'opened', 'opener', 'sameOrigin', 'moved', 'draftKept', 'draftShared', 'sharedState') {
+            if ($pop.$check -ne $true) { $failures += "popout.$check was $($pop.$check)" }
+          }
+          if ($pop.childLink -ne 'load') { $failures += "cloned stylesheet link in the popout: $($pop.childLink)" }
+          if ($pop.styles.width -ne '123px' -or $pop.styles.height -ne '45px') { $failures += "popout styles not applied: $($pop.styles | ConvertTo-Json -Compress)" }
+          $close = $probe.owner_close
+          if (-not $close) { $failures += 'owner-close stage did not report' }
+          else {
+            if ($close.shell.main_visible -ne $false) { $failures += "owner window still visible after close: $($close.shell.main_visible)" }
+            if ($close.shell.popouts -lt 1) { $failures += 'popout window gone after closing the owner' }
+            if ($close.page.childOpen -ne $true) { $failures += "popout closed with the owner: $($close.page | ConvertTo-Json -Compress)" }
+            if ($close.page.draft -ne 'escrito en el popout') { $failures += "popout draft lost after closing the owner: $($close.page.draft)" }
+          }
           Stop-Process -Id $p.Id -Force
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Cookie auth verified in WebView2"
+          Write-Host "Cookie auth and popouts verified in WebView2"
 
       - name: Report sizes
         shell: pwsh

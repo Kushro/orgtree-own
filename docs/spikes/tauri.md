@@ -83,7 +83,29 @@ Además, cualquier WebSocket con un `Origin` ajeno se rechaza con 4401, traiga l
 
 Ese control positivo es un riesgo a tener en cuenta: **la cookie viaja a cualquier puerto de `127.0.0.1`** en los pedidos que haga la página del motor. Electron, en cambio, solo firma el origen exacto. El renderer no pide nada a otros puertos locales, y el HTML de agentes corre en iframes con origen opaco, que no la mandan. Pero cualquier contenido que se cargue sin sandbox en la ventana del motor podría filtrar el token a un servidor local. Para mitigarlo, el contenido de agentes tiene que quedar siempre en iframes sandbox o ventanas aparte (#6).
 
-**Popouts `about:blank`.** Un `window.open('about:blank')` hereda el origen de la página que lo abre, así que sus pedidos son same-origin: llevan la cookie y el motor los acepta, igual que Electron firma los portales. Queda por verificar en #6 si el handler de ventanas nuevas de wry conserva el `opener`.
+**Popouts `about:blank`.** Un `window.open('about:blank')` hereda el origen de la página que lo abre, así que sus pedidos son same-origin: llevan la cookie y el motor los acepta, igual que Electron firma los portales. En #6 se verificó que wry conserva el `opener` (ver más abajo).
+
+### Popouts, desks temporales y pins (#6)
+
+El renderer abre sus ventanas con `window.open('', nombre, features)` desde la ventana dueña. Escribe un documento vacío en el hijo, le clona los `<style>` y `<link>` del dueño y mueve ahí el DOM con portales de React (`renderer/src/popout.tsx`). Para que funcione, la ventana nueva tiene que quedar unida a la que la abrió, en el mismo contexto de JavaScript.
+
+En Tauri 2.12 eso se resuelve con `on_new_window` → `NewWindowResponse::Create`:
+
+- wry llama `SetNewWindow` de WebView2, que es el mecanismo para que `window.open` devuelva el `WindowProxy` del hijo con el `opener` conservado.
+- `window_features(features)` le pasa al hijo el mismo entorno de WebView2 que el dueño, que es lo que `SetNewWindow` exige, y además la posición y el tamaño pedidos.
+- Sin handler, wry bloquea `window.open`.
+- Solo se abren `about:blank` y `''`. Cualquier otra URL se rechaza, y los links externos irán al navegador del sistema más adelante.
+
+**Cerrar la ventana dueña con popouts abiertos la oculta** en lugar de destruirla, porque los popouts viven en su contexto de JavaScript. Electron hace lo mismo ("Main close preserves all popouts"). Cuando se cierra el último popout con la dueña oculta, la app termina; la bandeja llega en #7.
+
+**Verificado en WebView2** con la prueba de `ORGTREE_TAURI_PROBE` (`src-tauri/src/probe.js`), que repite la secuencia de `popout.tsx`:
+
+- `window.open` devuelve la ventana, el `opener` se conserva y el origen es el mismo;
+- un `<style>` y un `<link>` clonados del dueño se aplican en el hijo;
+- un borrador creado en el dueño, con su listener, se mueve al hijo y conserva el texto, y escribir en el hijo dispara el listener del dueño;
+- después de pedir el cierre de la dueña, esta queda oculta, el popout sigue abierto y el borrador sigue ahí.
+
+En Linux (WebKitGTK), `window.open` sin un gesto del usuario queda bloqueado y Tauri no expone el ajuste. Linux no es destino, así que no se trabajó.
 
 El workflow `.github/workflows/spike-tauri.yml` hace lo mismo en `windows-latest` en cada push a `spike/tauri`: compila, verifica que la ventana arranque y siga abierta 15 segundos, informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-tauri-installer`.
 
