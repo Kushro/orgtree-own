@@ -39,6 +39,10 @@
   await pause(2500);
   // Un .cmd: el Explorador lo tiene que seleccionar, nunca ejecutar.
   try { r.reveal = await bridge.revealFile(__TARGET__) } catch (e) { r.reveal = 'error:' + e }
+  // Captura del Explorador con el archivo seleccionado, antes de abrir otras ventanas.
+  await pause(2500);
+  document.title = 'orgtree-probe-pause:revealed';
+  await pause(2500);
   try { r.charters = await bridge.openCharterFolder() } catch (e) { r.charters = 'error:' + e }
   try { await bridge.openHarnessLink('codex'); r.harnessLink = 'resolved' } catch (e) { r.harnessLink = 'error:' + e }
   r.target = __TARGET__;
