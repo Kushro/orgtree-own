@@ -21,16 +21,12 @@
 // ventana). Si no coincide con la ruta, la semilla es null y vale la
 // respuesta de getWindowIdentity(): un cuadro vacío en lugar de la vista
 // equivocada.
-//
-// Los obligatorios fuera del recorte rechazan con un error claro.
 (() => {
   if (window.top !== window || location.origin !== '__ORIGIN__') return;
   if (!/^\/(index\.html)?$|^\/o\/[a-z0-9@-]+$/.test(location.pathname)) return;
   const internals = window.__TAURI_INTERNALS__;
   if (!internals || typeof internals.invoke !== 'function') return;
   const call = (cmd, args) => internals.invoke(cmd, args || {});
-  const outside = name => () =>
-    Promise.reject(new Error(`orgtreeDesktop.${name} está fuera del recorte del spike de Tauri`));
   const WINDOW = '__WINDOW__';
   const STORE = 'orgtree-tauri-window-identity';
   const valid = id => !!id && typeof id === 'object' && id.windowId === WINDOW &&
@@ -97,9 +93,11 @@
     getProviderLoginStatus: provider => call('desktop_provider_login_status', { provider }),
     submitProviderLoginCode: (provider, code) => call('desktop_provider_login_code', { provider, code }),
     cancelProviderLogin: provider => call('desktop_provider_login_cancel', { provider }),
-    getUpdateStatus: () => Promise.resolve({ state: 'unavailable' }),
-    checkForUpdates: () => Promise.resolve({ state: 'unavailable' }),
-    installUpdate: outside('installUpdate'),
+    // #23: el updater de Rust (feed firmado de las pre-releases de la rama).
+    getUpdateStatus: () => call('desktop_update_status'),
+    checkForUpdates: () => call('desktop_check_updates'),
+    installUpdate: () => call('desktop_install_update').then(() => undefined),
+    getUpdateCapability: () => call('desktop_update_capability'),
     onEvent: listener => {
       listeners.add(listener);
       for (const event of held.splice(0)) { try { listener(event) } catch (e) { console.error(e) } }

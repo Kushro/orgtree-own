@@ -19,6 +19,7 @@ Se reemplaza solo la capa de escritorio (`apps/desktop/main` y `preload`). El re
 | 9 | #21 Integraciones: harnesses, login de proveedores, notificaciones y archivos | Contratar agentes con el instalador |
 | 10 | #20 Una ventana por organización, creación de orgs y preferencias persistentes | Paridad con el manejo de ventanas de Electron |
 | 11 | #19 Ciclo de vida completo del motor | Progreso, rechazos, caídas, mantenimiento y salida ordenada |
+| 12 | #23 Actualizaciones desde las pre-releases de la rama | Updater firmado que instala solo en un punto seguro |
 
 ## Decisiones de diseño ya tomadas
 
@@ -28,7 +29,7 @@ Se reemplaza solo la capa de escritorio (`apps/desktop/main` y `preload`). El re
 
 ## Fuera del alcance
 
-Tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron, updater firmado. El empaquetado del runtime de Python y PostgreSQL quedó fuera al principio y se agregó en #18.
+Tarea de arranque del sistema, instalación para todos los usuarios, upgrade desde instalaciones Electron. El empaquetado del runtime de Python y PostgreSQL quedó fuera al principio y se agregó en #18, y el updater firmado en #23.
 
 ## Cómo compilar
 
@@ -163,7 +164,7 @@ El shim (`src-tauri/src/shim.js`) es un `initialization_script` de `main`:
 - Expone `window.orgtreeDesktop` con el contrato de `apps/desktop/preload/index.ts` sobre `invoke`.
 - Igual que el preload, solo existe en el frame principal y en el origen exacto del motor: los iframes y los popouts no lo tienen.
 - Los métodos opcionales que el recorte no cubre (`requestOrg`, ventanas múltiples, popouts nativos) se omiten a propósito (el login de proveedores llegó en #21). El renderer ya tiene un camino para cuando faltan, el mismo de un navegador: abre la org en la misma ventana.
-- Los obligatorios fuera del recorte rechazan con un error claro.
+- Los obligatorios fuera del recorte rechazaban con un error claro. El último, `installUpdate`, llegó con el updater (#23).
 
 Seguridad del puente:
 
@@ -176,7 +177,7 @@ Seguridad del puente:
 **Verificado en WebView2** con la prueba de `ORGTREE_TAURI_PROBE`:
 
 - el shim existe y responde por `invoke` (`getAppVersion`, `getStatus`, `getPreferences`);
-- un método fuera del recorte rechaza con un error claro;
+- fuera de una copia instalada no hay updater: `getUpdateStatus` da `unavailable` e `installUpdate` rechaza con un mensaje claro (#23);
 - el shim no aparece en iframes ni en popouts;
 - la página de inicio del renderer lista `spike-fixture`, y al abrirla navega a `/o/spike-fixture` y muestra al agente.
 
@@ -477,3 +478,54 @@ El segundo arranque cierra la última ventana con `exitOnClose` prendido, y el t
 `cargo test` de `engine-host` suma las fases de conversión, un paso de conversión que calla más que su plazo, el rechazo `conversion-failed`, la salida por las buenas y forzada dentro del presupuesto, y las reglas de cuelgue y de reinicios. Con el motor real en Windows confirma que el guardián tiene el candado mientras el motor corre y lo suelta en la salida.
 
 **Lo que el CI no cubre:** un cuelgue real (5 minutos), el clic en "Reiniciar motor" de la bandeja (comparte el camino con el mantenimiento, que sí se prueba), un fin de sesión real de Windows (se simula con los mensajes) y la conversión real de una raíz 2.x, que es del motor y no cambió.
+
+### Actualizaciones desde las pre-releases (#23)
+
+Paridad con el updater de Electron (`updater.ts` y el camino de inactividad de `index.ts`) sobre `tauri-plugin-updater` 2.13, en `src-tauri/src/updater.rs`. El webview no recibe los comandos del plugin: el feed, la clave y el momento de instalar los decide Rust, y el renderer usa los cuatro métodos del contrato (`getUpdateStatus`, `checkForUpdates`, `installUpdate` y `getUpdateCapability`) y el evento `update`, sin cambios.
+
+**Feed.** Cada pre-release `tauri-preview-N` publica también `latest.json` en una pre-release móvil, `tauri-preview-latest`, que solo tiene ese archivo. Las copias instaladas lo leen de `https://github.com/Kushro/orgtree-own/releases/download/tauri-preview-latest/latest.json`, una descarga de asset que GitHub sirve sin token y sin el límite de la API. El feed anuncia la versión y el instalador NSIS de `tauri-preview-N` (con un nombre sin espacios, `orgtree-tauri-spike_<versión>_x64-setup.exe`) con su firma.
+
+**Versión.** El CI compila cada run como `0.1.<run_number>`, así cada pre-release es más nueva que las anteriores. Los builds locales siguen en `0.0.1`.
+
+**Firma.** El plugin verifica la firma minisign con la clave pública compilada (`ORGTREE_TAURI_UPDATER_PUBKEY` al compilar) antes de instalar. La firma se hace con `--app-version` y la app exige que nombre la versión anunciada (`requireSignedVersion`), así un feed alterado no puede ofrecer un instalador viejo como nuevo. La app repite la verificación sobre el paquete guardado en disco justo antes de instalarlo. `apps/desktop-tauri/tools/updater-feed.py` arma el feed y lo verifica igual que el plugin (Ed25519 en Python puro, sin dependencias).
+
+**Cuándo.** El sondeo de 5 s del ciclo de vida llama al updater, como el `tick` de `UpdateController`:
+
+- busca al arrancar y cada 6 horas, con espera ante fallos (5 min, el doble cada vez, hasta 6 h), y solo con `automaticUpdates` prendido. "Check for updates" busca siempre;
+- descarga, verifica y guarda el paquete en `<perfil>/updates`, y queda `pending-idle`. Mientras espera, solo una versión mayor lo reemplaza;
+- instala solo en un punto seguro: `automaticUpdates` prendido, el motor quieto (`idle` de `/api/desktop/status`: ningún turno, cola ni importación), 60 s sin teclado ni mouse, ningún pedido de mantenimiento pendiente y la carpeta instalada escribible. Si no, anota por qué espera (`engine-busy`, `user-active`…). **Nunca interrumpe un turno**;
+- "Update now" del renderer instala a pedido, sin esperar ese punto, como en Electron.
+
+`automaticUpdates` ahora empieza prendido, como en Electron.
+
+**Instalar.** El plugin lanza el instalador NSIS en modo pasivo (`/P /UPDATE /R`, una barra de progreso sin preguntas) y termina el proceso. Justo antes (`on_before_exit`), la app hace la salida ordenada: guarda la sesión, oculta las ventanas y apaga el motor con `stop_engine_for_exit` (camino `update`), porque el instalador reemplaza el Python y el PostgreSQL que usa el motor. El instalador vuelve a abrir la app. Si el instalador no arranca después de apagar el motor, la app se reinicia entera.
+
+El updater solo existe en una copia instalada por NSIS (con `uninstall.exe` al lado) y con la clave compilada. El `.exe` de `target/` y los builds sin clave dan `unavailable`.
+
+**Secretos que tiene que crear el humano** (una vez, en Settings → Secrets and variables → Actions del repositorio):
+
+1. Generar el par de claves en una máquina de confianza, con contraseña: `npx tauri signer generate -w orgtree-tauri-updater.key` (desde `apps/desktop-tauri`, después de `npm ci`). Escribe la privada en `orgtree-tauri-updater.key` y la pública en `orgtree-tauri-updater.key.pub`.
+2. Secreto `TAURI_SIGNING_PRIVATE_KEY`: el contenido de `orgtree-tauri-updater.key`.
+3. Secreto `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: la contraseña elegida (se puede omitir solo si la clave no tiene).
+4. Variable (no secreto) `TAURI_UPDATER_PUBKEY`: el contenido de `orgtree-tauri-updater.key.pub`.
+
+La privada no se sube nunca al repositorio. Perderla, o cambiar el par, deja sin actualizaciones a las copias ya instaladas: hay que instalar a mano una pre-release con la clave nueva. Sin la variable, el instalador lleva una clave descartable del run y el CI avisa. Sin el secreto, la pre-release se publica sin feed, lo avisa el CI y lo dicen sus notas. Antes de publicar el feed, el CI verifica la firma con la variable: un par que no coincide hace fallar la pre-release en lugar de publicar un feed que nadie puede instalar.
+
+**Verificado en el CI** (paso "Update from the previous version"). El job compila además una versión anterior, `0.1.0`, sin los recursos del motor y con una clave de prueba del run (la pública se compila en esa versión; la privada nunca sale del runner). Ese build va antes que el instalador del run porque comparten `target/`. La prueba:
+
+- instala `0.1.0` con su instalador NSIS en una carpeta de `RUNNER_TEMP` y la corre con el motor de fixture;
+- firma el instalador del run con la clave de prueba, arma el feed y lo verifica con la pública. Los controles negativos (el feed contra otro instalador y contra otra versión) tienen que fallar. Lo sirve un `http.server` en loopback (`ORGTREE_TAURI_UPDATE_FEED`; la app solo acepta http hacia loopback);
+- con `automaticUpdates` apagado, la app no busca;
+- prendido y con un turno simulado (`ORGTREE_FIXTURE_BUSY_FILE` del fixture), descarga, verifica y espera: queda `pending-idle` con `engine-busy` y no instala en 20 s (captura `update-ready-engine-busy`);
+- con el motor quieto, instala: la salida de la app dice `update` y `stopped`, el `.exe` instalado pasa a `0.1.<run>`, y el instalador vuelve a abrir la app, que se encuentra al día (captura `update-relaunched`).
+
+El registro de cada paso (`ORGTREE_TAURI_UPDATE_PROBE`) y los tiempos quedan en el resumen del job. `cargo test` cubre las reglas: el punto seguro, la espera ante fallos, el feed aceptado, el reemplazo de un paquete listo y la verificación de la firma con una clave de prueba (sin la privada).
+
+**Pendiente o distinto de Electron:**
+
+- un pedido `update` del motor (mantenimiento) se sigue reportando `unavailable`, como en #19: no dispara el chequeo ni instala;
+- la bandeja no tiene la línea del updater ni "Automatic updates" (la configuración del renderer sí);
+- Electron guarda un registro de cada intento (`update-log.json`) y retiene un paquete que falló al instalar; acá un fallo descarta el paquete y se vuelve a buscar con la espera;
+- la descarga pasa por memoria antes de quedar en disco (el plugin la junta entera): unos cientos de MB por un momento;
+- `dangerousInsecureTransportProtocol` está prendido en `tauri.conf.json` para la prueba, pero la app solo acepta http hacia loopback y verifica la firma igual;
+- en la prueba, el instalador relanza la app con `RunAsUser` de nsis-tauri-utils. Si la vuelve a abrir sin el entorno de la prueba, el CI lo avisa y la cierra.

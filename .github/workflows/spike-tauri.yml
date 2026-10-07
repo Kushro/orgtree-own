@@ -113,9 +113,63 @@ jobs:
       - name: Install Tauri CLI
         run: npm ci
 
+      # Actualizaciones (#23). La versión del run (0.1.<run>) va en el instalador
+      # que se prueba y se publica, así cada pre-release es más nueva que la
+      # anterior. La clave pública del updater es la variable del repositorio
+      # TAURI_UPDATER_PUBKEY; la privada es un secreto que usa solo el job de la
+      # pre-release. Además, una clave descartable de este run firma el feed
+      # local de la prueba de actualización, nunca algo publicado.
+      - name: Updater keys and version
+        id: updater
+        shell: pwsh
+        env:
+          REPO_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          $version = "0.1.${{ github.run_number }}"
+          $keys = Join-Path $env:RUNNER_TEMP 'updater-test-key'
+          New-Item -ItemType Directory -Force $keys | Out-Null
+          $password = [guid]::NewGuid().ToString('N')
+          Write-Host "::add-mask::$password"
+          npx tauri signer generate --ci -p $password -w (Join-Path $keys 'test.key') -f | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'tauri signer generate failed' }
+          $test = (Get-Content (Join-Path $keys 'test.key.pub') -Raw).Trim()
+          "ORGTREE_UPDATE_TEST_KEY_PASSWORD=$password" | Out-File $env:GITHUB_ENV -Append
+          $repo = "$env:REPO_PUBKEY".Trim()
+          if ($repo) { $pubkey = $repo; $note = 'the repository updater key (TAURI_UPDATER_PUBKEY)' }
+          else {
+            $pubkey = $test; $note = 'a throwaway key of this run: TAURI_UPDATER_PUBKEY is not set, so this installer can never update from the branch feed'
+            Write-Host "::warning::TAURI_UPDATER_PUBKEY is not set: the installer carries a throwaway updater key and a pre-release would be published without a signed feed (see docs/spikes/tauri.md, #23)."
+          }
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
+          "pubkey=$pubkey" | Out-File $env:GITHUB_OUTPUT -Append
+          "test_pubkey=$test" | Out-File $env:GITHUB_OUTPUT -Append
+          @{ version = $version } | ConvertTo-Json | Set-Content (Join-Path $env:RUNNER_TEMP 'version.conf.json') -Encoding utf8NoBOM
+          @{ version = '0.1.0' } | ConvertTo-Json | Set-Content (Join-Path $env:RUNNER_TEMP 'previous.conf.json') -Encoding utf8NoBOM
+          "### Updater (#23)`n- version $version, updater key: $note" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+      # La versión anterior para la prueba de actualización: sin los recursos del
+      # motor (corre con el motor de fixture) y con la clave de prueba. Se compila
+      # antes, porque comparte target/ con el instalador que prueban los demás pasos.
+      - name: Build the previous version for the update test
+        id: build_previous
+        # Si falla, los demás pasos siguen; la prueba de actualización lo reporta.
+        continue-on-error: true
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_UPDATER_PUBKEY: ${{ steps.updater.outputs.test_pubkey }}
+        run: |
+          npx tauri build --ci --config "$env:RUNNER_TEMP\previous.conf.json"
+          if ($LASTEXITCODE -ne 0) { throw "tauri build (previous version) exited with $LASTEXITCODE" }
+          $dest = Join-Path $env:RUNNER_TEMP 'update-previous'
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Move-Item src-tauri/target/release/bundle/nsis/*.exe $dest
+          Get-ChildItem $dest | ForEach-Object { "- previous version installer: {0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB) } | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
       - name: Build installer
         id: build
-        run: npx tauri build --ci --config src-tauri/tauri.bundle.conf.json
+        env:
+          ORGTREE_TAURI_UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
+        run: npx tauri build --ci --config src-tauri/tauri.bundle.conf.json --config ${{ runner.temp }}/version.conf.json
 
       - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery, native window, integrations)
         shell: pwsh
@@ -192,10 +246,11 @@ jobs:
           foreach ($check in 'bridge', 'rendered', 'orgListed', 'agentShown') {
             if ($sh.$check -ne $true) { $failures += "shell.$check was $($sh.$check)" }
           }
-          if ($sh.version -ne '0.0.1') { $failures += "getAppVersion via invoke: $($sh.version)" }
+          if ($sh.version -ne '${{ steps.updater.outputs.version }}') { $failures += "getAppVersion via invoke: $($sh.version)" }
           if ($sh.status -ne 'ready') { $failures += "getStatus via invoke: $($sh.status)" }
           if ($sh.preferences -ne 'string') { $failures += "getPreferences via invoke: $($sh.preferences)" }
-          if ($sh.outside -notlike '*fuera del recorte*') { $failures += "out-of-scope method did not reject clearly: $($sh.outside)" }
+          # #23: el .exe de target/ no es una copia instalada, así que no tiene updater.
+          if ($sh.update -ne 'unavailable' -or $sh.installUpdate -notlike '*No hay una actualizaci*') { $failures += "updater outside an installed copy: status $($sh.update), installUpdate $($sh.installUpdate)" }
           if ($sh.iframeBridge -ne 'undefined') { $failures += "the bridge leaked into an iframe: $($sh.iframeBridge)" }
           if ($sh.orgPath -ne '/o/spike-fixture') { $failures += "opening the org went to $($sh.orgPath)" }
           if ($probe.page.popout.childBridge -ne 'undefined') { $failures += "the bridge leaked into a popout: $($probe.page.popout.childBridge)" }
@@ -1175,10 +1230,187 @@ jobs:
           # taskkill devuelve 128 si el guardián ya cerró el árbol; el resultado es el de arriba.
           exit 0
 
+      # #23: actualizar desde la versión anterior con el updater real. La versión
+      # 0.1.0 instalada por NSIS (con la clave de prueba) busca en un feed local
+      # firmado que anuncia el instalador de este run. Con el motor ocupado (un
+      # turno simulado) descarga pero no instala; con el motor y el usuario
+      # quietos apaga su motor en orden, el instalador NSIS reemplaza la app y la
+      # vuelve a abrir. Antes, con automaticUpdates apagado, no busca. Corre como
+      # runneradmin con el motor de fixture (sin PostgreSQL), en carpetas de RUNNER_TEMP.
+      - name: Update from the previous version (signed feed, busy engine, idle point, relaunch)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          VERSION: ${{ steps.updater.outputs.version }}
+          TEST_PUBKEY: ${{ steps.updater.outputs.test_pubkey }}
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          $events = { param($file) if (Test-Path $file) { @(Get-Content $file | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
+          $waitFor = {
+            param($file, $test, $seconds, $proc)
+            $until = (Get-Date).AddSeconds($seconds)
+            do {
+              $hit = @(& $events $file | Where-Object -FilterScript $test)
+              if ($hit.Count) { return $hit[0] }
+              if ($proc -and $proc.HasExited) { return $null }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $until)
+            return $null
+          }
+          $failures = @()
+          $work = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-update'
+          $dir = Join-Path $work 'installed'
+          $feedDir = Join-Path $work 'feed'
+          New-Item -ItemType Directory -Force $work, $feedDir | Out-Null
+          $previous = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'update-previous') -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $current = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          if (-not $previous) { throw 'the previous version was not built (see "Build the previous version for the update test")' }
+          if (-not $current) { throw 'no installer for this run' }
+
+          # 1. La versión anterior, instalada por NSIS como la tendría un usuario.
+          $setup = Start-Process -FilePath $previous.FullName -ArgumentList '/S', "/D=$dir" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "the previous installer exited with $($setup.ExitCode)" }
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notlike 'uninstall*' } | Select-Object -First 1
+          Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe.FullName } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          $versionBefore = (Get-Item $exe.FullName).VersionInfo.ProductVersion
+          $hashBefore = (Get-FileHash $exe.FullName).Hash
+          Write-Host "Installed $($exe.FullName) $versionBefore; this run is $env:VERSION"
+          if ($versionBefore -ne '0.1.0') { $failures += "the previous version installed as $versionBefore" }
+
+          # 2. El feed: el instalador de este run firmado con la clave de prueba
+          # (ligada a la versión) y servido en loopback.
+          $asset = "orgtree-tauri-spike_$($env:VERSION)_x64-setup.exe"
+          $package = Join-Path $feedDir $asset
+          Copy-Item $current.FullName $package
+          npx tauri signer sign -f (Join-Path $env:RUNNER_TEMP 'updater-test-key\test.key') -p $env:ORGTREE_UPDATE_TEST_KEY_PASSWORD --app-version $env:VERSION $package | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'tauri signer sign failed' }
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop()
+          $feedFile = Join-Path $feedDir 'latest.json'
+          python tools/updater-feed.py make --installer $package --signature "$package.sig" --version $env:VERSION --url "http://127.0.0.1:$port/$asset" --notes 'Prueba de actualización (#23)' --out $feedFile
+          if ($LASTEXITCODE -ne 0) { throw 'updater-feed.py make failed' }
+          python tools/updater-feed.py verify --feed $feedFile --installer $package --pubkey $env:TEST_PUBKEY --expect-version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { $failures += 'the generated feed does not verify with the public key' }
+          # Controles que tienen que fallar: el feed contra otro instalador y contra otra versión.
+          python tools/updater-feed.py verify --feed $feedFile --installer $previous.FullName --pubkey $env:TEST_PUBKEY 2>&1 | Out-Host
+          if ($LASTEXITCODE -eq 0) { $failures += 'the feed verified against a different installer' }
+          python tools/updater-feed.py verify --feed $feedFile --installer $package --pubkey $env:TEST_PUBKEY --expect-version 9.9.9 2>&1 | Out-Host
+          if ($LASTEXITCODE -eq 0) { $failures += 'the feed verified with another version' }
+          $server = Start-Process python -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1', '--directory', $feedDir -NoNewWindow -PassThru `
+            -RedirectStandardOutput (Join-Path $work 'feed-server.out') -RedirectStandardError (Join-Path $work 'feed-server.err')
+          $feed = "http://127.0.0.1:$port/latest.json"
+          $served = $false
+          foreach ($i in 1..40) { try { Invoke-WebRequest $feed -UseBasicParsing -TimeoutSec 2 | Out-Null; $served = $true; break } catch { Start-Sleep -Milliseconds 500 } }
+          if (-not $served) { throw "the local feed did not answer at $feed" }
+          $env:ORGTREE_TAURI_UPDATE_FEED = $feed
+          $busy = Join-Path $work 'engine-busy'
+          $env:ORGTREE_FIXTURE_BUSY_FILE = $busy
+          $exitReport = Join-Path $work 'exit.jsonl'
+          $env:ORGTREE_TAURI_EXIT_REPORT = $exitReport
+          $fromDir = { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe.FullName }) }
+
+          # 3. Con automaticUpdates apagado, la app no busca.
+          $offLog = Join-Path $work 'update-off.jsonl'
+          $offProfile = Join-Path $work 'profile-off'
+          New-Item -ItemType Directory -Force $offProfile | Out-Null
+          '{"automaticUpdates": false}' | Set-Content (Join-Path $offProfile 'preferences.json') -Encoding utf8NoBOM
+          $env:ORGTREE_TAURI_PROFILE = $offProfile
+          $env:ORGTREE_TAURI_DATA = Join-Path $work 'data-off'
+          $env:ORGTREE_TAURI_UPDATE_PROBE = $offLog
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $dir -PassThru
+          $start = & $waitFor $offLog { $_.event -eq 'start' } 60 $p
+          Write-Host "Updater at start: $($start | ConvertTo-Json -Compress)"
+          if (-not $start -or $start.supported -ne $true) { $failures += "the installed previous version has no updater: $($start | ConvertTo-Json -Compress)" }
+          $tick = & $waitFor $offLog { $_.event -eq 'tick' } 240 $p
+          if (-not $tick) { $failures += 'automaticUpdates off: the engine never became ready' }
+          else {
+            Start-Sleep -Seconds 15
+            $checks = @(& $events $offLog | Where-Object { $_.event -in 'check', 'downloaded', 'apply' })
+            if ($tick.automaticUpdates -ne $false -or $checks.Count) { $failures += "automaticUpdates off still checked: $($checks | ConvertTo-Json -Compress)" }
+          }
+          taskkill /PID $p.Id /T /F 2>&1 | Out-Null
+          Start-Sleep -Seconds 2
+
+          # 4. Prendido (por defecto) y con un turno en curso: descarga y espera.
+          $log = Join-Path $work 'update.jsonl'
+          New-Item -ItemType File -Force $busy | Out-Null
+          $env:ORGTREE_TAURI_PROFILE = Join-Path $work 'profile'
+          $env:ORGTREE_TAURI_DATA = Join-Path $work 'data'
+          $env:ORGTREE_TAURI_UPDATE_PROBE = $log
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $dir -PassThru
+          $oldPid = $p.Id
+          $pending = & $waitFor $log { $_.event -eq 'status' -and $_.state -eq 'pending-idle' } 300 $p
+          $hold = & $waitFor $log { $_.event -eq 'hold' -and $_.reason -eq 'engine-busy' } 30 $p
+          if (-not $pending) { $failures += "the update was not downloaded: $(& $events $log | ConvertTo-Json -Compress)" }
+          elseif (-not $hold) { $failures += "the downloaded update was not held while the engine was busy: $(& $events $log | ConvertTo-Json -Compress)" }
+          try { Save-Screen 'update-ready-engine-busy' } catch { Write-Host "screenshot: $_" }
+          Start-Sleep -Seconds 20
+          $early = @(& $events $log | Where-Object { $_.event -in 'apply', 'handoff' })
+          if ($early.Count -or $p.HasExited) { $failures += "the update was applied while the engine was busy: $($early | ConvertTo-Json -Compress)" }
+          if ((Get-FileHash $exe.FullName).Hash -ne $hashBefore) { $failures += 'the installed app changed while the engine was busy' }
+
+          # 5. El motor queda quieto: instala en el punto seguro.
+          Remove-Item $busy
+          $idleAt = Get-Date
+          $handoff = $null
+          if ($pending) { $handoff = & $waitFor $log { $_.event -eq 'handoff' } 180 $null }
+          if (-not $handoff) { $failures += "the update was not applied at the idle point: $(& $events $log | Select-Object -Last 5 | ConvertTo-Json -Compress)" }
+          else {
+            $p.WaitForExit(60000) | Out-Null
+            if (-not $p.HasExited) { $failures += 'the previous version did not exit for the installer' }
+            $exitLine = @(& $events $exitReport)[-1]
+            if ($exitLine.path -ne 'update' -or $exitLine.outcome -ne 'stopped') { $failures += "the app did not stop its engine in order before installing: $($exitLine | ConvertTo-Json -Compress)" }
+            $until = (Get-Date).AddSeconds(420)
+            do {
+              Start-Sleep -Seconds 2
+              $versionNow = try { (Get-Item $exe.FullName -ErrorAction Stop).VersionInfo.ProductVersion } catch { $null }
+            } while ($versionNow -ne $env:VERSION -and (Get-Date) -lt $until)
+            $installedS = [int]((Get-Date) - $idleAt).TotalSeconds
+            if ($versionNow -ne $env:VERSION) { $failures += "the installed app is $versionNow after the update, expected $env:VERSION" }
+            # 6. El instalador vuelve a abrir la app, ya actualizada.
+            $relaunch = & $waitFor $log { $_.event -eq 'start' -and $_.pid -ne $oldPid } 180 $null
+            if ($relaunch) {
+              $upToDate = & $waitFor $log { $_.event -eq 'status' -and $_.pid -eq $relaunch.pid -and $_.state -eq 'up-to-date' } 240 $null
+              Start-Sleep -Seconds 2
+              try { Save-Screen 'update-relaunched' } catch { Write-Host "screenshot: $_" }
+              if ($relaunch.appVersion -ne $env:VERSION) { $failures += "the relaunched app is $($relaunch.appVersion)" }
+              if (-not $upToDate) { $failures += "the relaunched app did not find itself up to date: $(& $events $log | Where-Object { $_.pid -eq $relaunch.pid } | ConvertTo-Json -Compress)" }
+            } elseif (@(& $fromDir).Count) {
+              Write-Host "::warning::The installer relaunched the app without the test environment (no update probe): it was closed."
+            } else { $failures += 'the installer did not relaunch the app' }
+            $all = & $events $log
+            $check = $all | Where-Object { $_.event -eq 'check' -and $_.pid -eq $oldPid } | Select-Object -First 1
+            $downloaded = $all | Where-Object { $_.event -eq 'downloaded' } | Select-Object -First 1
+            "### Update from 0.1.0 to $env:VERSION (#23)`n- feed checked to package ready: $([int](($pending.ms - $check.ms) / 1000)) s, $([math]::Round($downloaded.bytes / 1MB, 1)) MB verified`n- held while the engine was busy ($($hold.reason)) for 20 s, no install`n- engine idle to new version installed: $installedS s; the app stopped its engine for the installer: $($exitLine | ConvertTo-Json -Compress)`n- relaunched: $([bool]$relaunch) $($relaunch.appVersion), then up to date: $([bool]$upToDate)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+          & $fromDir | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null }
+          taskkill /PID $server.Id /T /F 2>&1 | Out-Null
+          if ($failures) {
+            foreach ($file in $offLog, $log, $exitReport) { if (Test-Path $file) { Write-Host "----- $file"; Get-Content $file -Tail 40 } }
+            throw ($failures -join '; ')
+          }
+          Write-Host "Updated from 0.1.0 to $env:VERSION through the signed feed, at the idle point"
+          exit 0
+
       # Pruebas unitarias del shell (#21): validaciones de rutas, notificaciones y login en Windows.
+      # #23: con la clave pública del instalador, para que una variable mal pegada falle acá.
       - name: Shell unit tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         working-directory: apps/desktop-tauri/src-tauri
+        env:
+          ORGTREE_TAURI_UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
         run: cargo test
 
       - name: Report sizes
@@ -1205,6 +1437,11 @@ jobs:
 
   # Pre-release de la rama (#18), solo a pedido: el instalador que el job de
   # Windows acaba de probar. No toca main ni los releases normales.
+  # #23: con la clave del updater (secreto TAURI_SIGNING_PRIVATE_KEY, su
+  # contraseña TAURI_SIGNING_PRIVATE_KEY_PASSWORD si tiene, y la variable
+  # TAURI_UPDATER_PUBKEY), firma el instalador, verifica la firma con la pública
+  # y publica latest.json en la pre-release móvil tauri-preview-latest, de donde
+  # leen las copias instaladas. Sin la clave publica igual, sin feed, y avisa.
   prerelease:
     needs: windows
     if: github.event_name == 'workflow_dispatch' && inputs.prerelease
@@ -1212,6 +1449,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: apps/desktop-tauri/tools
+
       - uses: actions/download-artifact@v4
         with:
           name: orgtree-tauri-installer
@@ -1221,10 +1462,37 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: tauri-preview-${{ github.run_number }}
+          FEED_TAG: tauri-preview-latest
+          VERSION: 0.1.${{ github.run_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
         run: |
+          set -euo pipefail
+          # Un nombre de asset sin espacios: la URL del feed tiene que ser estable.
+          asset="orgtree-tauri-spike_${VERSION}_x64-setup.exe"
+          found=(installer/*.exe)
+          [ "${#found[@]}" -eq 1 ] || { echo "expected one installer, found: ${found[*]}"; exit 1; }
+          mv "${found[0]}" "installer/$asset"
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$asset"
+          feed=""
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && [ -n "$UPDATER_PUBKEY" ]; then
+            # La versión queda dentro de la firma: el feed no puede anunciar otra.
+            npx --yes @tauri-apps/cli@2.12.1 signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" --app-version "$VERSION" "installer/$asset" > /dev/null
+            python3 apps/desktop-tauri/tools/updater-feed.py make --installer "installer/$asset" --signature "installer/$asset.sig" \
+              --version "$VERSION" --url "$url" --notes "Orgtree Tauri, vista previa ${{ github.run_number }}" --out latest.json
+            # La firma tiene que verificar con la pública que llevan las copias instaladas.
+            python3 apps/desktop-tauri/tools/updater-feed.py verify --feed latest.json --installer "installer/$asset" \
+              --pubkey "$UPDATER_PUBKEY" --expect-version "$VERSION"
+            feed=latest.json
+            updates="Se actualiza sola desde las pre-releases siguientes de la rama (feed firmado \`$FEED_TAG\`): busca en segundo plano y solo instala con el motor y el usuario quietos, sin interrumpir un turno (issue #23)."
+          else
+            echo "::warning::No updater key (secret TAURI_SIGNING_PRIVATE_KEY and variable TAURI_UPDATER_PUBKEY): the pre-release is published without a signed feed and installed copies will not update from it. See docs/spikes/tauri.md (#23)."
+            updates="Esta vista previa no se actualiza sola: se publicó sin el feed firmado del updater."
+          fi
           cat > notes.md <<'EOF'
-          Vista previa del shell de escritorio de Orgtree sobre **Tauri 2** (rama `spike/tauri`, issue #18). **No es un release oficial de Orgtree**: es una prueba de la migración desde Electron y no recibe actualizaciones.
+          Vista previa del shell de escritorio de Orgtree sobre **Tauri 2** (rama `spike/tauri`, issue #18). **No es un release oficial de Orgtree**: es una prueba de la migración desde Electron.
 
           ## Qué incluye
 
@@ -1240,6 +1508,20 @@ jobs:
 
           Ejecutar el instalador (por usuario, sin permisos de administrador). No arrancarla como administrador: PostgreSQL se niega a correr con esos permisos. Requiere WebView2, que viene con Windows 11.
           EOF
-          printf '\nCompilado y probado en el CI: %s (commit %s).\n' "$RUN_URL" "$GITHUB_SHA" >> notes.md
-          gh release create "$TAG" installer/*.exe --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+          printf '\n## Actualizaciones\n\n%s\n' "$updates" >> notes.md
+          printf '\nVersión %s. Compilado y probado en el CI: %s (commit %s).\n' "$VERSION" "$RUN_URL" "$GITHUB_SHA" >> notes.md
+          assets=("installer/$asset")
+          [ -n "$feed" ] && assets+=("installer/$asset.sig" "$feed")
+          gh release create "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --prerelease --title "Orgtree Tauri, vista previa ${{ github.run_number }}" --notes-file notes.md
+          if [ -n "$feed" ]; then
+            # La pre-release móvil solo lleva el feed; las copias instaladas leen
+            # releases/download/tauri-preview-latest/latest.json, sin token.
+            if ! gh release view "$FEED_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              printf 'Feed del updater del spike de Tauri (#23): `latest.json` apunta a la última pre-release `tauri-preview-N` de la rama `spike/tauri`. No es un release de Orgtree ni tiene instalador.\n' > feed-notes.md
+              gh release create "$FEED_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+                --title "Orgtree Tauri, feed de actualizaciones" --notes-file feed-notes.md
+            fi
+            gh release upload "$FEED_TAG" "$feed" --repo "$GITHUB_REPOSITORY" --clobber
+            echo "Feed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$FEED_TAG/latest.json -> $VERSION"
+          fi

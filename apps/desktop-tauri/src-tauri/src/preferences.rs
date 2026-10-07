@@ -20,9 +20,9 @@ const CONTRAST_THEMES: [&str; 4] = ["charcoal", "light", "solarized-light", "obs
 const BOOLEANS: [&str; 6] = ["exitOnClose", "startAtLogin", "automaticUpdates", "routineNotifications", "onboarded", "notificationsEnabled"];
 const VIEW_LIMIT: usize = 200;
 
-/// `DEFAULT_PREFERENCES` de `policy.ts`, salvo dos valores propios del spike:
-/// `startAtLogin` y `automaticUpdates` empiezan apagados (una vista previa no
-/// se agrega sola al inicio de Windows, y no hay updater).
+/// `DEFAULT_PREFERENCES` de `policy.ts`, salvo `startAtLogin`, que empieza
+/// apagado (una vista previa no se agrega sola al inicio de Windows).
+/// `automaticUpdates` empieza prendido como en Electron desde que hay updater (#23).
 pub fn defaults() -> Value {
     let mut preferences = json!({
         "notificationsEnabled": true,
@@ -32,7 +32,7 @@ pub fn defaults() -> Value {
         "visualThemeExplicit": false,
         "exitOnClose": false,
         "startAtLogin": false,
-        "automaticUpdates": false,
+        "automaticUpdates": true,
         "routineNotifications": false,
         "onboarded": false,
         "startupMode": "restore"
