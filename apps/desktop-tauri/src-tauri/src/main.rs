@@ -13,6 +13,8 @@ mod mainwin;
 mod notifications;
 mod orgwindows;
 mod placement;
+mod popouts;
+mod pprobe;
 mod preferences;
 mod probe;
 mod wprobe;
@@ -43,6 +45,8 @@ struct Shell {
     placement: Mutex<Option<placement::Store>>,
     /// Qué ventana principal abrió cada popout: cerrar una cierra los suyos.
     popout_owner: Mutex<HashMap<String, String>>,
+    /// Los popouts con su nombre de marco, para sus comandos y eventos (#22).
+    popouts: popouts::Popouts,
     /// `restoreWindows` de Electron: el renderer restaura sus popouts recién
     /// cuando una ventana se mostró (no en un arranque con `--background`).
     restore_windows: AtomicBool,
@@ -72,6 +76,8 @@ struct Shell {
     install_probe: Option<PathBuf>,
     /// Prueba de ventanas por organización (`ORGTREE_TAURI_WINDOWS_PROBE`, #20).
     windows_probe: Option<wprobe::WindowsProbe>,
+    /// Prueba de popouts, pins y desks temporales (`ORGTREE_TAURI_POPOUT_PROBE`, #22).
+    popout_probe: Option<pprobe::PopoutProbe>,
 }
 
 impl Default for Shell {
@@ -85,6 +91,7 @@ impl Default for Shell {
             windows: Mutex::new(Default::default()),
             placement: Mutex::new(None),
             popout_owner: Mutex::new(HashMap::new()),
+            popouts: Default::default(),
             restore_windows: AtomicBool::new(false),
             background: std::env::args().any(|a| a == "--background"),
             quit_prompting: AtomicBool::new(false),
@@ -100,6 +107,7 @@ impl Default for Shell {
             launch: Mutex::new(serde_json::Value::Null),
             install_probe: std::env::var_os("ORGTREE_TAURI_INSTALL_PROBE").filter(|v| !v.is_empty()).map(PathBuf::from),
             windows_probe: wprobe::WindowsProbe::from_env(),
+            popout_probe: pprobe::PopoutProbe::from_env(),
         }
     }
 }
@@ -262,7 +270,7 @@ pub(crate) fn navigation_allowed(app: &tauri::AppHandle, url: &Url) -> bool {
     url.as_str() == "about:blank" || engine.is_some_and(|origin| origin == origin_of(url))
 }
 
-const POPOUT_PREFIX: &str = "popout-";
+pub(crate) const POPOUT_PREFIX: &str = "popout-";
 static POPOUT_SEQ: AtomicU32 = AtomicU32::new(1);
 
 fn popout_labels(app: &tauri::AppHandle, except: Option<&str>) -> Vec<String> {
@@ -280,12 +288,20 @@ fn popout_labels(app: &tauri::AppHandle, except: Option<&str>) -> Vec<String> {
 /// entorno de WebView2 que el dueño, que es lo que exige `SetNewWindow`.
 ///
 /// Cada popout es de la ventana principal que lo abrió (`owner`): cerrarla
-/// cierra los suyos y no los de otra org (#20).
+/// cierra los suyos y no los de otra org (#20). Con su nombre de marco y lo
+/// que pidió entra en el registro de `popouts.rs` (#22): sus comandos, sus
+/// eventos, su rectángulo exacto y la intercepción de `window.close()`.
 pub(crate) fn open_popout(app: &tauri::AppHandle, owner: &str, url: &Url, features: NewWindowFeatures) -> NewWindowResponse<tauri::Wry> {
+    // Uno por `window.open` de la dueña, también los que se rechazan.
+    let name = popouts::take_name(app, owner);
     if !(url.as_str() == "about:blank" || url.as_str().is_empty()) {
         // Links externos y cualquier otra URL: no se abren dentro de la app.
         return NewWindowResponse::Deny;
     }
+    let requested = popouts::Requested {
+        position: features.position().map(|p| (p.x, p.y)),
+        size: features.size().map(|s| (s.width, s.height)),
+    };
     let label = format!("{POPOUT_PREFIX}{}", POPOUT_SEQ.fetch_add(1, Ordering::Relaxed));
     let navigation = app.clone();
     let built = WebviewWindowBuilder::new(app, &label, WebviewUrl::External("about:blank".parse().unwrap()))
@@ -303,6 +319,7 @@ pub(crate) fn open_popout(app: &tauri::AppHandle, owner: &str, url: &Url, featur
     match built {
         Ok(window) => {
             app.state::<Shell>().popout_owner.lock().unwrap().insert(label.clone(), owner.to_string());
+            popouts::register(app, &window, owner, name, requested);
             let app = app.clone();
             window.on_window_event(move |event| {
                 if let WindowEvent::Destroyed = event {
@@ -324,14 +341,20 @@ pub(crate) fn open_popout(app: &tauri::AppHandle, owner: &str, url: &Url, featur
     }
 }
 
-/// `window.close()` desde JS (el renderer cierra así un popout al volver a
-/// acoplarlo): WebView2 dispara `WindowCloseRequested` y wry solo destruye el
-/// HWND contenedor del webview (clase `WRY_WEBVIEW`, hijo de la ventana de
-/// Tauri), no la ventana, que queda vacía. El controlador de WebView2 sigue
-/// respondiendo (`url()` no falla), así que el vigilante mira el contenedor:
-/// si la ventana ya no lo tiene, la destruye. Mientras se crea, un popout
-/// todavía no tiene contenedor: solo cuenta como cerrado uno al que ya se le
-/// vio (el CI mostró que destruirlo a mitad de la creación traba la página).
+/// Red de seguridad para `window.close()` desde JS (el renderer cierra así un
+/// popout al volver a acoplarlo). WebView2 dispara `WindowCloseRequested` y wry
+/// solo destruye el HWND contenedor del webview (clase `WRY_WEBVIEW`, hijo de
+/// la ventana de Tauri), no la ventana, que queda vacía. Desde #22 el shell
+/// atiende ese evento con su propio handler (`popouts::intercept_close`) y
+/// cierra la ventana entera; este vigilante solo actúa si eso no pasó (por
+/// ejemplo, un `window.close()` antes de que el handler quedara registrado),
+/// y lo anota (`reaper`) para que la prueba lo vea.
+///
+/// El controlador de WebView2 sigue respondiendo (`url()` no falla), así que
+/// el vigilante mira el contenedor: si la ventana ya no lo tiene, la destruye.
+/// Mientras se crea, un popout todavía no tiene contenedor: solo cuenta como
+/// cerrado uno al que ya se le vio (el CI mostró que destruirlo a mitad de la
+/// creación traba la página).
 fn reap_closed_popouts(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("orgtree-popout-reaper".into())
@@ -342,12 +365,12 @@ fn reap_closed_popouts(app: tauri::AppHandle) {
                 let windows = app.webview_windows();
                 seen.retain(|label| windows.contains_key(label));
                 for (label, window) in windows {
-                    if !label.starts_with(POPOUT_PREFIX) {
+                    if !label.starts_with(POPOUT_PREFIX) || popouts::is_closing(&app, &label) {
                         continue;
                     }
                     if !webview_container_gone(&window) {
                         seen.insert(label);
-                    } else if seen.remove(&label) {
+                    } else if seen.remove(&label) && popouts::begin_close(&app, &label, "reaper") {
                         let _ = window.destroy();
                     }
                 }
@@ -357,7 +380,7 @@ fn reap_closed_popouts(app: tauri::AppHandle) {
 }
 
 #[cfg(windows)]
-fn webview_container_gone(window: &tauri::WebviewWindow) -> bool {
+pub(crate) fn webview_container_gone(window: &tauri::WebviewWindow) -> bool {
     use std::ffi::c_void;
     #[link(name = "user32")]
     extern "system" {
@@ -370,7 +393,7 @@ fn webview_container_gone(window: &tauri::WebviewWindow) -> bool {
 }
 
 #[cfg(not(windows))]
-fn webview_container_gone(_window: &tauri::WebviewWindow) -> bool {
+pub(crate) fn webview_container_gone(_window: &tauri::WebviewWindow) -> bool {
     // Fuera de Windows wry no separa el contenedor: el cierre llega como evento.
     false
 }
@@ -560,6 +583,10 @@ pub(crate) fn on_main_loaded(app: &tauri::AppHandle, window: &WebviewWindow) {
         windows_probe.loaded(app, window.label());
         return;
     }
+    if let Some(popout_probe) = state.popout_probe.as_ref() {
+        popout_probe.loaded(window.label());
+        return;
+    }
     if window.label() != "win-1" {
         return;
     }
@@ -599,6 +626,10 @@ pub(crate) fn on_title(app: &tauri::AppHandle, window: &WebviewWindow, title: &s
     let state = app.state::<Shell>();
     if let Some(windows_probe) = state.windows_probe.as_ref() {
         windows_probe.title(window.label(), title);
+        return;
+    }
+    if let Some(popout_probe) = state.popout_probe.as_ref() {
+        popout_probe.title(window.label(), title);
         return;
     }
     let probe = state.probe.lock().unwrap();
@@ -750,6 +781,11 @@ fn main() {
             desktop::desktop_provider_login_code,
             desktop::desktop_provider_login_cancel,
             lifecycle::desktop_maintenance_status,
+            popouts::desktop_popout_state,
+            popouts::desktop_popout_minimize,
+            popouts::desktop_popout_toggle_maximize,
+            popouts::desktop_popout_close,
+            popouts::desktop_popout_focus,
             lifecycle::splash_retry,
             lifecycle::splash_quit,
         ])
@@ -784,6 +820,7 @@ fn main() {
             reap_closed_popouts(handle.clone());
             probe::watch_late(handle.clone());
             wprobe::start(handle.clone());
+            pprobe::start(handle.clone());
             lprobe::start(handle.clone());
             lifecycle::start_engine(handle);
             Ok(())

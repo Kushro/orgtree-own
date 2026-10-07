@@ -570,6 +570,138 @@ jobs:
           if ($failures) { throw ($failures -join '; ') }
           Write-Host 'Windows per organization verified: Homepage, creation, two orgs, refocus, notification routing, preferences, restore and error window'
 
+      # #22: popouts, pins y desks temporales sobre el renderer real y el motor de fixture.
+      # Un director (pprobe.rs/pprobe.js) maneja la app: la primitiva de window.open con
+      # su rectángulo, el desk de worker en un popout con sus botones de ventana, un desk
+      # temporal que lo toma prestado y lo devuelve, el modal de Usage anclado y su
+      # pop-out, y el cierre por window.close(). El shell mide lo nativo (área cliente,
+      # maximizado, minimizado, cómo se cerró cada popout) y acá se compara, con 2 px de
+      # tolerancia en los rectángulos.
+      - name: Popouts, pins and temporary desks (window controls, exact bounds, window.close)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-popouts
+          ORGTREE_TAURI_PROFILE: ${{ runner.temp }}\orgtree-tauri-popouts-profile
+          ORGTREE_TAURI_POPOUT_PROBE: ${{ runner.temp }}\orgtree-tauri-popouts.json
+          ORGTREE_FIXTURE_LIVE: '1'
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          $out = $env:ORGTREE_TAURI_POPOUT_PROBE
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Remove-Item -Force
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          $deadline = (Get-Date).AddSeconds(480)
+          $markers = 'popout-desk', 'popout-maximized', 'tempdesk-open', 'tempdesk-restored', 'modal-pinned', 'modal-popout', 'popouts-closed'
+          while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+            foreach ($name in $markers) {
+              if (Test-Path "$out.$name") { Start-Sleep -Milliseconds 400; try { Save-Screen "popouts-$name" } catch { Write-Host "screenshot: $_" }; Remove-Item "$out.$name" -Force }
+            }
+            Start-Sleep -Milliseconds 300; $p.Refresh()
+          }
+          $failures = @()
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $failures += 'the app did not finish and quit within 480 s' }
+          Start-Sleep -Seconds 3
+          if (-not (Test-Path $out)) { throw "no report: $($failures -join '; ')" }
+          $raw = Get-Content $out -Raw
+          "### Popouts, pins and temporary desks`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $r = $raw | ConvertFrom-Json
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          function Popout($native, $name) { @($native.popouts | Where-Object { $_.name -eq $name }) | Select-Object -First 1 }
+          function Near($a, $b) { $null -ne $a -and $null -ne $b -and [math]::Abs([double]$a - [double]$b) -le 2 }
+          # El área cliente del popout contra un rectángulo {x, y, width, height} (posición opcional).
+          function Same-Rect($client, $want) {
+            $size = (Near $client.width $want.width) -and (Near $client.height $want.height)
+            if ($null -eq $want.x) { return $size }
+            return $size -and (Near $client.x $want.x) -and (Near $client.y $want.y)
+          }
+          function Rect($c) { "$($c.x),$($c.y) $($c.width)x$($c.height)" }
+          function Closed-By($native, $name) { @($native.closed | Where-Object { $_.name -eq $name } | ForEach-Object { $_.by }) -join ',' }
+          $o = $r.org
+          & $check ($o.agentShown -eq $true -and @($o.methods).Count -eq 5) "org: $($o | ConvertTo-Json -Compress)"
+          # 1. La primitiva.
+          $pn = Popout $r.primitiveNative 'orgtree-pprobe-primitive'
+          & $check ($r.primitive.opened -eq $true -and $pn) "primitive did not open: $($r.primitive | ConvertTo-Json -Compress)"
+          if ($pn) {
+            $want = [pscustomobject]@{ x = $pn.requested.x; y = $pn.requested.y; width = $pn.requested.width; height = $pn.requested.height }
+            & $check (Same-Rect $pn.client $want) "primitive client $(Rect $pn.client) is not the requested $(Rect $want) (outer $(Rect $pn.outer))"
+            "- primitive: requested $(Rect $want), client $(Rect $pn.client), outer $(Rect $pn.outer); page sees $($r.primitive.child | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          & $check ($r.primitiveClose.closed -eq $true -and @($r.primitiveClosedNative.popouts).Count -eq 0) "window.close() on the primitive left windows: $($r.primitiveClosedNative.popouts | ConvertTo-Json -Compress)"
+          & $check ((Closed-By $r.primitiveClosedNative 'orgtree-pprobe-primitive') -eq 'window.close') "primitive closed by: $(Closed-By $r.primitiveClosedNative 'orgtree-pprobe-primitive')"
+          # 2. El desk real en un popout.
+          $d = $r.desk
+          $name = $d.name
+          & $check ($name -match '^orgtree-popout-\d+$' -and $d.ownerEmptied -eq $true -and @($d.controls).Count -eq 3) "desk popout: $($d | ConvertTo-Json -Compress)"
+          $dn = Popout $r.deskNative $name
+          & $check ($dn -and $dn.owner -eq 'win-1') "no native popout named $name owned by win-1: $($r.deskNative.popouts | ConvertTo-Json -Compress)"
+          if ($dn) {
+            $want = [pscustomobject]@{ x = $d.requested.left; y = $d.requested.top; width = $d.requested.width; height = $d.requested.height }
+            & $check (Same-Rect $dn.client $want) "desk popout client $(Rect $dn.client) is not the requested $(Rect $want)"
+            "- desk popout: features $($d.features), client $(Rect $dn.client), outer $(Rect $dn.outer); page sees $($d.child | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          $s = $r.state
+          & $check ($s.desk.present -eq $true -and $s.desk.maximized -eq $false -and $s.desk.name -eq $name) "getPopoutState(desk): $($s.desk | ConvertTo-Json -Compress)"
+          & $check ($s.unknown.present -eq $false -and $s.empty.present -eq $false -and "$($s.wrongType)" -like 'error:*') "getPopoutState of unknown names: $($s | ConvertTo-Json -Compress)"
+          & $check ($r.maximize.event.maximized -eq $true -and $r.maximize.relabeled -eq $true -and (Popout $r.maximizedNative $name).maximized -eq $true) "maximize: $($r.maximize | ConvertTo-Json -Compress)"
+          $rn = Popout $r.restoredNative $name
+          & $check ($r.restore.event.maximized -eq $false -and $rn.maximized -eq $false -and $dn -and (Same-Rect $rn.client $dn.client)) "restore: $($r.restore | ConvertTo-Json -Compress), client $(Rect $rn.client) vs $(Rect $dn.client)"
+          & $check ((Popout $r.minimizedNative $name).minimized -eq $true -and $r.minimize.state.present -eq $true) "minimize: $($r.minimize | ConvertTo-Json -Compress)"
+          $fn = Popout $r.focusedNative $name
+          & $check ($fn.minimized -eq $false -and $fn.visible -eq $true) "focus ($($r.focus.via)): $($fn | ConvertTo-Json -Compress)"
+          "- focus via $($r.focus.via): minimized $($fn.minimized), focused $($fn.focused)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # 3. El desk temporal.
+          $t = $r.tempDesk
+          & $check ($t.modal -eq $true -and $t.deskInModal -eq $true -and $t.popoutClosed -eq $true) "temporary desk: $($t | ConvertTo-Json -Compress)"
+          & $check (-not (Popout $r.duringTempNative $name) -and (Closed-By $r.duringTempNative $name) -eq 'window.close') "the borrowed desk's window: $($r.duringTempNative | ConvertTo-Json -Compress -Depth 5)"
+          $tc = $r.tempDeskClose
+          $before = Popout $r.beforeTempNative $name
+          $after = Popout $r.afterTempNative $name
+          & $check ($tc.sameName -eq $true -and $tc.modalGone -eq $true -and $after) "closing the temporary desk: $($tc | ConvertTo-Json -Compress)"
+          if ($before -and $after) {
+            & $check (Same-Rect $after.client $before.client) "the desk came back at $(Rect $after.client), it was at $(Rect $before.client)"
+            "- temporary desk: before $(Rect $before.client), after $(Rect $after.client), features $($tc.features)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          # 4. El modal anclado y su pop-out.
+          $m = $r.modalPin
+          & $check ($m.pinned -eq $true -and $m.onTop -eq $true -and $m.stillPinned -eq $true -and $m.samePlace -eq $true -and $m.onTopAfter -eq $true) "pinned modal: $($m | ConvertTo-Json -Compress)"
+          $mp = $r.modalPopout
+          & $check ($mp.atOpen.connected -eq $true -and $mp.atOpen.inOwner -eq $true -and $mp.atOpen.stillModal -eq $true) "the modal was gone before its window opened: $($mp.atOpen | ConvertTo-Json -Compress)"
+          & $check ($mp.inChild -eq $true -and $mp.ownerHasPanel -eq $false -and @($mp.controls).Count -eq 3) "modal pop-out: $($mp | ConvertTo-Json -Compress)"
+          $mn = Popout $r.modalNative $mp.name
+          if ($mn) {
+            $want = [pscustomobject]@{ x = $mp.requested.left; y = $mp.requested.top; width = $mp.requested.width; height = $mp.requested.height }
+            & $check (Same-Rect $mn.client $want) "modal popout client $(Rect $mn.client) is not the requested $(Rect $want)"
+            # Donde estaba el panel anclado en la pantalla: el área cliente de la principal más su rectángulo.
+            $main = $r.modalPinNative.main.client
+            $panel = [pscustomobject]@{ x = $main.x + [math]::Round($mp.rect.x); y = $main.y + [math]::Round($mp.rect.y); width = [math]::Round($mp.rect.w); height = [math]::Round($mp.rect.h) }
+            & $check (Same-Rect $mn.client $panel) "modal popout client $(Rect $mn.client) is not the pinned panel on screen $(Rect $panel)"
+            "- modal: pinned panel on screen $(Rect $panel), features $($mp.features), popout client $(Rect $mn.client); page sees owner $($mp.owner | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          } else { $failures += "no native popout for the modal $($mp.name)" }
+          & $check ($r.modalClose.closed -eq $true -and $r.modalClose.back -eq $true -and (Closed-By $r.modalClosedNative $mp.name) -eq 'closePopout') "modal close: $($r.modalClose | ConvertTo-Json -Compress), by $(Closed-By $r.modalClosedNative $mp.name)"
+          # 5. Ninguna ventana queda, en blanco o no, y el vigilante nunca actuó.
+          $f = $r.finalNative
+          & $check ($r.deskClose.closed -eq $true -and $r.deskClose.redocked -eq $true) "desk redock: $($r.deskClose | ConvertTo-Json -Compress)"
+          & $check (@($f.popouts).Count -eq 0) "windows left after closing every popout: $($f.popouts | ConvertTo-Json -Compress)"
+          & $check (@($f.closed | Where-Object { $_.by -eq 'reaper' }).Count -eq 0) "the container reaper had to close: $($f.closed | ConvertTo-Json -Compress)"
+          "- closed: $(($f.closed | ForEach-Object { "$($_.name) by $($_.by)" }) -join '; ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          & $check ($r.done -eq $true) 'the probe did not finish its steps'
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Popouts verified: window controls and events, exact bounds, temporary desk round trip, pinned modal pop-out and window.close()'
+
       # #19: ciclo de vida del motor, sobre el motor de fixture y raíces descartables.
       # 1. "full": otro motor (lanzado acá) tiene la raíz, así que la app muestra el
       #    rechazo con Reintentar; se libera la raíz y la prueba toca el botón real. El
@@ -621,9 +753,13 @@ jobs:
             }
           }
           '@
-          # Los procesos descendientes de la app (motor, guardián, hub, PostgreSQL).
+          # Los procesos descendientes de la app (motor, guardián, hub, PostgreSQL, WebView2).
+          # Sin el navegador del sistema: la etapa full abre Edge a propósito
+          # (openHarnessLink, #21) y Edge (msedge.exe, que no es el msedgewebview2.exe de la
+          # app) sobrevive con razón a la salida. Se excluye con todo su árbol; el motor,
+          # PostgreSQL y WebView2 siguen contando, así que un huérfano de esos sigue fallando.
           function Get-Tree($rootPid) {
-            $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+            $all = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'msedge.exe' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
             $tree = @(); $queue = @($rootPid)
             while ($queue.Count) {
               $next = @()

@@ -43,6 +43,11 @@
     "allow-desktop-set-unsaved-creation",
     "allow-desktop-open-orgs",
     "allow-desktop-take-pending-events",
-    "allow-desktop-maintenance-status"
+    "allow-desktop-maintenance-status",
+    "allow-desktop-popout-state",
+    "allow-desktop-popout-minimize",
+    "allow-desktop-popout-toggle-maximize",
+    "allow-desktop-popout-close",
+    "allow-desktop-popout-focus"
   ]
 }

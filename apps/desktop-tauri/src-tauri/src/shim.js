@@ -78,6 +78,14 @@
     minimizeWindow: () => call('desktop_window_minimize'),
     toggleMaximizeWindow: () => call('desktop_window_toggle_maximize'),
     closeWindow: () => call('desktop_window_close'),
+    // #22: los controles de un popout. Los llama el JS de ESTA ventana (el
+    // popout es un about:blank adoptado, sin puente propio) con el nombre de
+    // marco del window.open; Rust lo resuelve entre los popouts de esta ventana.
+    getPopoutState: name => call('desktop_popout_state', { name }),
+    minimizePopout: name => call('desktop_popout_minimize', { name }),
+    toggleMaximizePopout: name => call('desktop_popout_toggle_maximize', { name }),
+    closePopout: name => call('desktop_popout_close', { name }),
+    focusPopout: name => call('desktop_popout_focus', { name }).then(() => undefined),
     getHarnesses: () => call('desktop_harnesses'),
     notify: notification => call('desktop_notify', { notification }),
     syncNotifications: active => call('desktop_sync_notifications', { active }).then(() => undefined),

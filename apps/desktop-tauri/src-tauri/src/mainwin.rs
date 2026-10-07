@@ -280,6 +280,8 @@ fn build_inner(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
         .on_document_title_changed(move |window, title| crate::on_title(&titles, &window, &title))
         .build()
         .map_err(|e| format!("ventana {id}: {e}"))?;
+    // El nombre de marco de cada `window.open` de esta ventana (#22).
+    crate::popouts::watch_owner(app, &window);
     let mut exact = None;
     if let Some(saved) = saved {
         let b = saved.bounds;

@@ -37,6 +37,13 @@ const COMMANDS: &[&str] = &[
     // Ciclo de vida del motor (#19): el estado del mantenimiento para las
     // ventanas principales, y Reintentar / Salir para la ventana de arranque.
     "desktop_maintenance_status",
+    // Popouts (#22): los controles de la ventana de un popout, que el renderer
+    // pide desde el puente de la ventana dueña con el nombre de marco.
+    "desktop_popout_state",
+    "desktop_popout_minimize",
+    "desktop_popout_toggle_maximize",
+    "desktop_popout_close",
+    "desktop_popout_focus",
     "splash_retry",
     "splash_quit",
 ];
