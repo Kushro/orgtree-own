@@ -19,6 +19,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 | 9 | #26 Organigrama y operaciones sobre agentes en RSX | Una vista con estado, menú y operaciones reales |
 | 10 | #27 Desk completo en RSX | El desk de #12 en uso real: compositor, contenido y estado del turno |
 | 11 | #28 Bandeja, preguntas y atención en RSX | Mail, preguntas y cola de atención, con notificaciones nativas con clic |
+| 12 | #29 Docket en RSX | Lista, detalle y acciones del docket compartido de tickets |
 
 ## Decisiones de diseño ya tomadas
 
@@ -408,7 +409,77 @@ Fuera del recorte: el desk del agente a la derecha de la cola (`AgentDeskPanel`)
 
 **Líneas** (sin comentarios, líneas en blanco ni tests): `inbox.rs` 591, `attention.rs` 275 y `notify.rs` 426, más 264 nuevas en `org.rs` (el contexto con las acciones, la carga, el selector y el clic) y 52 en `home.rs` (los ajustes): 1.608. Lo equivalente en TSX suma 3.299: `mail.tsx` 1.266, `asks.tsx` 765, `AttentionQueue.tsx` 335, `AttentionView.tsx` 217, `notifications.ts` 160, `asksubmitted.ts` 162, `feed.ts` 124, `openasks.ts` 96, `mailread.ts` 84, `attndismiss.ts` 51 y `contracts/notifications.ts` 39, más el lado nativo de Electron (`main/notifications.ts` 115 y `taskbar-attention.ts` 78) y la bandeja dentro de `App.tsx`, que no se puede aislar. El TSX hace bastante más (ver arriba: carpetas, búsqueda, paginado, referencias, la barra de créditos, el desk de la cola, varias ventanas dueñas).
 
-El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluidos el organigrama de #26, el desk completo de #27 y la bandeja, las preguntas y la atención de #28), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
+### Docket (#29)
+
+`src/docket.rs` reescribe el docket compartido de tickets en RSX, con las clases del renderer y su `styles.css` sin cambios. Sigue `canvas/docket.tsx` (`DocketModal`, `DocketRow`, `DocketPane`), `docketdesc.tsx`, las referencias de `workrefs.tsx`, `refmd.tsx` y `reflinks.tsx`, "Staff…" de `quickstaff.ts` y `api.ts`. Se abre con el botón del docket de la barra de la org (`DocketToolbarButton`, con el mismo brillo y el mismo número) y desde la cola de atención de #28: el panel de un ticket en la cola ahora es el del docket, con "Open in docket".
+
+**Lista.** Las filas livianas de `GET /work-items-view`, en el orden del motor (la última actualización del docket):
+
+- el nombre es el slug y el título va en el tooltip; la edad, el estado (con la ayuda de `statusHelp`), `question waiting` y el dueño o `Unassigned`;
+- los sub-ítems van bajo su padre (`nestRows`, con `--docket-depth`);
+- filtros por estado y por dueño, la búsqueda (`matchesTerms`) y los tres arreglos: sin agrupar, por estado (`STATUS_GROUPS`, con "Needs attention" primero) y por agente;
+- el backlog y el archivo se piden solo con su casilla (`?backlogged=1`, `?archived=1`) y siempre van al final, como `buildSections`. Es la regla del usuario de `AGENTS.md`: los totales de la lista no cuentan lo archivado, y el total del archivo aparece solo junto a su casilla. Los filtros eligen entre lo que está a la vista, nunca más allá de una casilla.
+
+**Detalle.** La fila liviana se ve en el acto. El ticket entero llega con `GET /work-items/{wid}` al abrirlo, y otra vez cada vez que cambia su `rev`:
+
+- la descripción en Markdown seguro, con el aviso de alcance (`objective_notice`);
+- el estado con su información: `blocked` con su motivo y `dropped` con por qué terminó sin completarse;
+- lo hecho y lo que sigue, con las marcas del renderer;
+- las decisiones del registro de alcance, que solo se agregan: una reemplazada dice por cuál;
+- las evidencias (tope del motor: 50), los artefactos (tope: 40) y los adjuntos del ticket;
+- la bandera manual, la pregunta adjunta con su tarjeta, "Staff…" en el backlog, los holders anteriores y el historial (tope: 100; empieza plegado, como la verificación en el renderer).
+
+El renderer no muestra las decisiones, los holders ni el historial, aunque el motor los sirve en el detalle: el RSX los suma porque el issue los pide.
+
+**Referencias en la prosa.** Los nombres de tickets y agentes de la org y los tokens canónicos (`@item:org/slug`, `@agent:org/nodo`) se vuelven enlaces, con las reglas de borde de `workrefs.tsx` (un nombre dentro de una ruta o de una URL no es una mención; un ticket gana a un agente del mismo nombre). Un token de otra org, uno que la org no tiene o uno de un documento o un mail queda como texto que dice por qué (`reflinks.tsx`). En el Markdown de la descripción, los enlaces se arman al convertir (`markdown_with`), fuera de los enlaces y de los bloques de código, y `ammonia` sigue saneando el resultado. Un ticket se abre en el docket (prende su casilla si está en el archivo o en el backlog, como `goToItem`) y un agente, en su desk.
+
+**Archivos: guardar y revelar, nunca abrir.** El renderer descarga un artefacto con un `<a download>`. Acá se baja con el cliente Rust (con el token), se guarda en `Descargas\Orgtree\<org>\<ticket>\` sin pisar un archivo distinto, con un nombre saneado que no puede salir de esa carpeta, y se revela en el Explorador como en #27. Un artefacto `named` sin permiso aparece sin nombre.
+
+**Acciones del usuario.** Son las que tiene el docket del renderer, con los mismos endpoints y cuerpos:
+
+| Acción | Endpoint (igual que `api.ts`) | Como en el renderer |
+|---|---|---|
+| Comentar | `POST /work-items/{wid}/reply` `{body, to?, notice?}` | La caja `REPLY`: al dueño, o a un participante elegido; "as a notice" la entrega sin despertar al agente. El aviso dice lo que hizo el motor (`deferred`, `notice`) |
+| Bajar la bandera | `POST /work-items/{wid}/dismiss-attention` `{set_rev}` | "Dismiss with no comment": el motor pasa el ticket a `blocked` con el motivo `attention flag dismissed by the user (…)`. La bandera se va en el clic y vuelve con el error si el motor se niega |
+| Responder la pregunta adjunta | `POST /nodes/{nid}/batch` | La tarjeta de #28 dentro del panel del ticket |
+| Asignar | `GET` y `POST /work-items/{wid}/quick-staff` `{request_id, mode, configured_mode, owner, tier?, effort?}` | "Staff…" en un ticket del backlog: en modo `request` se le pide al asignado; sin asignado vivo, se contrata en el primer nivel y el ticket queda asignado. Un reintento de la misma elección repite su `request_id` |
+
+En el renderer "Staff…" está en el menú contextual de la fila; acá es una sección del panel.
+
+**Lo que no es del usuario.** El issue pedía también cambiar el estado, asignar a mano, levantar la bandera y adjuntar una pregunta. El docket del renderer no tiene esos controles a propósito ("Assigning, changing status, raising the flag and adding a sub-item are agents' own acts through the work tool", en `DocketRow`), y el motor no tiene rutas del usuario para eso: su superficie es leer, responder, descartar la bandera, aceptar, borrar, adjuntos y "Staff…" (`api.py`). Para no inventar controles ni tocar `engine/`, el RSX hace lo mismo que el renderer: el usuario cambia el estado a `blocked` con su motivo al descartar una bandera y asigna con "Staff…", y lo demás lo hacen los agentes y llega por el WebSocket. La prueba lo cubre con el motor de fixture actuando como esos agentes. Agregar esos controles queda como decisión pendiente (ver el reporte de #29).
+
+**Actualización sin sondeo.** La lista se pide con el árbol, al abrir y con cada frame del WebSocket de la org; una casilla relee solo la lista. El detalle se vuelve a pedir cuando la fila trae otro `rev`.
+
+**Cliente Rust.** Suma `work_items_view`, `work_item`, `reply_work_item_to` (`WorkReply`, `WorkReplyResult`), `quick_staff_preview` y `quick_staff` (`QuickStaffPreview`, `QuickStaffSelection`), `artifact_bytes` y `attachment_bytes`, y los tipos del detalle (`ScopeRow`, `Evidence`, `Artifact`, `Holder`, `WorkQuestion`, `Recipient`, `WorkCounts`, `WorkSummary`). Una sección con una forma inesperada queda vacía y no rompe el ticket. `tests/ops.rs` prueba ruta, verbo, cuerpo y token de cada pedido contra el servidor falso, la descarga cruda y un 404 con su `detail`.
+
+**Motor de fixture.** `POST /api/fixture/docket` `{kind}`, sin tocar `engine/`, siempre por el ledger real:
+
+- `seed` contrata a `jefe` y siembra seis tickets: uno `in_progress` que pasó de `jefe` a `worker` (un holder anterior), con dos decisiones, dos evidencias, un artefacto y un sub-ítem; uno `blocked` con motivo; uno de `jefe`; uno sin dueño en el backlog; y uno `dropped`, que se archiva en el acto;
+- `status`, `flag` y `question` hacen que el dueño cambie el estado (con su motivo), levante la bandera o que `worker` adjunte una pregunta, como lo haría con la herramienta del docket.
+
+**Verificado en WebView2** (run [37608842437](https://github.com/Kushro/orgtree-own/actions/runs/37608842437)):
+
+- el botón de la barra cuenta 6 activos y abre el docket con 6 filas; los totales dicen `6 active` y no cambian al mostrar el archivo;
+- el archivo y el backlog aparecen solo con su casilla, al final;
+- el filtro `blocked` deja solo tickets bloqueados, el de `jefe` uno y `Unassigned` el del backlog; por estado, los grupos van con el backlog al final, y el sub-ítem queda en el nivel 1;
+- el detalle trae el título, la negrita y la referencia de la descripción, 2 decisiones (`2 · append-only`), 2 evidencias (`2 of 50`), el artefacto (`1 of 40`), `jefe` como holder anterior y el historial plegado con `assign — from: jefe · to: worker`;
+- guardar el artefacto lo deja en Descargas con su contenido y abre el Explorador en su carpeta;
+- comentar llega a `jefe`;
+- el dueño pasa un ticket a `blocked` y la fila y su motivo cambian solos (por frames del WebSocket); otro pasa a `dropped` y deja la lista en el acto, y aparece en el archivo con por qué terminó;
+- el agente levanta la bandera: la fila y el botón se encienden, la cola de atención la muestra con el panel del docket y "Open in docket" lo abre; descartarla pasa el ticket a `blocked` con su motivo y el botón se apaga;
+- la pregunta adjunta aparece (`question waiting`) y se responde desde el panel;
+- "Staff…" en el ticket sin dueño contrata `medir-la-memoria` en el primer nivel y el ticket pasa a `Open`, asignado;
+- al final, el estado de cada ticket en el motor coincide con lo que mostró la vista.
+
+Capturas por marcador: `docket` (la lista con el backlog y el detalle de un ticket), `docket-artifact` (el Explorador con el artefacto guardado) y `docket-flag` (un ticket con la bandera, abierto desde la cola de atención).
+
+La prueba también corre localmente en Linux con WebKitGTK bajo Xvfb y el motor de fixture, sin las partes de Windows (notificaciones, barra de tareas, Explorador). Así se depuró antes del primer push.
+
+Fuera del recorte: subir y borrar adjuntos del ticket, la búsqueda de referencias que no están cargadas (`getWorkReferences`), el lector de documentos y la bandeja de los tokens de documentos y de mail, las secciones de aceptación, revisión de integración y hallazgos, la tarjeta de cada agente (`AgentName` con su tier), el plegado de categorías y sub-ítems, el orden por creación o por cambio de estado, y el docket de un agente en su desk (`AgentDocketView`).
+
+**Líneas** (sin comentarios, líneas en blanco ni tests): `docket.rs` 1.330, `engine-client/src/docket.rs` 200 (tipos) y unas 90 nuevas en `org.rs` (el contexto, la apertura y los enlaces), frente a 2.864 de TSX: `docket.tsx` 2.004, `reflinks.tsx` 281, `refmd.tsx` 244, `workrefs.tsx` 180, `quickstaff.ts` 90 y `docketdesc.tsx` 65, más los tipos de `types.ts` y lo que no se puede aislar (`staffingoptions.ts`, `workrefresolve.ts`, `docketwindow.ts`, la apertura del docket en `App.tsx`). El TSX hace más (ver arriba); el RSX suma decisiones, holders e historial, y escribe cada atributo en su línea.
+
+El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluidos el organigrama de #26, el desk completo de #27, la bandeja, las preguntas y la atención de #28 y el docket de #29), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
 
