@@ -6,6 +6,9 @@
 //!
 //! - #11, inicio en RSX: la lista de orgs carga desde el cliente Rust y abrir la
 //!   org muestra a sus agentes;
+//! - #26, organigrama: crear una org, contratar desde el menú (y una
+//!   contratación por fuera de la UI que llega por el WebSocket), detener y
+//!   reanudar, mover y deshacer, retirar, recontratar y borrar la org;
 //! - #12, desk en RSX: la conversación, la herramienta, el Markdown sanitizado,
 //!   el texto en vivo, la carga de páginas anteriores hasta el primer mensaje y
 //!   los cuadros de un scroll de punta a punta;
@@ -50,7 +53,152 @@ if (row) {
   // pausa para la captura del CI: el inicio con la lista cargada
   dioxus.send({ pause: 'home' });
   await timeout(3000);
-  row.click();
+}
+
+// #26: organigrama. Crear una org, contratar, detener y reanudar, mover,
+// retirar y recontratar desde el menú de agente, y borrar la org.
+const chart = r.chart = {};
+const setValue = (el, value, type = 'input') => { el.value = value; el.dispatchEvent(new Event(type, { bubbles: true })) };
+const view = () => document.querySelector('.dx-org-view');
+const agentCard = id => document.querySelector(`.dx-org-view .dx-agent[data-node="${id}"]`);
+const parentOf = id => {
+  const card = agentCard(id);
+  const up = card && card.closest('.node').parentElement.closest('.node');
+  return up ? up.querySelector(':scope > .card').getAttribute('data-node') : null;
+};
+const closeMenu = async () => {
+  document.querySelector('.dx-menu-scrim')?.click();
+  await waitFor(() => !document.querySelector('.ctxmenu'), 5000);
+};
+// clic derecho sobre la tarjeta, con coordenadas reales: el menú se abre ahí
+const menuFor = async id => {
+  await closeMenu();
+  const card = id === '@user' ? document.querySelector('.dx-user-card') : agentCard(id);
+  if (!card) return null;
+  const box = card.getBoundingClientRect();
+  card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true,
+    clientX: Math.round(box.left + box.width * 0.4), clientY: Math.round(box.top + box.height / 2) }));
+  return await waitFor(() => document.querySelector('.ctxmenu'), 5000);
+};
+const pick = async (id, label) => {
+  const menu = await menuFor(id);
+  const entry = menu && [...menu.querySelectorAll('.ctxmenu-item')].find(b => b.textContent.trim() === label);
+  if (!entry) { chart.missing = (chart.missing || []).concat(`${id}: ${label}`); await closeMenu(); return false }
+  entry.click();
+  return true;
+};
+const hire = async (id, name, grant, pause) => {
+  if (!(await pick(id, id === '@user' ? 'Hire a top-level agent…' : 'Hire a subordinate…'))) return false;
+  const form = await waitFor(() => document.querySelector('.dx-hire'), 5000);
+  if (!form) return false;
+  setValue(form.querySelector('#dx-hire-name'), name);
+  setValue(form.querySelector('#dx-hire-grant'), String(grant));
+  await timeout(300);
+  if (pause) { dioxus.send({ pause }); await timeout(3000) }
+  form.querySelector('button[type="submit"]').click();
+  return !!(await waitFor(() => agentCard(name), 15000));
+};
+const loads = () => Number(view() ? view().dataset.loads : NaN);
+const newOrg = document.querySelector('.welcome-card .dx-new-org');
+if (newOrg) {
+  newOrg.click();
+  const input = await waitFor(() => document.querySelector('.dx-new-org-form input'), 5000);
+  if (input) {
+    setValue(input, 'Prueba Dioxus');
+    await timeout(200);
+    document.querySelector('.dx-new-org-form button[type="submit"]').click();
+  }
+  chart.created = !!(await waitFor(() => view() && document.querySelector('.dx-user-card'), 20000));
+  chart.orgName = (document.querySelector('.dx-org-view h2') || {}).textContent || null;
+  chart.emptyTree = !!document.querySelector('.dx-empty');
+  // sin sondeo: con la org quieta, el árbol no se vuelve a pedir
+  await waitFor(() => view() && view().dataset.connected === 'true', 10000);
+  // (una relectura en esos segundos solo puede venir de un frame del motor)
+  const frames = () => Number(view() ? view().dataset.frames : NaN);
+  const idleFrom = { loads: loads(), frames: frames() };
+  await timeout(8000);
+  chart.idle = { seconds: 8, loads: loads() - idleFrom.loads, frames: frames() - idleFrom.frames };
+  chart.hiredTop = await hire('@user', 'jefe', 5, 'chart-hire');
+  chart.hiredSub = await hire('jefe', 'ayudante', 0);
+  chart.nested = parentOf('ayudante') === 'jefe';
+  // un cambio hecho fuera de la UI (el cliente Rust directo) llega por el WebSocket
+  dioxus.send({ externalHire: 'externo' });
+  chart.external = await dioxus.recv();
+  chart.externalShown = !!(await waitFor(() => agentCard('externo'), 15000));
+  chart.externalTop = parentOf('externo') === '@user';
+  chart.bar = (document.querySelector('.dx-org-view .chip.agents') || {}).textContent || null;
+  chart.credits = (document.querySelector('.dx-org-view .dx-credits') || {}).textContent || null;
+  chart.model = (agentCard('jefe')?.querySelector('.badge.prov-claude') || {}).textContent || null;
+  // el menú de agente, con captura
+  const menu = await menuFor('ayudante');
+  chart.menu = menu ? [...menu.querySelectorAll('.ctxmenu-item')].map(b => b.textContent.trim() + (b.disabled ? ' (disabled)' : '')) : null;
+  if (menu) {
+    dioxus.send({ pause: 'chart-menu' });
+    await timeout(3000);
+    await closeMenu();
+  }
+  const status = id => agentCard(id) && agentCard(id).dataset.status;
+  // detener y reanudar (HaltControl)
+  if (await pick('ayudante', 'Halt')) {
+    chart.halted = !!(await waitFor(() => status('ayudante') === 'Halted' && agentCard('ayudante').querySelector('.badge.halted'), 15000));
+    chart.haltToast = [...document.querySelectorAll('.toast')].map(t => t.textContent).find(t => t.includes('halted')) || null;
+    dioxus.send({ pause: 'chart' });
+    await timeout(3000);
+  }
+  if (await pick('ayudante', 'Unhalt')) {
+    chart.unhalted = !!(await waitFor(() => status('ayudante') === 'Idle', 15000));
+  }
+  // interrumpir: solo con un turno en curso, como el STOP del desk
+  const m2 = await menuFor('ayudante');
+  const interrupt = m2 && [...m2.querySelectorAll('.ctxmenu-item')].find(b => b.textContent.trim() === 'Interrupt');
+  chart.interruptDisabledWhenIdle = !!(interrupt && interrupt.disabled);
+  await closeMenu();
+  // mover al primer nivel, y deshacer desde el aviso
+  if (await pick('ayudante', 'Move to…')) {
+    const form = await waitFor(() => document.querySelector('.dx-move'), 5000);
+    if (form) {
+      setValue(form.querySelector('#dx-move-to'), '', 'change');
+      await timeout(300);
+      form.querySelector('button[type="submit"]').click();
+      chart.moved = !!(await waitFor(() => parentOf('ayudante') === '@user', 15000));
+      const undo = await waitFor(() => [...document.querySelectorAll('.toast')].find(t => t.textContent.includes('now reports to'))?.querySelector('.toast-undo'), 5000);
+      if (undo) undo.click();
+      chart.movedBack = !!(await waitFor(() => parentOf('ayudante') === 'jefe', 15000));
+    }
+  }
+  // retirar (con la confirmación de AgentRetireConfirm), plegado, y recontratar
+  if (await pick('ayudante', 'Retire…')) {
+    const confirm = await waitFor(() => document.querySelector('.dx-confirm'), 5000);
+    chart.retireConfirm = confirm ? confirm.querySelector('.confirm-body').textContent : null;
+    if (confirm) confirm.querySelector('.danger.solid').click();
+    chart.retiredHidden = !!(await waitFor(() => !agentCard('ayudante') && document.querySelector('.dx-tree .tray-arch'), 15000));
+    const fold = document.querySelector('.dx-tree .tray-arch');
+    if (fold) fold.click();
+    chart.retiredShown = !!(await waitFor(() => agentCard('ayudante') && agentCard('ayudante').closest('.node.archived'), 5000));
+    if (await pick('ayudante', 'Rehire')) {
+      chart.rehired = !!(await waitFor(() => status('ayudante') === 'Idle', 15000));
+    }
+  }
+  chart.loads = loads();
+  chart.frames = frames();
+  chart.toasts = [...document.querySelectorAll('.toast')].map(t => t.textContent);
+  // volver al inicio y borrar la org (con la confirmación de App.tsx)
+  document.querySelector('.dx-org-view button.home').click();
+  const mine = await waitFor(() => document.querySelector('.welcome-card nav .org[data-slug="prueba-dioxus"]'), 15000);
+  chart.listed = !!mine;
+  if (mine) {
+    mine.querySelector('.org-del').click();
+    const confirm = await waitFor(() => document.querySelector('.dx-delete-org'), 5000);
+    chart.deleteConfirm = confirm ? confirm.querySelector('h3').textContent : null;
+    if (confirm) confirm.querySelector('.danger.solid').click();
+    chart.deleted = !!(await waitFor(() => !document.querySelector('.welcome-card nav .org[data-slug="prueba-dioxus"]'), 15000));
+  }
+}
+
+const fixtureRow = await waitFor(() => [...document.querySelectorAll('.welcome-card nav .org')]
+  .find(el => el.textContent.includes('spike-fixture')), 15000);
+if (fixtureRow) {
+  fixtureRow.click();
   home.orgOpened = !!(await waitFor(() => document.querySelector('.dx-org-view'), 10000));
   home.agentShown = !!(await waitFor(() => document.querySelector('.dx-agent[data-node="worker"]'), 15000));
 }
@@ -339,7 +487,10 @@ fn marker(name: &str) {
 
 #[component]
 pub fn Probe() -> Element {
-    use_future(|| async move {
+    let client = crate::engine_client();
+    use_future(move || {
+        let client = client.clone();
+        async move {
         if report_path().is_none() {
             return;
         }
@@ -359,6 +510,15 @@ pub fn Probe() -> Element {
                         let finished = wait_for_ci("native").await;
                         record("native_ci_done", serde_json::json!(finished));
                         let _ = eval.send(serde_json::json!(true));
+                    } else if let Some(name) = message.get("externalHire").and_then(|v| v.as_str()) {
+                        // #26: una contratación por fuera de la UI, con el cliente Rust directo;
+                        // la UI tiene que verla llegar por el WebSocket de la org.
+                        let request = orgtree_engine_client::OpRequest::hire(None, "haiku", name, 0, None);
+                        let result = match client.op("prueba-dioxus", &request).await {
+                            Ok(r) => serde_json::json!({ "node": r.node, "warnings": r.warnings }),
+                            Err(e) => serde_json::json!({ "error": e.to_string() }),
+                        };
+                        let _ = eval.send(result);
                     } else if let Some(done) = message.get("done") {
                         break done.clone();
                     }
@@ -367,7 +527,7 @@ pub fn Probe() -> Element {
             }
         };
         // `native` ya quedó guardado con la parte del shell durante la pausa.
-        for key in ["home", "desk", "multiwindow", "error"] {
+        for key in ["home", "chart", "desk", "multiwindow", "error"] {
             if let Some(value) = report.get(key) {
                 record(key, value.clone());
             }
@@ -403,6 +563,7 @@ pub fn Probe() -> Element {
         record("quit", serde_json::json!({ "after_second_instance": woke, "main_visible": main.window.is_visible() }));
         // Salir, como desde el menú de la bandeja: cierra todo y apaga el motor.
         crate::native::quit();
+        }
     });
     rsx! {}
 }

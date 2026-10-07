@@ -78,8 +78,73 @@ pub struct TreeNode {
     pub context_window: Option<u64>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    // Organigrama (#26): créditos, detención, cola de turnos y último estado.
+    /// Créditos del asiento (puede ser fraccionario, con piso 0,10).
+    #[serde(default)]
+    pub seat: Option<f64>,
+    /// Créditos concedidos para financiar a los subordinados.
+    #[serde(default)]
+    pub grant: Option<f64>,
+    /// Lo que queda libre de `grant`; `null` en nodos no vivos.
+    #[serde(default)]
+    pub free: Option<f64>,
+    /// Detención explícita (`halting` o `halted`); ausente si no está detenido.
+    #[serde(default)]
+    pub halt: Option<HaltState>,
+    /// En cola detrás del límite de turnos de la máquina.
+    #[serde(default)]
+    pub queued_for_slot: Option<Value>,
+    /// Congelado (límite de uso o red).
+    #[serde(default)]
+    pub frozen: Option<Value>,
+    #[serde(default)]
+    pub last_status: Option<NodeStatus>,
+    #[serde(default)]
+    pub inflight_at: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// `TreeNode.halt` (types.ts).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HaltState {
+    /// `halting` mientras el turno activo termina, `halted` después.
+    pub phase: String,
+    #[serde(default)]
+    pub requested_at: Option<String>,
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// `NodeStatus` (types.ts): el último `orgtree_status` del agente.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeStatus {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub at: Option<String>,
+}
+
+/// `AuditReport` (types.ts): la autoauditoría del ledger que trae el árbol.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AuditReport {
+    #[serde(default)]
+    pub live_nodes: u64,
+    /// Créditos en circulación: lo que tienen los agentes de primer nivel.
+    #[serde(default)]
+    pub top_level_holds: f64,
+    #[serde(default = "yes")]
+    pub no_overdraft: bool,
+    #[serde(default)]
+    pub problems: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl TreeNode {
@@ -106,6 +171,19 @@ pub struct TreePayload {
     pub roots: Vec<TreeNode>,
     #[serde(default)]
     pub archived_defaults: Option<Map<String, Value>>,
+    /// Organigrama (#26): la barra de la org.
+    #[serde(default)]
+    pub audit: Option<AuditReport>,
+    #[serde(default)]
+    pub cost_usd_total: f64,
+    #[serde(default)]
+    pub cost_usd_unknown: Option<bool>,
+    /// Tiers contratables y su costo de asiento.
+    #[serde(default)]
+    pub tiers: Map<String, Value>,
+    /// Detención de toda la org (killswitch), si está trabada.
+    #[serde(default)]
+    pub killswitch: Option<Value>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -183,6 +261,118 @@ pub struct ChatPayload {
     /// Cursor para pedir la página anterior.
     #[serde(default)]
     pub before: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// `OpRequest` (types.ts): el cuerpo de `POST /api/orgs/{slug}/ops`. Solo
+/// los campos de las operaciones del organigrama; los `None` no se mandan.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpRequest {
+    pub op: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// `hire`: el superior (`Some(None)` = primer nivel, bajo el usuario). En
+    /// `hire` se manda siempre, como el renderer (`parent: null`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub charter: Option<String>,
+    /// `move`: el nuevo superior (`Some(None)` = primer nivel). En `move` se manda siempre.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_parent: Option<Option<String>>,
+}
+
+impl OpRequest {
+    /// `{op:'hire', parent, tier, grant, name, charter}` (OrgCanvas.tsx `confirmDraft`).
+    pub fn hire(parent: Option<&str>, tier: &str, name: &str, grant: u64, charter: Option<&str>) -> OpRequest {
+        OpRequest {
+            op: "hire".into(),
+            parent: Some(parent.map(str::to_string)),
+            tier: Some(tier.into()),
+            grant: Some(grant),
+            name: Some(name.into()),
+            // `charter?.trim() || undefined`, como el renderer
+            charter: charter.map(str::trim).filter(|c| !c.is_empty()).map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// `{op:'retire'|'rehire'|'dissolve', node}` (agentmenu.tsx, desk.tsx).
+    pub fn on_node(op: &str, node: &str) -> OpRequest {
+        OpRequest { op: op.into(), node: Some(node.into()), ..Default::default() }
+    }
+
+    /// `{op:'move', node, new_parent}` (OrgCanvas.tsx, el deshacer de un arrastre).
+    pub fn move_to(node: &str, new_parent: Option<&str>) -> OpRequest {
+        OpRequest {
+            op: "move".into(),
+            node: Some(node.into()),
+            new_parent: Some(new_parent.map(str::to_string)),
+            ..Default::default()
+        }
+    }
+}
+
+/// `OpResult` (types.ts): abierto; `warnings` es lo que el renderer muestra.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpResult {
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// `hire`: el id del agente nuevo.
+    #[serde(default)]
+    pub node: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// `POST /api/orgs` responde el slug de la org nueva.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatedOrg {
+    pub slug: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// `haltNode` (api.ts).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HaltResult {
+    #[serde(default)]
+    pub halted: bool,
+    #[serde(default)]
+    pub settled: bool,
+    #[serde(default)]
+    pub halting: Option<bool>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// `unhaltNode` (api.ts).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UnhaltResult {
+    #[serde(default)]
+    pub unhalted: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// `interruptNode` (api.ts).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct InterruptResult {
+    #[serde(default)]
+    pub interrupted: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -278,6 +468,30 @@ mod tests {
             Frame::Mail { org: "a".into(), from: "x".into(), to: "y".into() }
         );
         assert!(matches!(Frame::parse(r#"{"type":"nuevo"}"#).unwrap(), Frame::Other(_)));
+    }
+
+    #[test]
+    fn op_request_como_el_renderer() {
+        let hire = serde_json::to_value(OpRequest::hire(None, "haiku", "jefe", 5, Some("  "))).unwrap();
+        assert_eq!(hire, serde_json::json!({"op":"hire","parent":null,"tier":"haiku","grant":5,"name":"jefe"}));
+        let under = serde_json::to_value(OpRequest::hire(Some("jefe"), "haiku", "ayudante", 0, None)).unwrap();
+        assert_eq!(under["parent"], "jefe");
+        let moved = serde_json::to_value(OpRequest::move_to("ayudante", None)).unwrap();
+        assert_eq!(moved, serde_json::json!({"op":"move","node":"ayudante","new_parent":null}));
+        let retire = serde_json::to_value(OpRequest::on_node("retire", "x")).unwrap();
+        assert_eq!(retire, serde_json::json!({"op":"retire","node":"x"}));
+    }
+
+    #[test]
+    fn nodo_detenido_y_auditoria() {
+        let node: TreeNode = serde_json::from_str(
+            r#"{"id":"a","state":"live","seat":0.1,"grant":5,"free":4.9,"halt":{"phase":"halted","requested_at":"t","by":"@user"},"last_status":{"status":"idle","summary":"hired"}}"#,
+        )
+        .unwrap();
+        assert_eq!(node.halt.as_ref().map(|h| h.phase.as_str()), Some("halted"));
+        assert_eq!((node.seat, node.grant, node.free), (Some(0.1), Some(5.0), Some(4.9)));
+        let audit: AuditReport = serde_json::from_str(r#"{"live_nodes":2,"top_level_holds":6}"#).unwrap();
+        assert!(audit.no_overdraft);
     }
 
     #[test]

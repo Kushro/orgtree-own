@@ -147,6 +147,57 @@ impl Client {
         self.json(response).await
     }
 
+    pub async fn delete<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
+        let response = self.http.delete(format!("{}{path}", self.origin)).send().await?;
+        self.json(response).await
+    }
+
+    /// `POST` sin cuerpo, como `req(path, { method: 'POST' })` del renderer.
+    pub async fn post_empty<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
+        let response = self.http.post(format!("{}{path}", self.origin)).send().await?;
+        self.json(response).await
+    }
+
+    /// `POST /api/orgs` — `createOrg` (api.ts): `net_autoconnect` solo se
+    /// manda cuando es `false`, y `net_hubs` solo si hay alguno.
+    pub async fn create_org(&self, name: &str, dirs: &[String], net_autoconnect: bool, net_hubs: &[String]) -> Result<CreatedOrg, ClientError> {
+        let mut body = serde_json::json!({ "name": name, "dirs": dirs });
+        if !net_autoconnect {
+            body["net_autoconnect"] = serde_json::Value::Bool(false);
+        }
+        if !net_hubs.is_empty() {
+            body["net_hubs"] = serde_json::json!(net_hubs);
+        }
+        self.post("/api/orgs", &body).await
+    }
+
+    /// `DELETE /api/orgs/{slug}` — `deleteOrg` (api.ts).
+    pub async fn delete_org(&self, slug: &str) -> Result<serde_json::Value, ClientError> {
+        self.delete(&format!("/api/orgs/{}", encode(slug))).await
+    }
+
+    /// `POST /api/orgs/{slug}/ops` — `runOp` (api.ts): contratar, retirar,
+    /// recontratar, mover y el resto de las operaciones del ledger.
+    pub async fn op(&self, slug: &str, request: &OpRequest) -> Result<OpResult, ClientError> {
+        let body = serde_json::to_value(request).expect("OpRequest siempre se serializa");
+        self.post(&format!("/api/orgs/{}/ops", encode(slug)), &body).await
+    }
+
+    /// `POST /api/orgs/{slug}/nodes/{nid}/halt` — `haltNode` (api.ts).
+    pub async fn halt(&self, slug: &str, node: &str) -> Result<HaltResult, ClientError> {
+        self.post_empty(&format!("/api/orgs/{}/nodes/{}/halt", encode(slug), encode(node))).await
+    }
+
+    /// `POST /api/orgs/{slug}/nodes/{nid}/unhalt` — `unhaltNode` (api.ts).
+    pub async fn unhalt(&self, slug: &str, node: &str) -> Result<UnhaltResult, ClientError> {
+        self.post_empty(&format!("/api/orgs/{}/nodes/{}/unhalt", encode(slug), encode(node))).await
+    }
+
+    /// `POST /api/orgs/{slug}/nodes/{nid}/interrupt` — `interruptNode` (api.ts).
+    pub async fn interrupt(&self, slug: &str, node: &str) -> Result<InterruptResult, ClientError> {
+        self.post_empty(&format!("/api/orgs/{}/nodes/{}/interrupt", encode(slug), encode(node))).await
+    }
+
     /// `GET /api/orgs` — la ventana de inicio.
     pub async fn list_orgs(&self) -> Result<Vec<OrgListEntry>, ClientError> {
         self.get("/api/orgs").await

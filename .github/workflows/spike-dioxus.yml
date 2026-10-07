@@ -96,7 +96,7 @@ jobs:
       - name: Build installer
         run: dx bundle --platform desktop --package-types nsis --release --out-dir dist
 
-      - name: Smoke test (engine, home, live desk, desk window and native integration in RSX)
+      - name: Smoke test (engine, home, org chart, live desk, desk window and native integration in RSX)
         shell: pwsh
         env:
           ORGTREE_DIOXUS_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -160,11 +160,12 @@ jobs:
             $after = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$after)
             $ci.dx = $after.L - $before.L; $ci.dy = $after.T - $before.T; $ci.at = "$($pt.X),$($pt.Y)"
           }
-          $deadline = (Get-Date).AddSeconds(300)
+          $deadline = (Get-Date).AddSeconds(420)
           $shots = @{}
           while ((Get-Date) -lt $deadline -and -not $p.HasExited) {
-            # la prueba deja un marcador y espera 3 s: capturas del inicio, del desk y de las dos ventanas
-            foreach ($name in 'home', 'desk', 'popout') {
+            # la prueba deja un marcador y espera 3 s: capturas del inicio, del organigrama
+            # (contratación, menú de agente, agente detenido), del desk y de las dos ventanas
+            foreach ($name in 'home', 'chart-hire', 'chart-menu', 'chart', 'desk', 'popout') {
               if (-not $shots[$name] -and (Test-Path "$($env:ORGTREE_DIOXUS_PROBE).$name")) {
                 try { Save-Screen $name } catch { Write-Host "screenshot: $_" }; $shots[$name] = $true
               }
@@ -209,6 +210,28 @@ jobs:
           if ($hp.bridge -ne 'undefined') { $failures += "a desktop bridge leaked into the webview: $($hp.bridge)" }
           # #24: la raíz de datos en uso, a la vista en el inicio
           if ($hp.dataRoot -ne $env:ORGTREE_DIOXUS_DATA) { $failures += "data root not shown on the home card: $($hp.dataRoot)" }
+          # #26: organigrama. Crear la org, contratar (el fixture declara un Claude stub),
+          # detener y reanudar, mover y deshacer, retirar y recontratar, y borrar la org.
+          $ch = $probe.chart
+          foreach ($check in 'created', 'emptyTree', 'hiredTop', 'hiredSub', 'nested', 'externalShown', 'externalTop',
+                             'halted', 'unhalted', 'interruptDisabledWhenIdle', 'moved', 'movedBack',
+                             'retiredHidden', 'retiredShown', 'rehired', 'listed', 'deleted') {
+            if ($ch.$check -ne $true) { $failures += "chart.$check was $($ch.$check)" }
+          }
+          if ($ch.orgName -ne 'Prueba Dioxus') { $failures += "org name in the orgbar: $($ch.orgName)" }
+          if ($ch.bar -notlike '3 live*H3') { $failures += "orgbar agents chip: $($ch.bar)" }
+          if ($ch.credits -ne "circulation 7 $([char]0xB7) seats 3 $([char]0xB7) free 4") { $failures += "orgbar credits: $($ch.credits)" }
+          if ($ch.model -notlike 'claude-haiku*') { $failures += "model badge: $($ch.model)" }
+          $ellipsis = [char]0x2026
+          foreach ($entry in 'Open desk', "Hire a subordinate$ellipsis", "Move to$ellipsis", 'Interrupt (disabled)', 'Halt', "Retire$ellipsis") {
+            if ($ch.menu -notcontains $entry) { $failures += "agent menu lacks '$entry': $($ch.menu -join ', ')" }
+          }
+          if ($ch.retireConfirm -notlike '*rehire brings it back*') { $failures += "retire confirm: $($ch.retireConfirm)" }
+          if ($ch.missing) { $failures += "menu entries not found: $($ch.missing -join ', ')" }
+          # sin sondeo: con la org quieta, cada relectura del árbol viene de un frame del WebSocket
+          if (-not ($ch.idle.loads -le $ch.idle.frames)) { $failures += "the tree was re-read without a WebSocket frame: $($ch.idle | ConvertTo-Json -Compress)" }
+          if (-not ($ch.loads -le $ch.frames + 1)) { $failures += "tree reads ($($ch.loads)) exceed WebSocket frames ($($ch.frames)) plus the first read" }
+          "### Org chart (#26, Dioxus)`n- menu: $($ch.menu -join ' / ')`n- orgbar: $($ch.bar) / $($ch.credits)`n- tree reads $($ch.loads), WebSocket frames $($ch.frames), idle: $($ch.idle | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           # #12: desk en RSX
           $desk = $probe.desk
           foreach ($check in 'opened', 'toolShown', 'markdownBold', 'markdownList', 'injectionBlocked') {
@@ -261,7 +284,7 @@ jobs:
             try { $tcp.Connect('127.0.0.1', [int]$enginePort); $failures += "the engine is still listening on $enginePort after the app exited" } catch { Write-Host "Engine stopped with the app (port $enginePort closed)" } finally { $tcp.Dispose() }
           }
           if ($failures) { throw ($failures -join '; ') }
-          Write-Host "Home window, live desk, desk window and native integration in RSX verified in WebView2"
+          Write-Host "Home window, org chart, live desk, desk window and native integration in RSX verified in WebView2"
 
       # #24: el instalador generado, instalado en silencio en una carpeta descartable
       # y arrancado desde ahí sin ORGTREE_DIOXUS_PYTHON: el motor, el runtime y

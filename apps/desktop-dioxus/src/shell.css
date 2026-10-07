@@ -4,14 +4,30 @@
 /* La raíz de datos en uso (#24), en el inicio y en la pantalla de arranque. */
 .dx-data-root { font-size: 11px; margin: 12px 0 0; overflow-wrap: anywhere; }
 .dx-data-root code { font-size: 11px; }
-.dx-org-view { padding: 16px 24px; }
-.dx-org-view header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-.dx-org-view header h2 { margin: 0; }
-.dx-agents { display: flex; flex-wrap: wrap; gap: 12px; }
-.dx-agent { width: 180px; padding: 10px 12px; border: 1px solid var(--line, #333); border-radius: 6px;
-  background: var(--panel, #252525); cursor: pointer; }
-.dx-agent .dx-agent-title { font-weight: 600; }
-.dx-agent .dx-agent-meta { font-size: 11px; }
+/* Organigrama (#26): la barra de la org arriba y el árbol (`.node`, `.card`,
+   `.kids` del renderer) con su propio scroll. */
+.dx-org-view { height: 100vh; display: flex; flex-direction: column; box-sizing: border-box; padding: 0 0 0 18px; }
+.dx-org-view > .orgbar { flex: none; margin-bottom: 8px; }
+.dx-org-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 18px 24px 0; }
+.dx-tree { max-width: 980px; }
+.dx-tree .card { cursor: pointer; min-height: 34px; }
+.dx-tree .card:focus-visible { outline: 1px solid var(--button-accent, var(--accent)); }
+.dx-user-card { cursor: context-menu; }
+.dx-user-card .tier { color: var(--ink-strong); }
+.dx-agent-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dx-agent-line { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.dx-agent-sum { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dx-tree .badges { flex: none; justify-content: flex-end; }
+.badge.halted { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.dx-row-menu { flex: none; background: none; border: 1px solid transparent; color: var(--dim);
+  padding: 0 7px; border-radius: 5px; font-size: 15px; line-height: 20px; cursor: pointer; }
+.dx-row-menu:hover { color: var(--ink-strong); border-color: var(--line); }
+.dx-tree .tray-arch { background: none; border: 0; color: var(--dim); font-size: 11px; cursor: pointer; }
+/* El menú de agente se cierra con un clic fuera. */
+.dx-menu-scrim { position: fixed; inset: 0; z-index: 89; }
+.dx-hire, .dx-move { gap: 8px; }
+.dx-new-org-form { margin: 8px 0; }
+.dx-home-error { margin: 8px 0; cursor: pointer; }
 
 /* Desk (#12): la ventana entera, con la lista como único scroll. */
 .dx-desk { height: 100vh; display: flex; flex-direction: column; padding: 0 16px; box-sizing: border-box; }

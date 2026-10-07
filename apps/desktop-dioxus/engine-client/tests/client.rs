@@ -107,11 +107,7 @@ fn motor_real_orgs_arbol_desk_y_websocket() {
         }
 
         let before = client.list_orgs().await.expect("lista de orgs");
-        let created: serde_json::Value = client
-            .post("/api/orgs", &serde_json::json!({ "name": "Spike Dioxus", "dirs": [], "net_autoconnect": false }))
-            .await
-            .expect("crear org");
-        let slug = created["slug"].as_str().expect("slug").to_string();
+        let slug = client.create_org("Spike Dioxus", &[], false, &[]).await.expect("crear org").slug;
         let after = client.list_orgs().await.unwrap();
         assert_eq!(after.len(), before.len() + 1);
         assert!(after.iter().any(|o| o.slug == slug));
@@ -140,6 +136,11 @@ fn motor_real_orgs_arbol_desk_y_websocket() {
                 other => panic!("{other:?}"),
             }
         }
+        drop(events);
+        // #26: borrar la org, como el botón de la página de inicio
+        let deleted = client.delete_org(&slug).await.expect("borrar org");
+        assert_eq!(deleted["ok"], true);
+        assert!(!client.list_orgs().await.unwrap().iter().any(|o| o.slug == slug));
     });
     let _ = engine.stop();
     let _ = std::fs::remove_dir_all(&data);

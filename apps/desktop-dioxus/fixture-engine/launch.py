@@ -78,9 +78,16 @@ def _records(sid: str) -> list[dict]:
 
 
 def _stub_providers() -> None:
-    from orgtree import providers, supervisor, warmpool
+    from orgtree import accounts, providers, supervisor, warmpool
     providers.antigravity_status = lambda **kw: {"available": False, "installed": False}
     providers.codex_status = lambda **kw: {"available": False, "installed": False}
+    # Proveedor stub para contratar (#26): la puerta de contratación
+    # (`provider_hire_gate`) pide el CLI de Claude instalado y una cuenta
+    # iniciada. En el CI no hay ninguno de los dos, así que el fixture los
+    # declara presentes. Ningún turno corre: `send_message` y el pool de
+    # procesos calientes están apagados abajo.
+    supervisor.claude_install_state = lambda force=False: {"installed": True, "path": "fixture-claude"}
+    accounts.live_identity = lambda: {"uuid": "fixture-account", "email": ""}
     supervisor.start_usage_warm_loop = lambda: None
     supervisor.start_cred_watcher = lambda: None
     warmpool.start_warm_pool = lambda: None
