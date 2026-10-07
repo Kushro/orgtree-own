@@ -268,6 +268,10 @@ impl State {
 
     /// `TaskbarAttention.set`: parpadea con una llegada nueva, para sin nada pendiente.
     fn attention(&mut self, ids: HashSet<String>) -> Pulse {
+        if ids.is_empty() && self.known.is_empty() {
+            // nada pendiente antes ni ahora: no hay nada que parar otra vez
+            return Pulse::Keep;
+        }
         let arrived = ids.iter().any(|id| !self.known.contains(id));
         self.known = ids;
         if self.known.is_empty() {
@@ -480,7 +484,8 @@ async fn pass(client: &Client) {
         }
     }
     state.documents_observed = true;
-    let eligible: Vec<DesktopNotice> = candidates.into_iter().filter(|n| enabled(&n.kind, &prefs) && !is_question_visible(n)).collect();
+    let (eligible, muted): (Vec<DesktopNotice>, Vec<DesktopNotice>) =
+        candidates.into_iter().filter(|n| !is_question_visible(n)).partition(|n| enabled(&n.kind, &prefs));
     let removed = match &pending {
         Some(pending) => state.sync(eligible.iter().map(key_of).collect(), pending),
         None => Vec::new(),
@@ -492,6 +497,9 @@ async fn pass(client: &Client) {
         log("sync", serde_json::json!({ "eligible": eligible.len(), "removed": removed_json(&removed) }));
     }
 
+    for n in muted {
+        log("notify", serde_json::json!({ "id": n.id, "kind": n.kind, "org": n.org, "decision": "kind" }));
+    }
     let focused = any_focused();
     for n in eligible {
         let decision = STATE.lock().unwrap().decide(&n, &prefs, focused);
@@ -629,5 +637,6 @@ mod tests {
         assert_eq!(s.attention(set(&["x", "y"])), Pulse::Start);
         assert_eq!(s.attention(set(&["y"])), Pulse::Keep);
         assert_eq!(s.attention(set(&[])), Pulse::Stop);
+        assert_eq!(s.attention(set(&[])), Pulse::Keep);
     }
 }
