@@ -393,8 +393,8 @@ jobs:
             $record = Get-Content $backend -Raw | ConvertFrom-Json
             if ($record.backend -ne 'postgres') { $failures += "store-backend.json chose $($record.backend)" }
           }
-          if (-not (Test-Path (Join-Path $data 'pg\cluster\PG_VERSION'))) { $failures += 'no PostgreSQL cluster in <data>\pg\cluster' }
-          else { Write-Host "PG_VERSION: $(Get-Content (Join-Path $data 'pg\cluster\PG_VERSION') -Raw)" }
+          if (-not (Test-Path (Join-Path $data 'pg\cluster\data\PG_VERSION'))) { $failures += 'no PostgreSQL cluster in <data>\pg\cluster\data' }
+          else { Write-Host "PG_VERSION: $(Get-Content (Join-Path $data 'pg\cluster\data\PG_VERSION') -Raw)" }
           $processes = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$dir\*" }
           $postgres = @($processes | Where-Object { $_.Name -eq 'postgres.exe' })
           $python = @($processes | Where-Object { $_.ExecutablePath -eq (Join-Path $dir 'engine\runtime\python.exe') })
@@ -412,12 +412,12 @@ jobs:
           }
           $size = (Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum
           "- installed folder: {0:N1} MB, {1}: {2:N1} MB, {3} postgres processes" -f ($size / 1MB), $exe.Name, ($exe.Length / 1MB), $postgres.Count | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          taskkill /PID $p.Id /T /F | Out-Null
+          taskkill /PID $p.Id /T /F 2>&1 | Out-Null
           if ($failures) {
             # Diagnóstico: los registros de la raíz y el motor empaquetado lanzado a mano
             # con el mismo entorno que le da el shell (el shell descarta su stderr).
             Write-Host "Files in the data root: $((Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($data.Length) }) -join ', ')"
-            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, *.json, *.txt -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 2MB -and $_.FullName -notlike "*\secrets\*" } | Select-Object -First 20) {
+            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, *.json, *.txt -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 200KB -and $_.FullName -notlike "*\secrets\*" } | Select-Object -First 20) {
               Write-Host "----- $($log.FullName)"; Get-Content $log.FullName -Tail 40
             }
             Get-ChildItem Env:PG* | ForEach-Object { Remove-Item "Env:$($_.Name)" }  # como hace el shell (engine-host)

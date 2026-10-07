@@ -1,6 +1,8 @@
 // Etapa de reconexión de la prueba (ver probe.rs): corre en la página recargada
 // después de que el motor se cayó y el shell lo reinició. __PREFIX__ lo pone Rust.
 (async () => {
+  if (window.__orgtreeReconnectProbeRan) return;
+  window.__orgtreeReconnectProbeRan = true;
   const r = {};
   const timeout = (ms, value) => new Promise(done => setTimeout(() => done(value), ms));
   const waitFor = async (test, ms) => {
@@ -39,7 +41,9 @@
     } catch (e) { native.maximizeError = String(e) }
     off();
     try {
-      const n = { id: 'probe-1', title: 'Orgtree', body: 'Notificación nativa del spike de Tauri', org: 'spike-fixture', kind: 'question' };
+      // Un id por carga: si el script corre en dos cargas (la página puede recargarse
+      // también contra el motor caído), la deduplicación no debe esconder la primera.
+      const n = { id: 'probe-' + Date.now(), title: 'Orgtree', body: 'Notificación nativa del spike de Tauri', org: 'spike-fixture', kind: 'question' };
       native.notify = await bridge.notify(n);
       native.notifyAgain = await bridge.notify(n);
     } catch (e) { native.notify = String(e) }

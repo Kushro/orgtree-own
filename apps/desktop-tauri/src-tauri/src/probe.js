@@ -2,6 +2,9 @@
 // y devuelve el resultado por document.title, sin IPC. __ECHO__ y __PREFIX__
 // los reemplaza Rust.
 (async () => {
+  // Un solo recorrido por documento, aunque la carga se informe dos veces.
+  if (window.__orgtreeProbeRan) return;
+  window.__orgtreeProbeRan = true;
   const echo = 'http://127.0.0.1:__ECHO__';
   const r = {};
   const timeout = (ms, value) => new Promise(done => setTimeout(() => done(value), ms));
