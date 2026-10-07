@@ -320,15 +320,27 @@ fn open_popout(app: &tauri::AppHandle, url: &Url, features: NewWindowFeatures) -
 /// HWND contenedor del webview (clase `WRY_WEBVIEW`, hijo de la ventana de
 /// Tauri), no la ventana, que queda vacía. El controlador de WebView2 sigue
 /// respondiendo (`url()` no falla), así que el vigilante mira el contenedor:
-/// si la ventana ya no lo tiene, la destruye.
+/// si la ventana ya no lo tiene, la destruye. Mientras se crea, un popout
+/// todavía no tiene contenedor: solo cuenta como cerrado uno al que ya se le
+/// vio (el CI mostró que destruirlo a mitad de la creación traba la página).
 fn reap_closed_popouts(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("orgtree-popout-reaper".into())
-        .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            for (label, window) in app.webview_windows() {
-                if label.starts_with(POPOUT_PREFIX) && webview_container_gone(&window) {
-                    let _ = window.destroy();
+        .spawn(move || {
+            let mut seen = std::collections::HashSet::<String>::new();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let windows = app.webview_windows();
+                seen.retain(|label| windows.contains_key(label));
+                for (label, window) in windows {
+                    if !label.starts_with(POPOUT_PREFIX) {
+                        continue;
+                    }
+                    if !webview_container_gone(&window) {
+                        seen.insert(label);
+                    } else if seen.remove(&label) {
+                        let _ = window.destroy();
+                    }
                 }
             }
         })
