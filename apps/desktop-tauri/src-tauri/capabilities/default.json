@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Local splash window only: it shows engine startup status and offers Retry and Quit when the engine refuses to start (splash_retry, splash_quit). The engine UI windows have their own capability (engine-ui).",
+  "windows": [
+    "splash"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-splash-retry",
+    "allow-splash-quit"
+  ]
+}

@@ -1,0 +1,43 @@
+[package]
+name = "orgtree-tauri"
+version = "0.0.1"
+description = "Orgtree desktop shell on Tauri 2 (migration spike)"
+license = "MIT"
+edition = "2021"
+publish = false
+
+# Standalone crate: keep it out of any parent workspace.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+# Actualizaciones firmadas desde las pre-releases de la rama (#23).
+tauri-plugin-updater = "2.13"
+# La misma verificación del plugin sobre el paquete guardado (versiones del lockfile).
+minisign-verify = "0.2"
+base64 = "0.22"
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+orgtree-engine-host = { path = "../engine-host" }
+
+# Toasts de WinRT con tag y clic (#21); la misma versión que ya traen Tauri y wry.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
+# La clave Run de HKCU para `startAtLogin` (#20); la misma versión que ya está en el lockfile.
+winreg = "0.56"
+# Handlers propios de WebView2 en los popouts (#22): el nombre de marco de
+# `window.open` y `window.close()`. La misma versión que usa wry.
+webview2-com = "0.39"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

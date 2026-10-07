@@ -1,0 +1,1530 @@
+name: Spike Tauri 2
+
+on:
+  push:
+    branches: [spike/tauri]
+    paths:
+      - apps/desktop-tauri/**
+      - engine/launch.py
+      - apps/desktop/renderer/**
+      - .github/workflows/spike-tauri.yml
+      - tools/provision-runtime.py
+      - tools/provision-postgres.py
+      - tools/postgres-runtime-pin.json
+      - tools/runtime-requirements.in
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Publicar el instalador probado como pre-release (tauri-preview-<run>)
+        type: boolean
+        default: false
+
+concurrency:
+  group: spike-tauri-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: apps/desktop-tauri
+    steps:
+      # El submódulo engine/mailhub va en el paquete (lo exige provision-runtime.py).
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop-tauri/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/desktop-tauri/src-tauri
+            apps/desktop-tauri/engine-host
+            engine/native/pg-custodian -> ../../../artifacts/postgres-provision/cargo
+
+      # Python para el motor real en las pruebas y el smoke test de desarrollo.
+      # Raíz de datos descartable, nunca datos reales.
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: '3.13'
+
+      - name: Install engine dependencies
+        run: python -m pip install -r ../../tools/runtime-requirements.in
+
+      - name: Engine TokenGate tests (header and cookie)
+        working-directory: .
+        run: >-
+          python tools/run-python-verification.py --python "${{ steps.python.outputs.python-path }}"
+          tests/test_desktop_cookie_auth.py tests/test_foreground_http.py tests/test_desktop_import_jobs.py
+
+      - name: Engine supervisor tests (fake and real engine)
+        working-directory: apps/desktop-tauri/engine-host
+        env:
+          FAKE_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TEST_ENGINE_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: cargo test -- --include-ignored --nocapture
+
+      # El renderer React sin cambios, compilado como en tools/build.mjs; lo
+      # sirve el motor (ORGTREE_V2_UI_DIR). Sin el binario de Electron.
+      - name: Build renderer
+        working-directory: .
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx vite build apps/desktop/renderer --base / --outDir ../../../dist/renderer --emptyOutDir --logLevel warn
+
+      # Instalador autónomo (#18): el runtime de Python embebido, PostgreSQL 18
+      # con pg-custodian y el motor, como los extraResources de Electron.
+      - name: Cache vendor archives (embedded Python, PostgreSQL)
+        uses: actions/cache@v4
+        with:
+          path: .runtime-cache/*.zip
+          key: orgtree-vendor-${{ hashFiles('tools/postgres-runtime-pin.json', 'tools/provision-runtime.py') }}
+
+      - name: Provision embedded Python runtime
+        working-directory: .
+        run: python tools/provision-runtime.py
+
+      - name: Provision PostgreSQL 18 and pg-custodian
+        working-directory: .
+        run: python tools/provision-postgres.py
+
+      - name: Stage installer resources
+        working-directory: .
+        run: python apps/desktop-tauri/tools/stage-resources.py
+
+      - name: Verify staged resources (runtime layout, PostgreSQL manifest)
+        working-directory: .
+        run: node apps/desktop-tauri/tools/verify-resources.mjs apps/desktop-tauri/bundle-resources
+
+      - name: Install Tauri CLI
+        run: npm ci
+
+      # Actualizaciones (#23). La versión del run (0.1.<run>) va en el instalador
+      # que se prueba y se publica, así cada pre-release es más nueva que la
+      # anterior. La clave pública del updater es la variable del repositorio
+      # TAURI_UPDATER_PUBKEY; la privada es un secreto que usa solo el job de la
+      # pre-release. Además, una clave descartable de este run firma el feed
+      # local de la prueba de actualización, nunca algo publicado.
+      - name: Updater keys and version
+        id: updater
+        shell: pwsh
+        env:
+          REPO_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          $version = "0.1.${{ github.run_number }}"
+          $keys = Join-Path $env:RUNNER_TEMP 'updater-test-key'
+          New-Item -ItemType Directory -Force $keys | Out-Null
+          $password = [guid]::NewGuid().ToString('N')
+          Write-Host "::add-mask::$password"
+          npx tauri signer generate --ci -p $password -w (Join-Path $keys 'test.key') -f | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'tauri signer generate failed' }
+          $test = (Get-Content (Join-Path $keys 'test.key.pub') -Raw).Trim()
+          "ORGTREE_UPDATE_TEST_KEY_PASSWORD=$password" | Out-File $env:GITHUB_ENV -Append
+          $repo = "$env:REPO_PUBKEY".Trim()
+          if ($repo) { $pubkey = $repo; $note = 'the repository updater key (TAURI_UPDATER_PUBKEY)' }
+          else {
+            $pubkey = $test; $note = 'a throwaway key of this run: TAURI_UPDATER_PUBKEY is not set, so this installer can never update from the branch feed'
+            Write-Host "::warning::TAURI_UPDATER_PUBKEY is not set: the installer carries a throwaway updater key and a pre-release would be published without a signed feed (see docs/spikes/tauri.md, #23)."
+          }
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
+          "pubkey=$pubkey" | Out-File $env:GITHUB_OUTPUT -Append
+          "test_pubkey=$test" | Out-File $env:GITHUB_OUTPUT -Append
+          @{ version = $version } | ConvertTo-Json | Set-Content (Join-Path $env:RUNNER_TEMP 'version.conf.json') -Encoding utf8NoBOM
+          @{ version = '0.1.0' } | ConvertTo-Json | Set-Content (Join-Path $env:RUNNER_TEMP 'previous.conf.json') -Encoding utf8NoBOM
+          "### Updater (#23)`n- version $version, updater key: $note" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+
+      # La versión anterior para la prueba de actualización: sin los recursos del
+      # motor (corre con el motor de fixture) y con la clave de prueba. Se compila
+      # antes, porque comparte target/ con el instalador que prueban los demás pasos.
+      - name: Build the previous version for the update test
+        id: build_previous
+        # Si falla, los demás pasos siguen; la prueba de actualización lo reporta.
+        continue-on-error: true
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_UPDATER_PUBKEY: ${{ steps.updater.outputs.test_pubkey }}
+        run: |
+          npx tauri build --ci --config "$env:RUNNER_TEMP\previous.conf.json"
+          if ($LASTEXITCODE -ne 0) { throw "tauri build (previous version) exited with $LASTEXITCODE" }
+          $dest = Join-Path $env:RUNNER_TEMP 'update-previous'
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Move-Item src-tauri/target/release/bundle/nsis/*.exe $dest
+          Get-ChildItem $dest | ForEach-Object { "- previous version installer: {0} ({1:N1} MB)" -f $_.Name, ($_.Length / 1MB) } | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Build installer
+        id: build
+        env:
+          ORGTREE_TAURI_UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
+        run: npx tauri build --ci --config src-tauri/tauri.bundle.conf.json --config ${{ runner.temp }}/version.conf.json
+
+      - name: Smoke test (engine, cookie, bridge, home, live desk, popouts, recovery, native window, integrations)
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          # El motor real con una org sembrada (un agente con historial) y sin proveedores.
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          # Desk en vivo (#5): frames node_stream simulados y una conversación larga.
+          ORGTREE_FIXTURE_LIVE: '1'
+          ORGTREE_FIXTURE_MESSAGES: '1200'
+          ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-smoke
+          # Prueba de autenticación por cookie en WebView2 (src-tauri/src/probe.rs).
+          ORGTREE_TAURI_PROBE: ${{ runner.temp }}\orgtree-tauri-probe.json
+          EXPECTED_APP_VERSION: ${{ steps.updater.outputs.version }}
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          # #21: un `codex` falso en el PATH de la app (el runner no trae harnesses). Repite
+          # sus argumentos, avisa si recibió el token o la variable de la prueba (el shell
+          # las quita) y tarda 30 s: si el login cancelado no mata el árbol, deja finished.txt.
+          $fake = Join-Path $env:RUNNER_TEMP 'fake-harness'
+          New-Item -ItemType Directory -Force $fake | Out-Null
+          Set-Content -Path (Join-Path $fake 'codex.cmd') -Encoding ascii -Value @(
+            '@echo off', 'echo fake-codex %*', 'if defined ORGTREE_V2_TOKEN echo token-leak',
+            'if defined ORGTREE_TAURI_PROBE echo probe-leak', 'ping -n 30 127.0.0.1 >nul', 'echo done> "%~dp0finished.txt"')
+          $env:PATH = "$fake;$env:PATH"
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          $deadline = (Get-Date).AddSeconds(300)
+          $shot = $false; $taskbarShot = $false
+          # El reporte final incluye la reconexión tras la caída del motor (#5).
+          while (-not ((Test-Path $env:ORGTREE_TAURI_PROBE) -and (Select-String -Path $env:ORGTREE_TAURI_PROBE -Pattern '"reconnect"' -Quiet)) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            # captura del desk con la conversación larga: la prueba deja un marcador y espera 3 s
+            if (-not $shot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).desk")) { try { Save-Screen 'desk' } catch { Write-Host "screenshot: $_" }; $shot = $true }
+            # #21: la ventana minimizada con el botón de la barra de tareas parpadeando y el toast
+            if (-not $taskbarShot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).taskbar")) { Start-Sleep -Milliseconds 700; try { Save-Screen 'taskbar-attention' } catch { Write-Host "screenshot: $_" }; $taskbarShot = $true }
+            Start-Sleep -Milliseconds 500; $p.Refresh()
+          }
+          $reported = Get-Date
+          try { Save-Screen 'after-reconnect' } catch { Write-Host "screenshot: $_" }
+          if ($p.HasExited) {
+            if (Test-Path $env:ORGTREE_TAURI_PROBE) { Write-Host "Partial probe: $(Get-Content $env:ORGTREE_TAURI_PROBE -Raw)" }
+            throw "app exited early with code $($p.ExitCode)"
+          }
+          $port = Join-Path $env:ORGTREE_TAURI_DATA 'engine-port.json'
+          if (-not (Test-Path $port)) { throw "the app did not start the engine ($port missing)" }
+          Write-Host "Engine started by the app: $(Get-Content $port -Raw)"
+          if (-not (Test-Path $env:ORGTREE_TAURI_PROBE)) { throw "the WebView2 probe did not report within 300 s" }
+          $raw = Get-Content $env:ORGTREE_TAURI_PROBE -Raw
+          Write-Host "WebView2 probe: $raw"
+          "### WebView2 probe (cookie, popouts)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $probe = $raw | ConvertFrom-Json
+          $failures = @()
+          if ($probe.page.nav -eq 401) { $failures += 'navigation to the engine was not authenticated (401)' }
+          if ($probe.page.http -ne 200) { $failures += "fetch /api/desktop/identity returned $($probe.page.http)" }
+          if ($probe.page.ws -ne 'open') { $failures += "WebSocket did not open: $($probe.page.ws)" }
+          if ($probe.page.iframe.origin -ne 'null') { $failures += "sandboxed iframe origin was $($probe.page.iframe.origin)" }
+          $top = @($probe.echo | Where-Object { $_.path -eq '/top' })
+          $frame = @($probe.echo | Where-Object { $_.path -eq '/iframe' })
+          if ($top.Count -ne 1 -or -not $top[0].cookie) { $failures += 'positive control failed: the engine page did not send the cookie' }
+          if ($frame.Count -ne 1) { $failures += 'the sandboxed iframe request never arrived' }
+          elseif ($frame[0].cookie) { $failures += 'the sandboxed iframe sent the desktop cookie' }
+          # #4: shim de window.orgtreeDesktop y ventana de inicio del renderer real
+          $sh = $probe.page.shell
+          foreach ($check in 'bridge', 'rendered', 'orgListed', 'agentShown') {
+            if ($sh.$check -ne $true) { $failures += "shell.$check was $($sh.$check)" }
+          }
+          if ($sh.version -ne $env:EXPECTED_APP_VERSION) { $failures += "getAppVersion via invoke: $($sh.version)" }
+          if ($sh.status -ne 'ready') { $failures += "getStatus via invoke: $($sh.status)" }
+          if ($sh.preferences -ne 'string') { $failures += "getPreferences via invoke: $($sh.preferences)" }
+          # #23: el .exe de target/ no es una copia instalada, así que no tiene updater.
+          if ($sh.update -ne 'unavailable' -or $sh.installUpdate -notlike '*No hay una actualizaci*') { $failures += "updater outside an installed copy: status $($sh.update), installUpdate $($sh.installUpdate)" }
+          if ($sh.iframeBridge -ne 'undefined') { $failures += "the bridge leaked into an iframe: $($sh.iframeBridge)" }
+          if ($sh.orgPath -ne '/o/spike-fixture') { $failures += "opening the org went to $($sh.orgPath)" }
+          if ($probe.page.popout.childBridge -ne 'undefined') { $failures += "the bridge leaked into a popout: $($probe.page.popout.childBridge)" }
+          # #6: popouts con window.open y portales (secuencia de renderer/src/popout.tsx)
+          $pop = $probe.page.popout
+          foreach ($check in 'opened', 'opener', 'sameOrigin', 'moved', 'draftKept', 'draftShared', 'sharedState') {
+            if ($pop.$check -ne $true) { $failures += "popout.$check was $($pop.$check)" }
+          }
+          if ($pop.childLink -ne 'load') { $failures += "cloned stylesheet link in the popout: $($pop.childLink)" }
+          if ($pop.styles.width -ne '123px' -or $pop.styles.height -ne '45px') { $failures += "popout styles not applied: $($pop.styles | ConvertTo-Json -Compress)" }
+          # #5: desk en vivo, conversación larga, scroll y reconexión
+          $desk = $probe.page.desk
+          if ($desk.opened -ne $true) { $failures += 'the agent desk did not open' }
+          if (-not ($desk.live.later -gt $desk.live.first)) { $failures += "no live node_stream updates in the desk: $($desk.live | ConvertTo-Json -Compress)" }
+          if ($desk.oldestLoaded -ne 1 -or $desk.domRows -lt 1000) { $failures += "long conversation not fully loaded: oldest $($desk.oldestLoaded), rows $($desk.domRows)" }
+          if ($desk.toolShown -ne $true) { $failures += 'the tool chip (Read README.md) is not shown' }
+          if (-not $desk.scroll -or $desk.scroll.frames -lt 30) { $failures += "scroll was not measured: $($desk.scroll | ConvertTo-Json -Compress)" }
+          "### Desk scroll (WebView2, $($desk.domRows) rows)`n$($desk.scroll | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          $dp = $probe.page.deskPopout
+          foreach ($check in 'opened', 'ownerEmptied', 'fontMatchesOwner', 'draftBackInOwner', 'redocked') {
+            if ($dp.$check -ne $true) { $failures += "deskPopout.$check was $($dp.$check)" }
+          }
+          if (-not ($dp.messagesInChild -gt 0)) { $failures += 'the popped-out desk shows no messages' }
+          # window.close() desde JS tiene que cerrar la ventana nativa: queda solo el popout de la primitiva
+          if ($probe.page.shell_after.popouts -ne 1) { $failures += "popout windows still open after the desk redocked: $($probe.page.shell_after.popouts) (expected 1): $($probe.page.shell_after.windows | ConvertTo-Json -Compress)" }
+          $rc = $probe.reconnect
+          if (-not $rc) { $failures += 'reconnect stage did not report' }
+          else {
+            if ($rc.shell.restarts -lt 1) { $failures += 'the engine was not restarted' }
+            if ($rc.shell.engine_pid -eq $rc.crashed_pid) { $failures += 'the engine pid did not change after the crash' }
+            if ($rc.page.http -ne 200) { $failures += "after restart, fetch returned $($rc.page.http)" }
+            if ($rc.page.ws -ne 'open') { $failures += "after restart, WebSocket: $($rc.page.ws)" }
+            if ($rc.page.bridge -ne $true -or $rc.page.agentShown -ne $true) { $failures += "after restart, the UI did not recover: $($rc.page | ConvertTo-Json -Compress)" }
+          }
+          $close = $probe.owner_close
+          if (-not $close) { $failures += 'owner-close stage did not report' }
+          else {
+            if ($close.shell.main_visible -ne $false) { $failures += "owner window still visible after close: $($close.shell.main_visible)" }
+            if ($close.shell.popouts -lt 1) { $failures += 'popout window gone after closing the owner' }
+            if ($close.page.childOpen -ne $true) { $failures += "popout closed with the owner: $($close.page | ConvertTo-Json -Compress)" }
+            if ($close.page.draft -ne 'escrito en el popout') { $failures += "popout draft lost after closing the owner: $($close.page.draft)" }
+          }
+          # #7: ventana sin marco, controles, bandeja, notificación, instancia única y arrastre
+          $nat = $rc.page.native
+          $sn = $rc.shell.native
+          if ($sn.decorated -ne $false) { $failures += "main window is decorated: $($sn.decorated)" }
+          if ($sn.tray -ne $true) { $failures += 'no tray icon' }
+          if ($nat.controls -ne $true -or $nat.controlButtons -lt 3) { $failures += "renderer window controls not shown: $($nat | ConvertTo-Json -Compress)" }
+          foreach ($check in 'maximized', 'maximizedIcon', 'restored') {
+            if ($nat.$check -ne $true) { $failures += "native.$check was $($nat.$check)" }
+          }
+          # #21: harnesses, login, notificaciones, barra de tareas y validaciones de archivos
+          $it = $rc.page.integrations
+          $read = { param($name) $f = "$($env:ORGTREE_TAURI_PROBE).$name"; if (Test-Path $f) { Get-Content $f -Raw | ConvertFrom-Json } else { $null } }
+          $h = @($it.harnesses)
+          if ($h.Count -ne 3 -or @($h | Where-Object { $_.id -notin 'claude', 'codex', 'antigravity' -or $_.url -notlike 'https://*' -or $_.detected -isnot [bool] }).Count) { $failures += "getHarnesses shape: $($it.harnesses | ConvertTo-Json -Compress)" }
+          if (-not @($h | Where-Object { $_.id -eq 'codex' -and $_.detected }).Count) { $failures += 'the fake codex on PATH was not detected' }
+          if ($it.harnessBadId -notlike '*Unknown harness*') { $failures += "openHarnessLink accepted a URL: $($it.harnessBadId)" }
+          if ($it.revealRelative.ok -ne $false -or $it.revealRelative.error -notlike 'Not an absolute path*') { $failures += "revealFile relative: $($it.revealRelative | ConvertTo-Json -Compress)" }
+          if ($it.revealMissing.ok -ne $false -or $it.revealMissing.error -notlike 'No such file*') { $failures += "revealFile missing: $($it.revealMissing | ConvertTo-Json -Compress)" }
+          if ($it.revealDotted.ok -ne $false -or $it.revealDotted.error -notlike 'Not a normalized path*') { $failures += "revealFile with ..: $($it.revealDotted | ConvertTo-Json -Compress)" }
+          $lg = $it.login
+          if (-not $lg.missingId) { $failures += 'no undetected harness to test the login refusal' }
+          elseif ($lg.missing.phase -ne 'error' -or $lg.missing.error -ne 'not-installed' -or $lg.missing.started -ne $false) { $failures += "login of an undetected $($lg.missingId): $($lg.missing | ConvertTo-Json -Compress)" }
+          if ($lg.badProvider -notlike '*Unknown login provider*') { $failures += "login with a made-up provider: $($lg.badProvider)" }
+          if ($lg.idle.phase -ne 'idle') { $failures += "login status before starting: $($lg.idle | ConvertTo-Json -Compress)" }
+          if ($lg.start.started -ne $true -or $lg.start.phase -ne 'starting') { $failures += "codex login did not start: $($lg.start | ConvertTo-Json -Compress)" }
+          if ($lg.again.started -ne $false) { $failures += "a second codex login started: $($lg.again | ConvertTo-Json -Compress)" }
+          if ($lg.running.output -notlike '*fake-codex login*') { $failures += "the codex CLI did not run with its fixed arguments: $($lg.running | ConvertTo-Json -Compress)" }
+          if ($lg.running.output -like '*token-leak*' -or $lg.running.output -like '*probe-leak*') { $failures += "the login child inherited scrubbed variables: $($lg.running.output)" }
+          if ($lg.code -notlike '*does not use a pasted code*') { $failures += "codex accepted a pasted code: $($lg.code)" }
+          if ($lg.cancel.phase -ne 'idle' -or $lg.after.phase -ne 'idle') { $failures += "login cancel: $($lg.cancel | ConvertTo-Json -Compress) then $($lg.after | ConvertTo-Json -Compress)" }
+          $nt = $it.notify
+          if ((@($nt.prefKeys) -join ',') -ne 'boolean,boolean,boolean') { $failures += "notification preferences: $($nt.prefKeys -join ',')" }
+          foreach ($k in 'publish1', 'publish2', 'publish3') { if ($nt.$k -ne 200) { $failures += "fixture notices ${k}: $($nt.$k)" } }
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Win {
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+            [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern void mouse_event(int f, int x, int y, int d, IntPtr e);
+          }
+          '@
+          $hwnd = [IntPtr][long]$sn.hwnd
+          # tao deja WS_CAPTION (snap, animaciones) y quita la barra de título. Queda el borde
+          # de redimensionado invisible de Windows (8 px por lado, dentro del rectángulo de la
+          # ventana); una barra de título real suma unos 30 px de alto.
+          $wr = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$wr)
+          $cr = New-Object Win+RECT; [void][Win]::GetClientRect($hwnd, [ref]$cr)
+          $frame = "window $($wr.R - $wr.L)x$($wr.B - $wr.T), client $($cr.R)x$($cr.B)"
+          Write-Host "Frame: $frame"
+          if ((($wr.B - $wr.T) - $cr.B) -ge 20) { $failures += "main window has a native title bar: $frame" }
+          # Segunda ejecución: tiene que terminar sola y enfocar la ventana existente.
+          $second = Start-Process -FilePath $exe.FullName -ArgumentList '--second' -PassThru
+          if (-not $second.WaitForExit(20000)) { $second.Kill(); $failures += 'the second instance did not exit' }
+          $marker = "$($env:ORGTREE_TAURI_PROBE).second-instance"
+          if (-not (Test-Path $marker)) { $failures += 'the running app was not told about the second instance' }
+          else { Write-Host "Second instance: $(Get-Content $marker -Raw)" }
+          Start-Sleep -Seconds 1
+          $foreground = [Win]::GetForegroundWindow() -eq $hwnd
+          Write-Host "Main window in the foreground after the second instance: $foreground"
+          if (-not $nat.drag) { $failures += 'no visible -webkit-app-region: drag area in the renderer' }
+          else {
+            $before = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$before)
+            $pt = New-Object Win+POINT; $pt.X = [int]($nat.drag.x * $nat.drag.dpr); $pt.Y = [int]($nat.drag.y * $nat.drag.dpr)
+            [void][Win]::ClientToScreen($hwnd, [ref]$pt)
+            [void][Win]::SetCursorPos($pt.X, $pt.Y); Start-Sleep -Milliseconds 200
+            [Win]::mouse_event(0x2, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 200
+            for ($i = 1; $i -le 10; $i++) { [void][Win]::SetCursorPos($pt.X + 12 * $i, $pt.Y + 6 * $i); Start-Sleep -Milliseconds 40 }
+            [Win]::mouse_event(0x4, 0, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 500
+            $after = New-Object Win+RECT; [void][Win]::GetWindowRect($hwnd, [ref]$after)
+            $moved = "dx $($after.L - $before.L), dy $($after.T - $before.T) (dragged $($nat.drag.cls) at $($pt.X),$($pt.Y))"
+            Write-Host "Drag: $moved"
+            "### Native window (#7)`n- drag: $moved`n- foreground after second instance: $foreground`n- scale: $($sn.scale)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            if (($after.L - $before.L) -lt 60 -or ($after.T - $before.T) -lt 30) { $failures += "dragging the header did not move the window: $moved" }
+          }
+          try { Save-Screen 'native' } catch { Write-Host "screenshot: $_" }
+          # #21, etapa final: abre de verdad el Explorador (revealFile, openCharterFolder) y el
+          # navegador (openHarnessLink). Va al final porque esas ventanas taparían el arrastre.
+          New-Item -ItemType File -Force "$($env:ORGTREE_TAURI_PROBE).late-go" | Out-Null
+          $lateDeadline = (Get-Date).AddSeconds(40)
+          $clickShot = $false; $revealShot = $false
+          while (-not (Test-Path "$($env:ORGTREE_TAURI_PROBE).late") -and (Get-Date) -lt $lateDeadline) {
+            if (-not $clickShot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).clicked")) { Start-Sleep -Milliseconds 500; try { Save-Screen 'notification-click' } catch { Write-Host "screenshot: $_" }; $clickShot = $true }
+            if (-not $revealShot -and (Test-Path "$($env:ORGTREE_TAURI_PROBE).revealed")) { Start-Sleep -Milliseconds 500; try { Save-Screen 'reveal-file' } catch { Write-Host "screenshot: $_" }; $revealShot = $true }
+            Start-Sleep -Milliseconds 300
+          }
+          $late = & $read 'late'
+          if (-not $late) { $failures += 'the late integration stage did not report' }
+          else {
+            Write-Host "Late stage: $($late | ConvertTo-Json -Compress)"
+            $target = $late.target
+            $charters = $late.charters.path
+            $browser = $null; $selected = @(); $folders = @()
+            $until = (Get-Date).AddSeconds(15)
+            do {
+              Start-Sleep -Milliseconds 700
+              $folders = @(); $selected = @()
+              foreach ($w in @((New-Object -ComObject Shell.Application).Windows())) {
+                try {
+                  $folders += $w.Document.Folder.Self.Path
+                  $items = $w.Document.SelectedItems()
+                  for ($n = 0; $n -lt $items.Count; $n++) { $selected += $items.Item($n).Path }
+                  if ($w.Document.FocusedItem) { $selected += $w.Document.FocusedItem.Path }
+                } catch {}
+              }
+              $browser = Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'msedge.exe', 'chrome.exe', 'firefox.exe' -and $_.CommandLine -like '*developers.openai.com/codex/cli*' } | Select-Object -First 1
+            } while ((Get-Date) -lt $until -and -not ($browser -and $folders -contains (Split-Path $target) -and $folders -contains $charters))
+            try { Save-Screen 'integrations' } catch { Write-Host "screenshot: $_" }
+            Write-Host "Explorer folders: $($folders -join ' | '); selected: $($selected -join ' | '); browser: $($browser.Name)"
+            if ($late.reveal.ok -ne $true) { $failures += "revealFile of an existing file: $($late.reveal | ConvertTo-Json -Compress)" }
+            # La carpeta del archivo abierta en el Explorador es obligatoria. La selección se ve en
+            # la captura reveal-file: Shell.Application no la informa en el runner (run 37588425306).
+            elseif ($folders -notcontains (Split-Path $target)) { $failures += "no Explorer window on the folder of $target (open: $($folders -join ', '))" }
+            Write-Host "Selected through Shell.Application: $(if ($selected -contains $target) { 'yes' } else { 'not reported' })"
+            if ($late.charters.ok -ne $true -or $charters -notlike '*\.orgtree\charters') { $failures += "openCharterFolder: $($late.charters | ConvertTo-Json -Compress)" }
+            elseif ($folders -notcontains $charters) { $failures += "no Explorer window on $charters (open: $($folders -join ', '))" }
+            if ($late.harnessLink -ne 'resolved' -or -not $browser) { $failures += "openHarnessLink did not open the browser on the official link: $($late.harnessLink)" }
+            Start-Sleep -Seconds 2
+            # El .cmd revelado no se tiene que haber ejecutado.
+            if (Test-Path "$($env:ORGTREE_TAURI_PROBE).reveal-ran") { $failures += 'revealFile ran the file instead of selecting it' }
+            "- Explorer: selected $($selected -join ', '); folders $($folders -join ', '); browser $($browser.Name)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          $nlog = @(& $read 'notify'); $slog = @(& $read 'sync'); $alog = @(& $read 'attention'); $click = & $read 'click'
+          $decisions = { param($id) @($nlog | Where-Object { $_.id -eq $id } | ForEach-Object { $_.decision }) }
+          $q1 = & $decisions 'fixture-q1'; $r1 = & $decisions 'fixture-r1'; $q2 = & $decisions 'fixture-q2'
+          if ($q1[0] -ne 'shown') { $failures += "the renderer's question was not shown without focus: $($q1 -join ',')" }
+          if ($q1 -notcontains 'duplicate') { $failures += "a repeated notification was not deduplicated: $($q1 -join ',')" }
+          if ($r1.Count -lt 2 -or $r1[0] -notin 'kind', 'inactive' -or $r1 -notcontains 'shown') { $failures += "routine mail by preference (off, then on): $($r1 -join ',')" }
+          if ($nt.directRoutine -ne $false -or $nt.directDuplicate -ne $false -or $nt.directInactive -ne $false) { $failures += "direct notify results: routine $($nt.directRoutine), duplicate $($nt.directDuplicate), inactive $($nt.directInactive)" }
+          if ((& $decisions 'fixture-zz') -notcontains 'inactive') { $failures += 'a notification outside the synced set was not filtered' }
+          if ($nt.shownFocus -ne $true) { $failures += 'the main window did not get the focus back for the focus filter' }
+          elseif ($q2.Count -lt 2 -or $q2[0] -ne 'focused' -or $q2 -notcontains 'shown') { $failures += "focus filter (notifyWhileFocused off, then on): $($q2 -join ',')" }
+          if ($nt.invalidKind -notlike '*Unknown notification kind*' -or $nt.unknownField -notlike '*Unknown notification field*') { $failures += "notification validation: $($nt.invalidKind) / $($nt.unknownField)" }
+          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q1' }).Count) { $failures += "syncNotifications did not withdraw the resolved toast: $($slog | ConvertTo-Json -Compress)" }
+          if (-not @($slog | Where-Object { @($_.removed) -contains 'fixture-q2' }).Count) { $failures += 'the last toast was not withdrawn when nothing was pending' }
+          if ($nt.syncInvalid -notlike '*Invalid notification identity*') { $failures += "syncNotifications validation: $($nt.syncInvalid)" }
+          if ($nt.attentionMismatch -notlike '*Invalid attention identities*') { $failures += "setPendingAttention validation: $($nt.attentionMismatch)" }
+          $starts = @($alog | Where-Object { $_.pulse -eq 'Start' })
+          if (-not $starts.Count -or $starts[0].started -ne $true -or $starts[0].focused -ne $false) { $failures += "the taskbar did not flash for a new arrival: $($alog | ConvertTo-Json -Compress)" }
+          if (@($alog | Where-Object { $_.pulse -eq 'Keep' -and $_.started }).Count) { $failures += 'an unchanged attention list restarted the flash' }
+          if (-not $alog.Count -or $alog[-1].pulse -ne 'Stop') { $failures += "the flash did not stop when nothing was pending: $($alog | ConvertTo-Json -Compress)" }
+          if ($click.clicked -ne $true -or $late.click.id -ne 'fixture-q2' -or $late.clickFocus -ne $true) { $failures += "notification click: shell $($click | ConvertTo-Json -Compress), page $($late.click | ConvertTo-Json -Compress), focus $($late.clickFocus)" }
+          if ($late.publishEmpty -ne 200) { $failures += "fixture notices (empty): $($late.publishEmpty)" }
+          "### Integraciones (#21)`n- harnesses: $($it.harnesses | ConvertTo-Json -Compress)`n- login: $($lg.start.phase) -> output '$(($lg.running.output -replace '\s+', ' ').Trim())' -> $($lg.cancel.phase)`n- notify: $($nlog | ConvertTo-Json -Compress)`n- sync: $($slog | ConvertTo-Json -Compress)`n- attention: $($alog | ConvertTo-Json -Compress)`n- click: $($click | ConvertTo-Json -Compress), page after click: $(($late.clickText -replace '\s+', ' ').Trim())" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # El login cancelado tiene que haber matado el árbol del CLI falso (30 s de espera).
+          $wait = 40 - ((Get-Date) - $reported).TotalSeconds
+          if ($wait -gt 0) { Start-Sleep -Seconds ([int]$wait) }
+          if (Test-Path (Join-Path $fake 'finished.txt')) { $failures += 'the cancelled login left the CLI running' }
+          Stop-Process -Id $p.Id -Force
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host "Cookie auth, bridge, home, live desk, popouts, engine recovery, native window and integrations verified in WebView2"
+
+      # #20: una ventana por organización. La app arranca dos veces sobre la misma raíz y
+      # el mismo perfil descartables. La primera recorre Homepage, creación (con la
+      # confirmación de cambios sin guardar, que este paso responde "Cancel" = seguir
+      # editando), dos y tres orgs en ventanas propias, reabrir que enfoca, el clic de una
+      # notificación, preferencias y el registro de inicio, y sale. Entre las dos se agrega a
+      # la sesión una org que no existe, guardada fuera de la pantalla. La segunda verifica
+      # que las ventanas vuelvan en sus posiciones y que esa org abra como ventana de error.
+      - name: Windows per organization (two orgs, refocus, creation, preferences, restore, error window)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-windows
+          ORGTREE_TAURI_PROFILE: ${{ runner.temp }}\orgtree-tauri-windows-profile
+          ORGTREE_TAURI_WINDOWS_PROBE: ${{ runner.temp }}\orgtree-tauri-windows.json
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          $out = $env:ORGTREE_TAURI_WINDOWS_PROBE
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $runName = 'com.kushro.orgtree.tauri-spike'
+          Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class Dlg {
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+            [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+          }
+          '@
+          Write-Host "Primary screen: $([System.Windows.Forms.Screen]::PrimaryScreen.Bounds) work area $([System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea)"
+          # Arranca la app y atiende sus pedidos hasta que sale sola: capturas por marcador
+          # (<salida>.<nombre>) y la confirmación de descarte, que se responde "Cancel".
+          function Run-App($run) {
+            $env:ORGTREE_TAURI_WINDOWS_RUN = "$run"
+            Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Remove-Item -Force
+            $p = Start-Process -FilePath $exe.FullName -PassThru
+            $deadline = (Get-Date).AddSeconds(480)
+            $dialogs = 0
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+              foreach ($name in 'create-window', 'two-orgs', 'refocus', 'click-reopened', 'restored', 'error-window') {
+                if (Test-Path "$out.$name") { Start-Sleep -Milliseconds 400; try { Save-Screen "windows-$name" } catch { Write-Host "screenshot: $_" }; Remove-Item "$out.$name" -Force }
+              }
+              if (Test-Path "$out.dialog-shown") {
+                Start-Sleep -Milliseconds 1200
+                $dlg = [Dlg]::FindWindow('#32770', 'Orgtree')
+                if ($dlg -ne [IntPtr]::Zero) {
+                  try { Save-Screen "windows-confirm-dialog" } catch { Write-Host "screenshot: $_" }
+                  # WM_COMMAND IDCANCEL: "Cancel" = seguir editando.
+                  [void][Dlg]::PostMessage($dlg, 0x111, [IntPtr]2, [IntPtr]::Zero)
+                  $dialogs++
+                  Remove-Item "$out.dialog-shown" -Force
+                }
+              }
+              Start-Sleep -Milliseconds 300; $p.Refresh()
+            }
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $script:failures += "run ${run}: the app did not finish and quit within 480 s" }
+            else { Write-Host "Run $run exited with $($p.ExitCode); confirmation dialogs answered: $dialogs" }
+            # El motor del fixture muere con la app (guardián); se espera que suelte la raíz.
+            Start-Sleep -Seconds 3
+            if (-not (Test-Path $out)) { $script:failures += "run ${run}: no report"; return $null }
+            $raw = Get-Content $out -Raw
+            Copy-Item $out "$out.run$run.json" -Force
+            "### Windows per organization, run $run`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            return ($raw | ConvertFrom-Json)
+          }
+          $failures = @()
+          $profileDir = $env:ORGTREE_TAURI_PROFILE
+          # ---------------------------------------------------------------- primera ejecución
+          $r1 = Run-App 1
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          if ($r1) {
+            $h = $r1.home
+            & $check ($h.bridge -eq $true -and $h.requestOrg -eq 'function') "home: bridge $($h.bridge), requestOrg $($h.requestOrg)"
+            & $check ($h.identity.sync.windowId -eq 'win-1' -and $h.identity.sync.kind -eq 'homepage' -and $h.identity.live.notificationOwner -eq $true) "home identity: $($h.identity | ConvertTo-Json -Compress)"
+            & $check ($h.listed -eq $true -and $h.homepage -eq $true) "the Homepage did not list spike-fixture: $($h | ConvertTo-Json -Compress)"
+            & $check ($h.createTercera -eq 200) "creating tercera through the API: $($h.createTercera)"
+            $cs = $r1.createSwitch
+            & $check ($cs.form -eq $true -and $cs.during.live.kind -eq 'create' -and $cs.back -eq $true -and $cs.after.live.kind -eq 'homepage' -and $cs.after.live.windowId -eq 'win-1') "Homepage -> creation -> Cancel: $($cs | ConvertTo-Json -Compress)"
+            $bh = $r1.bindHome
+            & $check ($bh.path -eq '/o/spike-fixture' -and $bh.agentShown -eq $true -and $bh.identity.live.kind -eq 'org' -and $bh.identity.live.org -eq 'spike-fixture' -and $bh.identity.live.windowId -eq 'win-1') "the Homepage did not bind itself to spike-fixture: $($bh | ConvertTo-Json -Compress)"
+            $oc = $r1.openCreate.created
+            & $check ($oc.kind -eq 'create' -and $oc.windowId -and $oc.windowId -ne 'win-1') "openCreateOrgWindow from an org window: $($r1.openCreate | ConvertTo-Json -Compress)"
+            & $check ($r1.createType.value -eq 'segunda' -and $r1.createType.identity.live.kind -eq 'create') "creation form: $($r1.createType | ConvertTo-Json -Compress)"
+            $cf = $r1.confirm
+            $answers = @($cf.dialog | Where-Object { $_.phase -eq 'answered' })
+            & $check ($cf.answered -eq $true -and $answers.Count -ge 1 -and $answers[0].discard -eq $false -and $cf.stillOpen -eq $true) "unsaved creation close confirmation: $($cf | ConvertTo-Json -Compress -Depth 5)"
+            & $check (@($cf.unsaved | Where-Object { $_.dirty -eq $true }).Count -ge 1) "the renderer never reported unsaved creation input: $($cf.unsaved | ConvertTo-Json -Compress)"
+            $sb = $r1.createSubmit
+            & $check ($sb.kept -eq 'segunda' -and $sb.path -eq '/o/segunda' -and $sb.identity.live.kind -eq 'org' -and $sb.identity.live.org -eq 'segunda' -and $sb.identity.live.windowId -eq $oc.windowId -and $sb.titleShown -eq $true) "creating segunda from the creation window: $($sb | ConvertTo-Json -Compress)"
+            $rt = $r1.requestTercera
+            & $check ($rt.outcome.action -eq 'opened' -and $rt.outcome.org -eq 'tercera' -and $rt.identity.live.org -eq 'spike-fixture') "requestOrg(tercera) from spike-fixture: $($rt | ConvertTo-Json -Compress)"
+            $dt = $r1.describeTercera
+            & $check ($dt.path -eq '/o/tercera' -and $dt.identity.live.kind -eq 'org' -and $dt.identity.live.org -eq 'tercera' -and $dt.identity.live.notificationOwner -eq $false) "the tercera window: $($dt | ConvertTo-Json -Compress)"
+            $orgs = @($r1.placed.windows | ForEach-Object { $_.identity.org })
+            & $check (($orgs -join ',') -eq 'spike-fixture,segunda,tercera') "open org windows: $($orgs -join ',')"
+            $rf = $r1.refocus
+            & $check ($rf.step.outcome.action -eq 'focused' -and $rf.step.outcome.windowId -eq 'win-1' -and $rf.windowsAfter -eq $rf.windowsBefore -and $rf.win1Focused -eq $true) "reopening spike-fixture did not focus its window: $($rf | ConvertTo-Json -Compress -Depth 5)"
+            & $check ($r1.ownerSegunda.identity.live.notificationOwner -eq $false -and $null -eq $r1.ownerSegunda.notify -and $r1.ownerWin1.identity.notificationOwner -eq $true) "notification owner: $($r1.ownerSegunda | ConvertTo-Json -Compress) / $($r1.ownerWin1 | ConvertTo-Json -Compress)"
+            $co = $r1.clickOpen
+            & $check (@($co.page.clicks).Count -eq 1 -and $co.page.clicks[0].id -eq 'wprobe-click-1' -and $co.focused -eq $true) "notification click to the segunda window: $($co | ConvertTo-Json -Compress -Depth 5)"
+            $cc = $r1.clickClosed
+            $held = @($cc.held | Where-Object { $_.window -eq $cc.window -and @($_.delivered) -contains 'notification-click' })
+            & $check ($cc.closed -eq $true -and @($cc.openOrgsAfterClose) -notcontains 'tercera' -and $cc.reopened -eq $true -and $held.Count -ge 1) "notification click for a closed org window: $($cc | ConvertTo-Json -Compress -Depth 5)"
+            $pf = $r1.prefs
+            & $check ($pf.get.startAtLogin -eq $true -and $pf.get.visualTheme -eq 'codex' -and $pf.get.visualThemeExplicit -eq $true -and $pf.get.notifyAllMail -eq $true) "preferences after setPreferences: $($pf.get | ConvertTo-Json -Compress)"
+            & $check ($pf.badTheme -like '*Unknown visual theme*' -and $pf.badKey -like '*Invalid preference*' -and $pf.badType -like '*Invalid preference*') "invalid preferences were not refused: $($pf | ConvertTo-Json -Compress)"
+            & $check ($r1.effectiveTheme -eq 'codex') "setEffectiveTheme: $($r1.effectiveTheme)"
+            & $check ($r1.files.autostart -like "*orgtree-tauri.exe*--background") "Run value reported by the shell: $($r1.files.autostart)"
+            & $check ($r1.done -eq $true) 'run 1 did not finish its steps'
+          }
+          # Lo que quedó en disco al salir: preferencias, sesión y el registro de inicio.
+          $prefsFile = Join-Path $profileDir 'preferences.json'
+          $placementFile = Join-Path $profileDir 'window-placement.json'
+          $prefs = if (Test-Path $prefsFile) { Get-Content $prefsFile -Raw | ConvertFrom-Json } else { $null }
+          & $check ($prefs -and $prefs.startAtLogin -eq $true -and $prefs.visualTheme -eq 'codex') "preferences.json after run 1: $($prefs | ConvertTo-Json -Compress)"
+          $run = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+          Write-Host "HKCU Run after run 1: $run"
+          & $check ($run -like "*$($exe.Name)*--background") "HKCU Run value after enabling startAtLogin: $run"
+          $layout = if (Test-Path $placementFile) { Get-Content $placementFile -Raw | ConvertFrom-Json } else { $null }
+          Write-Host "window-placement.json after run 1: $($layout | ConvertTo-Json -Compress -Depth 6)"
+          & $check ($layout -and (@($layout.session) -join ',') -eq 'org:spike-fixture,org:segunda,org:tercera') "saved session: $(@($layout.session) -join ',')"
+          # Una ventana guardada de una org que ya no existe, en un monitor que ya no está.
+          if ($layout) {
+            $layout.geometry = @($layout.geometry) + [pscustomobject]@{ key = 'org:ya-no-existe'; placement = [pscustomobject]@{ bounds = [pscustomobject]@{ x = 40000; y = 30000; width = 800; height = 600 }; maximized = $false } }
+            $layout.session = @($layout.session) + 'org:ya-no-existe'
+            $layout | ConvertTo-Json -Depth 8 | Set-Content -Path $placementFile -Encoding utf8
+          }
+          # ---------------------------------------------------------------- segunda ejecución
+          $r2 = Run-App 2
+          if ($r2) {
+            $rs = $r2.restored
+            $wins = @($rs.shell.windows)
+            & $check ($rs.ready -eq $true -and $wins.Count -eq 4) "restored windows: $($wins.Count) ($($rs | ConvertTo-Json -Compress -Depth 6))"
+            $byOrg = @{}; foreach ($w in $wins) { $byOrg[$w.identity.org] = $w }
+            $before = @{}; foreach ($w in @($r1.final.windows)) { $before[$w.identity.org] = $w }
+            foreach ($org in 'spike-fixture', 'segunda', 'tercera') {
+              $a = $before[$org]; $b = $byOrg[$org]
+              if (-not $a -or -not $b) { $failures += "no window for $org before ($([bool]$a)) or after ($([bool]$b)) the restart"; continue }
+              $same = [math]::Abs($a.x - $b.x) -le 2 -and [math]::Abs($a.y - $b.y) -le 2 -and [math]::Abs($a.width - $b.width) -le 2 -and [math]::Abs($a.height - $b.height) -le 2
+              & $check $same "$org was not restored in place: before $($a.x),$($a.y) $($a.width)x$($a.height), after $($b.x),$($b.y) $($b.width)x$($b.height)"
+              & $check ($b.visible -eq $true) "$org restored hidden"
+            }
+            "- restored: $(($wins | ForEach-Object { "$($_.identity.org) at $($_.x),$($_.y) $($_.width)x$($_.height)" }) -join '; ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            $lost = $byOrg['ya-no-existe']
+            $areas = @($rs.shell.areas)
+            $inside = $lost -and @($areas | Where-Object { $lost.x -ge $_.x -and $lost.y -ge $_.y -and ($lost.x + $lost.width) -le ($_.x + $_.width) -and ($lost.y + $lost.height) -le ($_.y + $_.height) }).Count -ge 1
+            & $check $inside "the window saved off-screen was not brought back: $($lost | ConvertTo-Json -Compress) in $($areas | ConvertTo-Json -Compress)"
+            $pages = $r2.pages
+            $errorPage = $pages.($lost.id)
+            & $check ($errorPage.path -eq '/o/ya-no-existe' -and $errorPage.identity.live.org -eq 'ya-no-existe' -and -not $errorPage.title -and $errorPage.error) "the window of a deleted org is not an error window: $($errorPage | ConvertTo-Json -Compress)"
+            $fixturePage = $pages.($byOrg['spike-fixture'].id)
+            & $check ($fixturePage.agentShown -eq $true -and $fixturePage.theme -eq 'codex' -and $fixturePage.identity.sync.org -eq 'spike-fixture') "restored spike-fixture window: $($fixturePage | ConvertTo-Json -Compress)"
+            & $check ($pages.($byOrg['segunda'].id).title -like '*segunda*') "restored segunda window: $($pages.($byOrg['segunda'].id) | ConvertTo-Json -Compress)"
+            $pb = $r2.prefsBefore.get
+            & $check ($pb.startAtLogin -eq $true -and $pb.visualTheme -eq 'codex' -and $pb.notifyAllMail -eq $true -and $pb.startupMode -eq 'restore') "preferences after the restart: $($pb | ConvertTo-Json -Compress)"
+            & $check ($r2.prefsOff.get.startAtLogin -eq $false -and $null -eq $r2.files.autostart) "turning startAtLogin off: $($r2.prefsOff.get.startAtLogin), Run $($r2.files.autostart)"
+            & $check ($r2.done -eq $true) 'run 2 did not finish its steps'
+          }
+          $run = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+          & $check (-not $run) "HKCU Run value left after disabling startAtLogin: $run"
+          Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Windows per organization verified: Homepage, creation, two orgs, refocus, notification routing, preferences, restore and error window'
+
+      # #22: popouts, pins y desks temporales sobre el renderer real y el motor de fixture.
+      # Un director (pprobe.rs/pprobe.js) maneja la app: la primitiva de window.open con
+      # su rectángulo, el desk de worker en un popout con sus botones de ventana, un desk
+      # temporal (abierto desde la lista de agentes) que lo toma prestado y lo devuelve,
+      # la vuelta del desk a la ventana principal, el inbox como modal anclado y su
+      # pop-out, y el cierre por window.close(). El shell mide lo nativo (área cliente,
+      # maximizado, minimizado, cómo se cerró cada popout) y acá se compara, con 2 px de
+      # tolerancia en los rectángulos.
+      - name: Popouts, pins and temporary desks (window controls, exact bounds, window.close)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-popouts
+          ORGTREE_TAURI_PROFILE: ${{ runner.temp }}\orgtree-tauri-popouts-profile
+          ORGTREE_TAURI_POPOUT_PROBE: ${{ runner.temp }}\orgtree-tauri-popouts.json
+          ORGTREE_FIXTURE_LIVE: '1'
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          $out = $env:ORGTREE_TAURI_POPOUT_PROBE
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Remove-Item -Force
+          $p = Start-Process -FilePath $exe.FullName -PassThru
+          $deadline = (Get-Date).AddSeconds(480)
+          $markers = 'popout-desk', 'popout-maximized', 'tempdesk-open', 'tempdesk-restored', 'modal-pinned', 'modal-popout', 'popouts-closed'
+          while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+            foreach ($name in $markers) {
+              if (Test-Path "$out.$name") { Start-Sleep -Milliseconds 400; try { Save-Screen "popouts-$name" } catch { Write-Host "screenshot: $_" }; Remove-Item "$out.$name" -Force }
+            }
+            Start-Sleep -Milliseconds 300; $p.Refresh()
+          }
+          $failures = @()
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; $failures += 'the app did not finish and quit within 480 s' }
+          Start-Sleep -Seconds 3
+          if (-not (Test-Path $out)) { throw "no report: $($failures -join '; ')" }
+          $raw = Get-Content $out -Raw
+          "### Popouts, pins and temporary desks`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # También en el log, para diagnosticar un paso que no llega.
+          Write-Host $raw
+          $r = $raw | ConvertFrom-Json
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          function Popout($native, $name) { @($native.popouts | Where-Object { $_.name -eq $name }) | Select-Object -First 1 }
+          function Near($a, $b) { $null -ne $a -and $null -ne $b -and [math]::Abs([double]$a - [double]$b) -le 2 }
+          # El área cliente del popout contra un rectángulo {x, y, width, height} (posición opcional).
+          function Same-Rect($client, $want) {
+            $size = (Near $client.width $want.width) -and (Near $client.height $want.height)
+            if ($null -eq $want.x) { return $size }
+            return $size -and (Near $client.x $want.x) -and (Near $client.y $want.y)
+          }
+          function Rect($c) { "$($c.x),$($c.y) $($c.width)x$($c.height)" }
+          function Closed-By($native, $name) { @($native.closed | Where-Object { $_.name -eq $name } | ForEach-Object { $_.by }) -join ',' }
+          $o = $r.org
+          & $check ($o.agentShown -eq $true -and @($o.methods).Count -eq 5) "org: $($o | ConvertTo-Json -Compress)"
+          # 1. La primitiva.
+          $pn = Popout $r.primitiveNative 'orgtree-pprobe-primitive'
+          & $check ($r.primitive.opened -eq $true -and $pn) "primitive did not open: $($r.primitive | ConvertTo-Json -Compress)"
+          if ($pn) {
+            $want = [pscustomobject]@{ x = $pn.requested.x; y = $pn.requested.y; width = $pn.requested.width; height = $pn.requested.height }
+            & $check (Same-Rect $pn.client $want) "primitive client $(Rect $pn.client) is not the requested $(Rect $want) (outer $(Rect $pn.outer))"
+            "- primitive: requested $(Rect $want), client $(Rect $pn.client), outer $(Rect $pn.outer); page sees $($r.primitive.child | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          & $check ($r.primitiveClose.closed -eq $true -and @($r.primitiveClosedNative.popouts).Count -eq 0) "window.close() on the primitive left windows: $($r.primitiveClosedNative.popouts | ConvertTo-Json -Compress)"
+          & $check ((Closed-By $r.primitiveClosedNative 'orgtree-pprobe-primitive') -eq 'window.close') "primitive closed by: $(Closed-By $r.primitiveClosedNative 'orgtree-pprobe-primitive')"
+          # 2. El desk real en un popout.
+          $d = $r.desk
+          $name = $d.name
+          & $check ($name -match '^orgtree-popout-\d+$' -and $d.ownerEmptied -eq $true -and @($d.controls).Count -eq 3) "desk popout: $($d | ConvertTo-Json -Compress)"
+          $dn = Popout $r.deskNative $name
+          & $check ($dn -and $dn.owner -eq 'win-1') "no native popout named $name owned by win-1: $($r.deskNative.popouts | ConvertTo-Json -Compress)"
+          if ($dn) {
+            $want = [pscustomobject]@{ x = $d.requested.left; y = $d.requested.top; width = $d.requested.width; height = $d.requested.height }
+            & $check (Same-Rect $dn.client $want) "desk popout client $(Rect $dn.client) is not the requested $(Rect $want)"
+            "- desk popout: features $($d.features), client $(Rect $dn.client), outer $(Rect $dn.outer); page sees $($d.child | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }
+          $s = $r.state
+          & $check ($s.desk.present -eq $true -and $s.desk.maximized -eq $false -and $s.desk.name -eq $name) "getPopoutState(desk): $($s.desk | ConvertTo-Json -Compress)"
+          & $check ($s.unknown.present -eq $false -and $s.empty.present -eq $false -and "$($s.wrongType)" -like 'error:*') "getPopoutState of unknown names: $($s | ConvertTo-Json -Compress)"
+          & $check ($r.maximize.event.maximized -eq $true -and $r.maximize.relabeled -eq $true -and (Popout $r.maximizedNative $name).maximized -eq $true) "maximize: $($r.maximize | ConvertTo-Json -Compress)"
+          $rn = Popout $r.restoredNative $name
+          & $check ($r.restore.event.maximized -eq $false -and $rn.maximized -eq $false -and $dn -and (Same-Rect $rn.client $dn.client)) "restore: $($r.restore | ConvertTo-Json -Compress), client $(Rect $rn.client) vs $(Rect $dn.client)"
+          & $check ((Popout $r.minimizedNative $name).minimized -eq $true -and $r.minimize.state.present -eq $true) "minimize: $($r.minimize | ConvertTo-Json -Compress)"
+          $fn = Popout $r.focusedNative $name
+          & $check ($fn.minimized -eq $false -and $fn.visible -eq $true) "focus ($($r.focus.via)): $($fn | ConvertTo-Json -Compress)"
+          "- focus via $($r.focus.via): minimized $($fn.minimized), focused $($fn.focused)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # 3. El desk temporal.
+          $t = $r.tempDesk
+          & $check ($t.modal -eq $true -and $t.deskInModal -eq $true -and $t.popoutClosed -eq $true) "temporary desk: $($t | ConvertTo-Json -Compress)"
+          & $check (-not (Popout $r.duringTempNative $name) -and (Closed-By $r.duringTempNative $name) -eq 'window.close') "the borrowed desk's window: $($r.duringTempNative | ConvertTo-Json -Compress -Depth 5)"
+          $tc = $r.tempDeskClose
+          $before = Popout $r.beforeTempNative $name
+          $after = Popout $r.afterTempNative $name
+          & $check ($tc.modalGone -eq $true) "closing the temporary desk left the modal: $($tc | ConvertTo-Json -Compress)"
+          # El desk prestado vuelve a una ventana con el mismo nombre y el mismo rectángulo.
+          # Desks.endBorrow solo la devuelve si el lugar del desk en el lienzo sigue montado;
+          # por eso la prueba abre el desk temporal desde la lista de agentes, que no mueve
+          # la cámara (desde la tarjeta habría que encuadrar la org y el renderer la suelta).
+          & $check ($after -and $tc.sameName -eq $true -and $before -and (Same-Rect $after.client $before.client)) "the borrowed desk did not come back to its window: $($tc | ConvertTo-Json -Compress), after $(Rect $after.client), before $(Rect $before.client)"
+          "- temporary desk (from the $(if ($t.tray) { 'agents list' } else { 'card' })): before $(Rect $before.client), after $(Rect $after.client), features $($tc.features)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          # 4. El desk vuelve a la ventana principal ("Return to main window", window.close()).
+          & $check ($r.deskClose.closed -eq $true -and $r.deskClose.redocked -eq $true) "desk redock: $($r.deskClose | ConvertTo-Json -Compress)"
+          & $check (-not (Popout $r.deskClosedNative $name) -and (Closed-By $r.deskClosedNative $name) -like '*window.close') "the desk window after 'Return to main window': $($r.deskClosedNative | ConvertTo-Json -Compress -Depth 5)"
+          # 5. El modal anclado y su pop-out.
+          $m = $r.modalPin
+          & $check ($m.pinned -eq $true -and $m.onTop -eq $true -and $m.stillPinned -eq $true -and $m.samePlace -eq $true -and $m.onTopAfter -eq $true) "pinned modal: $($m | ConvertTo-Json -Compress)"
+          $mp = $r.modalPopout
+          & $check ($mp.atOpen.connected -eq $true -and $mp.atOpen.inOwner -eq $true -and $mp.atOpen.stillModal -eq $true) "the modal was gone before its window opened: $($mp.atOpen | ConvertTo-Json -Compress)"
+          & $check ($mp.inChild -eq $true -and $mp.ownerHasPanel -eq $false -and @($mp.controls).Count -eq 3) "modal pop-out: $($mp | ConvertTo-Json -Compress)"
+          $mn = Popout $r.modalNative $mp.name
+          if ($mn) {
+            $want = [pscustomobject]@{ x = $mp.requested.left; y = $mp.requested.top; width = $mp.requested.width; height = $mp.requested.height }
+            & $check (Same-Rect $mn.client $want) "modal popout client $(Rect $mn.client) is not the requested $(Rect $want)"
+            # Donde estaba el panel anclado en la pantalla: el área cliente de la principal más su rectángulo.
+            $main = $r.modalPinNative.main.client
+            $panel = [pscustomobject]@{ x = $main.x + [math]::Round($mp.rect.x); y = $main.y + [math]::Round($mp.rect.y); width = [math]::Round($mp.rect.w); height = [math]::Round($mp.rect.h) }
+            # Informativo: popupFeatures puede agrandar el panel al mínimo del modal o correrlo
+            # para que entre en la pantalla; lo que el shell garantiza es lo pedido (arriba).
+            $overPanel = Same-Rect $mn.client $panel
+            "- modal popout exactly over the pinned panel: $overPanel" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            "- modal: pinned panel on screen $(Rect $panel), features $($mp.features), popout client $(Rect $mn.client); page sees owner $($mp.owner | ConvertTo-Json -Compress)" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          } else { $failures += "no native popout for the modal $($mp.name)" }
+          & $check ($r.modalClose.closed -eq $true -and $r.modalClose.back -eq $true -and (Closed-By $r.modalClosedNative $mp.name) -eq 'closePopout') "modal close: $($r.modalClose | ConvertTo-Json -Compress), by $(Closed-By $r.modalClosedNative $mp.name)"
+          # 6. Ninguna ventana queda, en blanco o no, y el vigilante nunca actuó.
+          $f = $r.finalNative
+          & $check (@($f.popouts).Count -eq 0) "windows left after closing every popout: $($f.popouts | ConvertTo-Json -Compress)"
+          & $check (@($f.closed | Where-Object { $_.by -eq 'reaper' }).Count -eq 0) "the container reaper had to close: $($f.closed | ConvertTo-Json -Compress)"
+          "- closed: $(($f.closed | ForEach-Object { "$($_.name) by $($_.by)" }) -join '; ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          & $check ($r.done -eq $true) 'the probe did not finish its steps'
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Popouts verified: window controls and events, exact bounds, temporary desk round trip, return to the main window, pinned modal pop-out and window.close()'
+
+      # #19: ciclo de vida del motor, sobre el motor de fixture y raíces descartables.
+      # 1. "full": otro motor (lanzado acá) tiene la raíz, así que la app muestra el
+      #    rechazo con Reintentar; se libera la raíz y la prueba toca el botón real. El
+      #    fixture simula la conversión de datos (4 pasos a 2,5 s) con un plazo de
+      #    silencio de 6 s: el total lo supera, ningún paso solo. Después: estado y
+      #    eventos del puente, una caída con aviso, una recarga que falla con el motor
+      #    caído y su recuperación, mantenimiento (restart y update) y la salida por la
+      #    bandeja. 2. "close": con exitOnClose, cerrar la última ventana sale de la app.
+      #    3. "session": WM_QUERYENDSESSION + WM_ENDSESSION, como Windows al cerrar la
+      #    sesión. En las tres se busca que no quede ningún proceso del árbol de la app y
+      #    que el candado de la raíz quede libre.
+      - name: Engine lifecycle (refusal and retry, conversion, crash and load recovery, maintenance, orderly exits)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release -Filter orgtree-tauri.exe | Select-Object -First 1
+          if (-not $exe) { throw "orgtree-tauri.exe not found" }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          # Como Windows (y el Restart Manager del instalador): WM_QUERYENDSESSION y después
+          # WM_ENDSESSION(TRUE) a TODAS las ventanas de nivel superior del proceso. tao atiende
+          # WM_ENDSESSION en su ventana oculta de eventos, no en las ventanas de la app.
+          Add-Type @'
+          using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+          public static class Session {
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+            public static string End(int pid) {
+              var wins = new List<IntPtr>();
+              EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid) wins.Add(h); return true; }, IntPtr.Zero);
+              var logoff = new IntPtr(0x80000000L); IntPtr r; int agreed = 0;
+              foreach (var h in wins) { SendMessageTimeout(h, 0x11, IntPtr.Zero, logoff, 2, 5000, out r); if (r != IntPtr.Zero) agreed++; }
+              foreach (var h in wins) { SendMessageTimeout(h, 0x16, new IntPtr(1), logoff, 2, 60000, out r); }
+              return wins.Count + " windows, " + agreed + " agreed to end the session";
+            }
+          }
+          '@
+          # Los procesos descendientes de la app (motor, guardián, hub, PostgreSQL, WebView2).
+          # Sin el navegador del sistema: la etapa full abre Edge a propósito
+          # (openHarnessLink, #21) y Edge (msedge.exe, que no es el msedgewebview2.exe de la
+          # app) sobrevive con razón a la salida. Se excluye con todo su árbol; el motor,
+          # PostgreSQL y WebView2 siguen contando, así que un huérfano de esos sigue fallando.
+          function Get-Tree($rootPid) {
+            $all = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -ne 'msedge.exe' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine, CreationDate)
+            $tree = @(); $queue = @($rootPid)
+            while ($queue.Count) {
+              $next = @()
+              # Un PID reusado deja procesos viejos (p. ej. vctip.exe del build) con un
+              # ParentProcessId que hoy es de la app: un hijo nace después que su padre.
+              foreach ($id in $queue) { $born = @($all | Where-Object { $_.ProcessId -eq $id })[0].CreationDate; $kids = @($all | Where-Object { $_.ParentProcessId -eq $id -and $_.ProcessId -ne $id -and (-not $born -or $_.CreationDate -ge $born) }); $tree += $kids; $next += @($kids | ForEach-Object { $_.ProcessId }) }
+              $queue = $next
+            }
+            return ,$tree
+          }
+          function Wait-Gone($tree, $seconds) {
+            $deadline = (Get-Date).AddSeconds($seconds)
+            do {
+              $alive = @($tree | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+              if (-not $alive.Count) { return ,@() }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $deadline)
+            return ,$alive
+          }
+          function Lock-Free($root) {
+            $lock = Join-Path $root '.desktop-engine.lock'
+            if (-not (Test-Path $lock)) { return $true }
+            try { $fs = [IO.File]::Open($lock, 'Open', 'Write', 'ReadWrite'); $fs.WriteByte(48); $fs.Flush(); $fs.Close(); return $true } catch { return $false }
+          }
+          $failures = @()
+          $check = { param($ok, $message) if (-not $ok) { $script:failures += $message } }
+          $root = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-lifecycle'
+          $out = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-lifecycle.json'
+          $exitReport = "$out.exit.jsonl"
+          Remove-Item $exitReport -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $root | Out-Null
+          # Corre la app en una modalidad, atiende los marcadores (capturas y acciones) y
+          # devuelve el reporte; verifica que no queden procesos del árbol anotado.
+          function Run-Lifecycle($run, $markers, $onMarker) {
+            Get-ChildItem "$out*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.exit.jsonl' } | Remove-Item -Force
+            $env:ORGTREE_TAURI_DATA = $root
+            $env:ORGTREE_TAURI_PROFILE = Join-Path $env:RUNNER_TEMP "orgtree-tauri-lifecycle-profile-$run"
+            $env:ORGTREE_TAURI_LIFECYCLE_PROBE = $out
+            $env:ORGTREE_TAURI_LIFECYCLE_RUN = $run
+            $env:ORGTREE_TAURI_EXIT_REPORT = $exitReport
+            $started = Get-Date
+            $p = Start-Process -FilePath $exe.FullName -PassThru
+            $script:tree = @()
+            $deadline = $started.AddSeconds(720)
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+              foreach ($name in $markers) {
+                if (Test-Path "$out.$name") {
+                  if ($name -ne 'converting') { Start-Sleep -Milliseconds 400 }
+                  try { Save-Screen "lifecycle-$name" } catch { Write-Host "screenshot: $_" }
+                  & $onMarker $name $p
+                  Remove-Item "$out.$name" -Force -ErrorAction SilentlyContinue
+                }
+              }
+              Start-Sleep -Milliseconds 300; $p.Refresh()
+            }
+            $seconds = [int]((Get-Date) - $started).TotalSeconds
+            if (-not $p.HasExited) {
+              $script:failures += "run ${run}: the app did not quit within 720 s"
+              taskkill /PID $p.Id /T /F 2>&1 | Out-Null
+            }
+            Write-Host "Run $run exited with $($p.ExitCode) after $seconds s"
+            $report = if (Test-Path $out) { Get-Content $out -Raw } else { $null }
+            if ($report) {
+              Copy-Item $out "$out.$run.json" -Force
+              "### Engine lifecycle, run $run ($seconds s)`n``````json`n$report`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+              $report = $report | ConvertFrom-Json
+            } else { $script:failures += "run ${run}: no report" }
+            # Ningún proceso del árbol de la app sigue vivo, y el guardián soltó la raíz.
+            $alive = Wait-Gone $script:tree 30
+            & $check ($script:tree.Count -ge 2) "run ${run}: the process tree was not recorded ($($script:tree.Count) processes)"
+            & $check (-not $alive.Count) "run ${run}: orphans after the exit: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')"
+            & $check (Lock-Free $root) "run ${run}: the data root lock is still held after the exit"
+            "- run ${run}: $($script:tree.Count) processes under the app before the exit ($(($script:tree | ForEach-Object { $_.Name }) -join ', ')); left alive: $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append | Write-Host
+            return $report
+          }
+          $exits = { if (Test-Path $exitReport) { @(Get-Content $exitReport | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
+
+          # ---------------------------------------------------------------- 1. full
+          # Otro motor (el mismo fixture) toma la raíz antes que la app.
+          $extOut = Join-Path $env:RUNNER_TEMP 'lifecycle-external.out'
+          $env:ORGTREE_DATA = $root
+          $env:ORGTREE_V2_TOKEN = [guid]::NewGuid().ToString('N')
+          $ext = Start-Process -FilePath $env:ORGTREE_TAURI_PYTHON -ArgumentList "`"$env:ORGTREE_TAURI_ENGINE_DIR\launch.py`"" -WorkingDirectory $env:ORGTREE_TAURI_ENGINE_DIR `
+            -RedirectStandardOutput $extOut -RedirectStandardError "$extOut.err" -PassThru -WindowStyle Hidden
+          # La app nunca hereda ORGTREE_DATA (sería una raíz prohibida) ni el token.
+          Remove-Item Env:ORGTREE_DATA, Env:ORGTREE_V2_TOKEN
+          $deadline = (Get-Date).AddSeconds(150)
+          while (-not ((Test-Path $extOut) -and (Select-String -Path $extOut -Pattern '"type":"ready"' -Quiet)) -and (Get-Date) -lt $deadline -and -not $ext.HasExited) { Start-Sleep -Milliseconds 500; $ext.Refresh() }
+          if (-not (Select-String -Path $extOut -Pattern '"type":"ready"' -Quiet)) { Get-Content "$extOut.err" -Tail 40; throw "the external engine did not become ready" }
+          Write-Host "External engine $($ext.Id) owns $root"
+          $env:ORGTREE_FIXTURE_CONVERT = '4'
+          $env:ORGTREE_FIXTURE_CONVERT_GAP = '2.5'
+          $env:ORGTREE_TAURI_CONVERSION_SILENCE_S = '6'
+          $onFull = {
+            param($name, $p)
+            if ($name -eq 'refused') {
+              # Se libera la raíz: el motor externo termina y su guardián suelta el candado.
+              # taskkill /T puede salir con 1 si el guardián ya terminó a un hijo del árbol
+              # (run 37617102790): ese código quedaba en $LASTEXITCODE y el runner lo usa
+              # como resultado del paso aunque todo pasara. Lo que importa es el candado.
+              taskkill /PID $ext.Id /T /F 2>&1 | Out-Null
+              $global:LASTEXITCODE = 0
+              $until = (Get-Date).AddSeconds(30)
+              while (-not (Lock-Free $root) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+              New-Item -ItemType File -Force "$out.retry-go" | Out-Null
+            }
+            if ($name -eq 'maintenance') { $script:tree = Get-Tree $p.Id }
+          }
+          $full = Run-Lifecycle 'full' @('refused', 'converting', 'ready', 'engine-down', 'load-failed', 'recovered', 'maintenance') $onFull
+          Remove-Item Env:ORGTREE_FIXTURE_CONVERT, Env:ORGTREE_FIXTURE_CONVERT_GAP, Env:ORGTREE_TAURI_CONVERSION_SILENCE_S
+          if ($full) {
+            $refused = @($full.refused.log)[0]
+            & $check ($refused.splash.title -eq 'Otra instancia está usando estos datos' -and $refused.splash.retry -eq $true -and $refused.error -like '*otro motor*') "refusal: $($full.refused | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.refused.status.state -eq 'unavailable') "status after the refusal: $($full.refused.status | ConvertTo-Json -Compress)"
+            & $check ($full.retryClicked -eq $true -and @($full.logs.retry).Count -ge 1) "the Retry button did not reach the shell: clicked $($full.retryClicked), retry log $(@($full.logs.retry).Count)"
+            $phases = @($full.logs.phases)
+            $conv = @($phases | Where-Object { $_.conversion -eq $true })
+            $after = @($phases | Where-Object { -not $_.conversion -and $conv.Count -and $_.ms -gt $conv[-1].ms }) | Select-Object -First 1
+            $gaps = @(); for ($i = 1; $i -lt $conv.Count; $i++) { $gaps += $conv[$i].ms - $conv[$i - 1].ms }
+            if ($after) { $gaps += $after.ms - $conv[-1].ms }
+            $span = if ($after) { $after.ms - $conv[0].ms } else { 0 }
+            $maxGap = ($gaps | Measure-Object -Maximum).Maximum
+            & $check ($conv.Count -eq 4 -and $conv[0].phase -like 'database-convert*') "conversion phases: $($phases | ConvertTo-Json -Compress)"
+            & $check ($span -gt 6000 -and $maxGap -lt 6000) "the conversion window must measure silence: span $span ms, largest gap $maxGap ms"
+            "- conversion: $($conv.Count) phases over $span ms, largest gap $maxGap ms (window 6000 ms)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append | Write-Host
+            $rd = $full.ready.page
+            & $check ($rd.status.state -eq 'ready' -and $rd.maintenanceFn -eq 'function' -and $null -eq $rd.maintenance -and $rd.listed -eq $true) "ready: $($rd | ConvertTo-Json -Compress)"
+            $dn = $full.down
+            $stoppedEvents = @($dn.page.events | Where-Object { $_.type -eq 'engine-status' -and $_.data.state -eq 'stopped' })
+            & $check ($dn.stopped -eq $true -and $dn.page.status.state -eq 'stopped' -and $dn.page.notice -like '*se detuvo*' -and $stoppedEvents.Count -ge 1) "engine down: $($dn | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.loadFailed.recorded -eq $true) "the failed load was not recorded: $($full.loadFailed | ConvertTo-Json -Compress)"
+            $rc = $full.recovered
+            & $check ($rc.back -eq $true -and $rc.page.http -eq 200 -and $rc.page.ws -eq 'open' -and $rc.page.listed -eq $true -and $rc.page.status.state -eq 'ready' -and $null -eq $rc.page.notice) "recovery: $($rc | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($rc.pid -and $rc.pid -ne $full.ready.pid) "the engine was not replaced: $($full.ready.pid) -> $($rc.pid)"
+            $mr = $full.maintenanceRestart
+            & $check ($mr.request.status -eq 200 -and $mr.restarted -eq $true -and $mr.pidAfter -ne $mr.pidBefore) "maintenance restart: $($mr | ConvertTo-Json -Compress -Depth 6)"
+            $mu = $full.maintenanceUpdate
+            & $check ($mu.reported -eq $true -and $mu.page.maintenance.state -eq 'unavailable' -and @($mu.page.events).Count -ge 1) "maintenance update: $($mu | ConvertTo-Json -Compress -Depth 6)"
+            & $check ($full.done -eq $true) 'run full did not finish its steps'
+          }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'quit' -and $last.trigger -eq 'tray' -and $last.outcome -eq 'stopped' -and $last.ms -lt 26000) "exit through the tray: $($last | ConvertTo-Json -Compress)"
+
+          # ---------------------------------------------------------------- 2. close
+          $prefs = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-lifecycle-profile-close'
+          New-Item -ItemType Directory -Force $prefs | Out-Null
+          '{"exitOnClose": true}' | Set-Content -Path (Join-Path $prefs 'preferences.json') -Encoding utf8NoBOM
+          $close = Run-Lifecycle 'close' @('close-ready') { param($name, $p) $script:tree = Get-Tree $p.Id }
+          if ($close) { & $check ($close.ready.page.status.state -eq 'ready' -and $close.ready.exitOnClose -eq $true) "close run: $($close.ready | ConvertTo-Json -Compress -Depth 5)" }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'quit' -and $last.trigger -eq 'last-window' -and $last.outcome -eq 'stopped') "exit by closing the last window: $($last | ConvertTo-Json -Compress)"
+
+          # ---------------------------------------------------------------- 3. session
+          $onSession = {
+            param($name, $p)
+            $script:tree = Get-Tree $p.Id
+            Write-Host "Session end: $([Session]::End($p.Id))"
+          }
+          $session = Run-Lifecycle 'session' @('session-ready') $onSession
+          if ($session) { & $check ($session.ready.page.status.state -eq 'ready' -and $session.ready.hwnd) "session run: $($session.ready | ConvertTo-Json -Compress -Depth 5)" }
+          $last = @(& $exits)[-1]
+          & $check ($last.path -eq 'session-end' -and $last.outcome -eq 'stopped') "exit at the end of the Windows session: $($last | ConvertTo-Json -Compress)"
+          "- exits: $((& $exits | ForEach-Object { "$($_.path)/$($_.trigger): $($_.outcome) in $($_.ms) ms" }) -join '; ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Engine lifecycle verified: refusal and retry, conversion phases, crash notice and load recovery, maintenance, and three orderly exits without orphans'
+          exit 0
+
+      # #18: el instalador en una carpeta descartable, arrancado desde ahí con su
+      # motor empaquetado (sin ORGTREE_TAURI_PYTHON) sobre una raíz descartable.
+      #
+      # La app instalada corre como un usuario local estándar creado para la prueba,
+      # como la corre una persona. El usuario del runner (runneradmin) es la cuenta
+      # Administrador integrada (RID 500): su SID se abrevia "LA" en SDDL, y la
+      # verificación de ACL de pg-custodian (prototype-guard, acl.rs) compara el SID
+      # completo con ese alias y rechaza sus propias carpetas de secretos
+      # (acl.not_owner_only, run 37574867250). No se cambia el producto: queda
+      # documentado en docs/spikes/tauri.md.
+      - name: Install and run the standalone installer (packaged engine on PostgreSQL, upgrade with the app open)
+        # Corre aunque falle el smoke test de desarrollo: son pruebas independientes.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          foreach ($name in 'ORGTREE_TAURI_PYTHON', 'ORGTREE_TAURI_ENGINE_DIR', 'ORGTREE_TAURI_UI_DIR', 'ORGTREE_TAURI_PROBE') {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+          }
+          # Las rutas que da Tauri pueden traer el prefijo \\?\ de Windows.
+          function Strip-Long($path) { "$path".Replace('\\?\', '').TrimEnd('\') }
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-installed'
+          # NSIS: /D= tiene que ser el último argumento y sin comillas.
+          $setup = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$dir" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "the installer exited with code $($setup.ExitCode)" }
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notlike 'uninstall*' } | Select-Object -First 1
+          if (-not $exe) { throw "no app executable in ${dir}: $((Get-ChildItem $dir).Name -join ', ')" }
+          Write-Host "Installed $($exe.FullName)"
+          Start-Sleep -Seconds 2
+          # Si el instalador dejó la app abierta, cerrarla: la prueba la arranca con su entorno.
+          Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe.FullName } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          $failures = @()
+          node tools/verify-resources.mjs bundle-resources --compare $dir
+          if ($LASTEXITCODE -ne 0) { $failures += 'the installed resources differ from the staged ones' }
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          # Usuario estándar descartable (sin privilegios de administrador).
+          $user = 'orgtreeci'
+          $password = 'Ot-' + [guid]::NewGuid().ToString('N').Substring(0, 20) + '!9a'
+          net user $user $password /add /y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "could not create the local user $user" }
+          $credential = New-Object System.Management.Automation.PSCredential($user, (ConvertTo-SecureString $password -AsPlainText -Force))
+          $sid = (New-Object System.Security.Principal.NTAccount($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+          # Crear su perfil antes de arrancar la app, para darle su propio entorno.
+          Start-Process cmd.exe -ArgumentList '/c', 'exit' -Credential $credential -LoadUserProfile -Wait -WorkingDirectory $env:SystemRoot
+          $profileDir = (Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid }).LocalPath
+          if (-not $profileDir) { throw "no profile for $user" }
+          Write-Host "Running the installed app as $user ($sid, profile $profileDir)"
+          $work = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-user'
+          New-Item -ItemType Directory -Force $work, (Join-Path $work 'tmp') | Out-Null
+          icacls $work /grant "${user}:(OI)(CI)F" | Out-Null
+          icacls $dir /grant "${user}:(OI)(CI)RX" | Out-Null
+          $data = Join-Path $work 'data'
+          $env:ORGTREE_TAURI_DATA = $data
+          $env:ORGTREE_TAURI_INSTALL_PROBE = Join-Path $work 'install-probe.json'
+          # #19: cada salida de la app anota su camino y si el motor se detuvo en orden.
+          $exitReport = Join-Path $work 'exit.jsonl'
+          $env:ORGTREE_TAURI_EXIT_REPORT = $exitReport
+          $env:USERPROFILE = $profileDir
+          $env:APPDATA = Join-Path $profileDir 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $profileDir 'AppData\Local'
+          $env:TEMP = Join-Path $work 'tmp'; $env:TMP = $env:TEMP
+          $started = Get-Date
+          $p = Start-Process -FilePath $exe.FullName -Credential $credential -LoadUserProfile -WorkingDirectory $dir -PassThru
+          $splash = $false
+          $deadline = $started.AddSeconds(420)
+          while (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
+            # La ventana de arranque muestra la raíz de datos mientras PostgreSQL arranca.
+            if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) { try { Save-Screen 'installed-splash' } catch { Write-Host "screenshot: $_" }; $splash = $true }
+            Start-Sleep -Milliseconds 500; $p.Refresh()
+          }
+          $ready = ((Get-Date) - $started).TotalSeconds
+          Start-Sleep -Seconds 2
+          try { Save-Screen 'installed-app' } catch { Write-Host "screenshot: $_" }
+          if ($p.HasExited) { $failures += "the installed app exited early with code $($p.ExitCode)" }
+          if (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE)) { $failures += 'the install probe did not report within 420 s' }
+          else {
+            $raw = Get-Content $env:ORGTREE_TAURI_INSTALL_PROBE -Raw
+            Write-Host "Install probe: $raw"
+            "### Installed app (#18)`n- first page ready after $([int]$ready) s (fresh PostgreSQL cluster)`n``````json`n$raw`n``````" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            $probe = $raw | ConvertFrom-Json
+            if ($probe.launch.mode -ne 'packaged') { $failures += "the app did not use the packaged engine: $($probe.launch.mode)" }
+            if ((Strip-Long $probe.launch.dataRoot) -ne $data) { $failures += "data root in use: $($probe.launch.dataRoot)" }
+            if ((Strip-Long $probe.engine.dataRoot) -ne $data) { $failures += "data root confirmed by the engine: $($probe.engine.dataRoot)" }
+            if ((Strip-Long $probe.launch.engineDir) -ne (Join-Path $dir 'engine')) { $failures += "engine directory: $($probe.launch.engineDir)" }
+            $page = $probe.page
+            if ($page.nav -eq 401 -or $page.http -ne 200) { $failures += "the packaged engine page was not authenticated: nav $($page.nav), http $($page.http)" }
+            if ($page.bridge -ne $true -or $page.status -ne 'ready') { $failures += "window.orgtreeDesktop: bridge $($page.bridge), status $($page.status)" }
+            if ($page.rendered -ne $true) { $failures += "the renderer did not render: $($page.text)" }
+            if ($page.create -ne 200) { $failures += "creating an org returned $($page.create): $($page.createError)" }
+            if (@($page.orgs) -notcontains 'instalado') { $failures += "the new org is not listed: $($page.orgs -join ', ')" }
+          }
+          # El motor empaquetado arrancó sobre PostgreSQL: el registro de la raíz,
+          # el cluster y los procesos, todos desde la carpeta instalada.
+          $backend = Join-Path $data 'store-backend.json'
+          if (-not (Test-Path $backend)) { $failures += 'store-backend.json missing: the root was not bootstrapped on PostgreSQL' }
+          else {
+            $record = Get-Content $backend -Raw | ConvertFrom-Json
+            if ($record.backend -ne 'postgres') { $failures += "store-backend.json chose $($record.backend)" }
+          }
+          if (-not (Test-Path (Join-Path $data 'pg\cluster\data\PG_VERSION'))) { $failures += 'no PostgreSQL cluster in <data>\pg\cluster\data' }
+          else { Write-Host "PG_VERSION: $(Get-Content (Join-Path $data 'pg\cluster\data\PG_VERSION') -Raw)" }
+          $processes = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$dir\*" }
+          $postgres = @($processes | Where-Object { $_.Name -eq 'postgres.exe' })
+          $python = @($processes | Where-Object { $_.ExecutablePath -eq (Join-Path $dir 'engine\runtime\python.exe') })
+          Write-Host "Processes from the install folder: $(($processes | ForEach-Object { $_.Name }) -join ', ')"
+          if (-not $postgres) { $failures += 'no postgres.exe running from the install folder' }
+          if (-not $python) { $failures += 'the engine is not running on the embedded Python' }
+          $paths = Join-Path $env:LOCALAPPDATA 'com.kushro.orgtree.tauri-spike\engine-paths.json'
+          if (-not (Test-Path $paths)) { $failures += "engine-paths.json missing ($paths)" }
+          else {
+            $descriptor = Get-Content $paths -Raw | ConvertFrom-Json
+            Write-Host "engine-paths.json: $($descriptor | ConvertTo-Json -Compress)"
+            if ($descriptor.schema -ne 'orgtree.engine-paths/v1' -or (Strip-Long $descriptor.data) -ne $data -or (Strip-Long $descriptor.python) -ne (Join-Path $dir 'engine\runtime\python.exe') -or (Strip-Long $descriptor.pgBin) -ne (Join-Path $dir 'engine\postgresql\bin')) {
+              $failures += "engine-paths.json does not describe the install: $($descriptor | ConvertTo-Json -Compress)"
+            }
+          }
+          $size = (Get-ChildItem $dir -Recurse -File | Measure-Object Length -Sum).Sum
+          "- installed folder: {0:N1} MB, {1}: {2:N1} MB, {3} postgres processes" -f ($size / 1MB), $exe.Name, ($exe.Length / 1MB), $postgres.Count | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          # #19: actualizar con la app abierta. El instalador NSIS de Tauri cierra la app con el
+          # Restart Manager, que le manda WM_QUERYENDSESSION y WM_ENDSESSION como el fin de la
+          # sesión de Windows; la app apaga su motor (Python embebido, guardián y PostgreSQL) con
+          # el presupuesto de la salida antes de terminar. El instalador corre como el mismo
+          # usuario que la app, como lo haría una persona que actualiza su instalación.
+          # Como Windows (y el Restart Manager del instalador): WM_QUERYENDSESSION y después
+          # WM_ENDSESSION(TRUE) a TODAS las ventanas de nivel superior del proceso. tao atiende
+          # WM_ENDSESSION en su ventana oculta de eventos, no en las ventanas de la app.
+          Add-Type @'
+          using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+          public static class Session {
+            delegate bool EnumProc(IntPtr h, IntPtr l);
+            [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+            [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+            [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+            public static string End(int pid) {
+              var wins = new List<IntPtr>();
+              EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p); if (p == (uint)pid) wins.Add(h); return true; }, IntPtr.Zero);
+              var logoff = new IntPtr(0x80000000L); IntPtr r; int agreed = 0;
+              foreach (var h in wins) { SendMessageTimeout(h, 0x11, IntPtr.Zero, logoff, 2, 5000, out r); if (r != IntPtr.Zero) agreed++; }
+              foreach (var h in wins) { SendMessageTimeout(h, 0x16, new IntPtr(1), logoff, 2, 60000, out r); }
+              return wins.Count + " windows, " + agreed + " agreed to end the session";
+            }
+          }
+          '@
+          $fromDir = { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$dir\*" } | Select-Object ProcessId, Name, ExecutablePath) }
+          $waitGone = {
+            param($procs, $seconds)
+            $until = (Get-Date).AddSeconds($seconds)
+            do {
+              $alive = @($procs | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
+              if (-not $alive.Count) { return ,@() }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $until)
+            return ,$alive
+          }
+          $lockFree = {
+            $lock = Join-Path $data '.desktop-engine.lock'
+            if (-not (Test-Path $lock)) { return $true }
+            try { $fs = [IO.File]::Open($lock, 'Open', 'Write', 'ReadWrite'); $fs.WriteByte(48); $fs.Flush(); $fs.Close(); return $true } catch { return $false }
+          }
+          $exitLines = { if (Test-Path $exitReport) { @(Get-Content $exitReport | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
+          if (-not $p.HasExited) {
+            $before = & $fromDir
+            Write-Host "Before the upgrade: $(($before | ForEach-Object { $_.Name }) -join ', ')"
+            icacls $dir /grant "${user}:(OI)(CI)F" | Out-Null
+            $upStart = Get-Date
+            $upgrade = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$dir" -Credential $credential -LoadUserProfile -WorkingDirectory $env:SystemRoot -PassThru -Wait
+            $upSeconds = [int]((Get-Date) - $upStart).TotalSeconds
+            $p.WaitForExit(30000) | Out-Null
+            $alive = & $waitGone $before 30
+            $upExit = @(& $exitLines)[-1]
+            "### Upgrade with the app open (#19)`n- installer exit code $($upgrade.ExitCode) after $upSeconds s; app exited: $($p.HasExited)`n- the app's exit: $($upExit | ConvertTo-Json -Compress)`n- processes from the install folder before: $($before.Count), left: $($alive.Count) $(($alive | ForEach-Object { $_.Name }) -join ', ')" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            if ($upgrade.ExitCode -ne 0) { $failures += "the upgrade installer exited with $($upgrade.ExitCode)" }
+            if (-not $p.HasExited) { $failures += 'the upgrade did not close the running app' }
+            if ($alive.Count) { $failures += "processes left after the upgrade closed the app: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')" }
+            if (-not (& $lockFree)) { $failures += 'the data root lock is still held after the upgrade' }
+            if ($upExit.path -ne 'session-end' -or $upExit.outcome -ne 'stopped') { $failures += "the app did not stop its engine in order for the upgrade: $($upExit | ConvertTo-Json -Compress)" }
+            # Si el instalador volvió a abrir la app, se cierra: la prueba la arranca con su entorno.
+            & $fromDir | Where-Object { $_.Name -like 'orgtree*' } | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null }
+            Start-Sleep -Seconds 2
+            # La app actualizada arranca otra vez sobre el mismo cluster, y sale con el fin de sesión.
+            Remove-Item $env:ORGTREE_TAURI_INSTALL_PROBE -ErrorAction SilentlyContinue
+            $again = Get-Date
+            $p = Start-Process -FilePath $exe.FullName -Credential $credential -LoadUserProfile -WorkingDirectory $dir -PassThru
+            $until = $again.AddSeconds(240)
+            while (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE) -and (Get-Date) -lt $until -and -not $p.HasExited) { Start-Sleep -Milliseconds 500; $p.Refresh() }
+            $againSeconds = [int]((Get-Date) - $again).TotalSeconds
+            if (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE)) { $failures += 'the upgraded app did not load within 240 s' }
+            else {
+              $second = Get-Content $env:ORGTREE_TAURI_INSTALL_PROBE -Raw | ConvertFrom-Json
+              if ($second.page.rendered -ne $true -or @($second.page.orgs) -notcontains 'instalado') { $failures += "the upgraded app: rendered $($second.page.rendered), orgs $($second.page.orgs -join ', ')" }
+            }
+            Start-Sleep -Seconds 2
+            try { Save-Screen 'installed-after-upgrade' } catch { Write-Host "screenshot: $_" }
+            $before = & $fromDir
+            $sent = [Session]::End($p.Id)
+            $p.WaitForExit(40000) | Out-Null
+            $alive = & $waitGone $before 30
+            $endExit = @(& $exitLines)[-1]
+            "- relaunched after the upgrade in $againSeconds s; session end ($sent): exited $($p.HasExited), exit $($endExit | ConvertTo-Json -Compress), processes before $($before.Count), left $($alive.Count)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            if (-not $p.HasExited) { $failures += 'the installed app did not exit at the end of the session' }
+            if ($alive.Count) { $failures += "processes left after the session end: $(($alive | ForEach-Object { "$($_.Name) $($_.ProcessId)" }) -join ', ')" }
+            if ($endExit.path -ne 'session-end' -or $endExit.outcome -ne 'stopped' -or $endExit.enginePid -eq $upExit.enginePid) { $failures += "the installed app's session-end exit: $($endExit | ConvertTo-Json -Compress)" }
+          }
+          taskkill /PID $p.Id /T /F 2>&1 | Out-Null
+          if ($failures) {
+            # Diagnóstico: los registros de la raíz y el motor empaquetado lanzado a mano
+            # con el mismo entorno que le da el shell (el shell descarta su stderr).
+            Write-Host "Files in the data root: $((Get-ChildItem $data -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($data.Length) }) -join ', ')"
+            foreach ($log in Get-ChildItem $data -Recurse -File -Include *.log, *.jsonl, *.json, *.txt -ErrorAction SilentlyContinue | Where-Object { $_.Length -lt 200KB -and $_.FullName -notlike "*\secrets\*" } | Select-Object -First 20) {
+              Write-Host "----- $($log.FullName)"; Get-Content $log.FullName -Tail 40
+            }
+            Get-ChildItem Env:PG* | ForEach-Object { Remove-Item "Env:$($_.Name)" }  # como hace el shell (engine-host)
+            $env:ORGTREE_DATA = $data
+            $env:ORGTREE_V2_TOKEN = [guid]::NewGuid().ToString('N')
+            $env:ORGTREE_PG_BOOTSTRAP = '1'
+            $env:ORGTREE_PG_CUSTODIAN = Join-Path $dir 'engine\pg-custodian.exe'
+            $env:ORGTREE_P03_PG_BIN = Join-Path $dir 'engine\postgresql\bin'
+            $env:ORGTREE_V2_UI_DIR = Join-Path $dir 'ui'
+            $out = Join-Path $work 'manual-engine.out'; $err = Join-Path $work 'manual-engine.err'
+            $manual = Start-Process -FilePath (Join-Path $dir 'engine\runtime\python.exe') -ArgumentList (Join-Path $dir 'engine\launch.py') `
+              -WorkingDirectory (Join-Path $dir 'engine') -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow -Credential $credential -LoadUserProfile
+            if (-not $manual.WaitForExit(120000)) { taskkill /PID $manual.Id /T /F | Out-Null; Write-Host 'manual engine still running after 120 s' }
+            else { Write-Host "manual engine exited with $($manual.ExitCode)" }
+            Write-Host '----- manual engine stdout'; Get-Content $out -Tail 60
+            Write-Host '----- manual engine stderr'; Get-Content $err -Tail 80
+          }
+          if ($failures) { throw ($failures -join '; ') }
+          Write-Host 'Installed app verified: packaged engine on the embedded Python and PostgreSQL, own data root, renderer loaded'
+          # taskkill devuelve 128 si el guardián ya cerró el árbol; el resultado es el de arriba.
+          exit 0
+
+      # #23: actualizar desde la versión anterior con el updater real. La versión
+      # 0.1.0 instalada por NSIS (con la clave de prueba) busca en un feed local
+      # firmado que anuncia el instalador de este run. Con el motor ocupado (un
+      # turno simulado) descarga pero no instala; con el motor y el usuario
+      # quietos apaga su motor en orden, el instalador NSIS reemplaza la app y la
+      # vuelve a abrir. Antes, con automaticUpdates apagado, no busca. Corre como
+      # runneradmin con el motor de fixture (sin PostgreSQL), en carpetas de RUNNER_TEMP.
+      - name: Update from the previous version (signed feed, busy engine, idle point, relaunch)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        env:
+          ORGTREE_TAURI_PYTHON: ${{ steps.python.outputs.python-path }}
+          ORGTREE_TAURI_ENGINE_DIR: ${{ github.workspace }}\apps\desktop-tauri\fixture-engine
+          ORGTREE_TAURI_UI_DIR: ${{ github.workspace }}\dist\renderer
+          VERSION: ${{ steps.updater.outputs.version }}
+          TEST_PUBKEY: ${{ steps.updater.outputs.test_pubkey }}
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          function Save-Screen($name) {
+            $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+            New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\screens" | Out-Null
+            $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $graphics.Dispose(); $bitmap.Dispose()
+          }
+          $events = { param($file) if (Test-Path $file) { @(Get-Content $file | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json }) } else { @() } }
+          $waitFor = {
+            param($file, $test, $seconds, $proc)
+            $until = (Get-Date).AddSeconds($seconds)
+            do {
+              $hit = @(& $events $file | Where-Object -FilterScript $test)
+              if ($hit.Count) { return $hit[0] }
+              if ($proc -and $proc.HasExited) { return $null }
+              Start-Sleep -Milliseconds 500
+            } while ((Get-Date) -lt $until)
+            return $null
+          }
+          $failures = @()
+          $work = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-update'
+          $dir = Join-Path $work 'installed'
+          $feedDir = Join-Path $work 'feed'
+          New-Item -ItemType Directory -Force $work, $feedDir | Out-Null
+          $previous = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'update-previous') -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          $current = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
+          if (-not $previous) { throw 'the previous version was not built (see "Build the previous version for the update test")' }
+          if (-not $current) { throw 'no installer for this run' }
+
+          # 1. La versión anterior, instalada por NSIS como la tendría un usuario.
+          $setup = Start-Process -FilePath $previous.FullName -ArgumentList '/S', "/D=$dir" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "the previous installer exited with $($setup.ExitCode)" }
+          $exe = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notlike 'uninstall*' } | Select-Object -First 1
+          Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe.FullName } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          $versionBefore = (Get-Item $exe.FullName).VersionInfo.ProductVersion
+          $hashBefore = (Get-FileHash $exe.FullName).Hash
+          Write-Host "Installed $($exe.FullName) $versionBefore; this run is $env:VERSION"
+          if ($versionBefore -ne '0.1.0') { $failures += "the previous version installed as $versionBefore" }
+
+          # 2. El feed: el instalador de este run firmado con la clave de prueba
+          # (ligada a la versión) y servido en loopback.
+          $asset = "orgtree-tauri-spike_$($env:VERSION)_x64-setup.exe"
+          $package = Join-Path $feedDir $asset
+          Copy-Item $current.FullName $package
+          npx tauri signer sign -f (Join-Path $env:RUNNER_TEMP 'updater-test-key\test.key') -p $env:ORGTREE_UPDATE_TEST_KEY_PASSWORD --app-version $env:VERSION $package | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'tauri signer sign failed' }
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop()
+          $feedFile = Join-Path $feedDir 'latest.json'
+          python tools/updater-feed.py make --installer $package --signature "$package.sig" --version $env:VERSION --url "http://127.0.0.1:$port/$asset" --notes 'Prueba de actualización (#23)' --out $feedFile
+          if ($LASTEXITCODE -ne 0) { throw 'updater-feed.py make failed' }
+          python tools/updater-feed.py verify --feed $feedFile --installer $package --pubkey $env:TEST_PUBKEY --expect-version $env:VERSION
+          if ($LASTEXITCODE -ne 0) { $failures += 'the generated feed does not verify with the public key' }
+          # Controles que tienen que fallar: el feed contra otro instalador y contra otra versión.
+          python tools/updater-feed.py verify --feed $feedFile --installer $previous.FullName --pubkey $env:TEST_PUBKEY 2>&1 | Out-Host
+          if ($LASTEXITCODE -eq 0) { $failures += 'the feed verified against a different installer' }
+          python tools/updater-feed.py verify --feed $feedFile --installer $package --pubkey $env:TEST_PUBKEY --expect-version 9.9.9 2>&1 | Out-Host
+          if ($LASTEXITCODE -eq 0) { $failures += 'the feed verified with another version' }
+          $server = Start-Process python -ArgumentList '-m', 'http.server', "$port", '--bind', '127.0.0.1', '--directory', $feedDir -NoNewWindow -PassThru `
+            -RedirectStandardOutput (Join-Path $work 'feed-server.out') -RedirectStandardError (Join-Path $work 'feed-server.err')
+          $feed = "http://127.0.0.1:$port/latest.json"
+          $served = $false
+          foreach ($i in 1..40) { try { Invoke-WebRequest $feed -UseBasicParsing -TimeoutSec 2 | Out-Null; $served = $true; break } catch { Start-Sleep -Milliseconds 500 } }
+          if (-not $served) { throw "the local feed did not answer at $feed" }
+          $env:ORGTREE_TAURI_UPDATE_FEED = $feed
+          $busy = Join-Path $work 'engine-busy'
+          $env:ORGTREE_FIXTURE_BUSY_FILE = $busy
+          $exitReport = Join-Path $work 'exit.jsonl'
+          $env:ORGTREE_TAURI_EXIT_REPORT = $exitReport
+          $fromDir = { @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe.FullName }) }
+
+          # 3. Con automaticUpdates apagado, la app no busca.
+          $offLog = Join-Path $work 'update-off.jsonl'
+          $offProfile = Join-Path $work 'profile-off'
+          New-Item -ItemType Directory -Force $offProfile | Out-Null
+          '{"automaticUpdates": false}' | Set-Content (Join-Path $offProfile 'preferences.json') -Encoding utf8NoBOM
+          $env:ORGTREE_TAURI_PROFILE = $offProfile
+          $env:ORGTREE_TAURI_DATA = Join-Path $work 'data-off'
+          $env:ORGTREE_TAURI_UPDATE_PROBE = $offLog
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $dir -PassThru
+          $start = & $waitFor $offLog { $_.event -eq 'start' } 60 $p
+          Write-Host "Updater at start: $($start | ConvertTo-Json -Compress)"
+          if (-not $start -or $start.supported -ne $true) { $failures += "the installed previous version has no updater: $($start | ConvertTo-Json -Compress)" }
+          $tick = & $waitFor $offLog { $_.event -eq 'tick' } 240 $p
+          if (-not $tick) { $failures += 'automaticUpdates off: the engine never became ready' }
+          else {
+            Start-Sleep -Seconds 15
+            $checks = @(& $events $offLog | Where-Object { $_.event -in 'check', 'downloaded', 'apply' })
+            if ($tick.automaticUpdates -ne $false -or $checks.Count) { $failures += "automaticUpdates off still checked: $($checks | ConvertTo-Json -Compress)" }
+          }
+          taskkill /PID $p.Id /T /F 2>&1 | Out-Null
+          Start-Sleep -Seconds 2
+
+          # 4. Prendido (por defecto) y con un turno en curso: descarga y espera.
+          $log = Join-Path $work 'update.jsonl'
+          New-Item -ItemType File -Force $busy | Out-Null
+          $env:ORGTREE_TAURI_PROFILE = Join-Path $work 'profile'
+          $env:ORGTREE_TAURI_DATA = Join-Path $work 'data'
+          $env:ORGTREE_TAURI_UPDATE_PROBE = $log
+          $p = Start-Process -FilePath $exe.FullName -WorkingDirectory $dir -PassThru
+          $oldPid = $p.Id
+          $pending = & $waitFor $log { $_.event -eq 'status' -and $_.state -eq 'pending-idle' } 300 $p
+          $hold = & $waitFor $log { $_.event -eq 'hold' -and $_.reason -eq 'engine-busy' } 30 $p
+          if (-not $pending) { $failures += "the update was not downloaded: $(& $events $log | ConvertTo-Json -Compress)" }
+          elseif (-not $hold) { $failures += "the downloaded update was not held while the engine was busy: $(& $events $log | ConvertTo-Json -Compress)" }
+          try { Save-Screen 'update-ready-engine-busy' } catch { Write-Host "screenshot: $_" }
+          Start-Sleep -Seconds 20
+          $early = @(& $events $log | Where-Object { $_.event -in 'apply', 'handoff' })
+          if ($early.Count -or $p.HasExited) { $failures += "the update was applied while the engine was busy: $($early | ConvertTo-Json -Compress)" }
+          if ((Get-FileHash $exe.FullName).Hash -ne $hashBefore) { $failures += 'the installed app changed while the engine was busy' }
+
+          # 5. El motor queda quieto: instala en el punto seguro.
+          Remove-Item $busy
+          $idleAt = Get-Date
+          $handoff = $null
+          if ($pending) { $handoff = & $waitFor $log { $_.event -eq 'handoff' } 180 $null }
+          if (-not $handoff) { $failures += "the update was not applied at the idle point: $(& $events $log | Select-Object -Last 5 | ConvertTo-Json -Compress)" }
+          else {
+            $p.WaitForExit(60000) | Out-Null
+            if (-not $p.HasExited) { $failures += 'the previous version did not exit for the installer' }
+            $exitLine = @(& $events $exitReport)[-1]
+            if ($exitLine.path -ne 'update' -or $exitLine.outcome -ne 'stopped') { $failures += "the app did not stop its engine in order before installing: $($exitLine | ConvertTo-Json -Compress)" }
+            $until = (Get-Date).AddSeconds(420)
+            do {
+              Start-Sleep -Seconds 2
+              $versionNow = try { (Get-Item $exe.FullName -ErrorAction Stop).VersionInfo.ProductVersion } catch { $null }
+            } while ($versionNow -ne $env:VERSION -and (Get-Date) -lt $until)
+            $installedS = [int]((Get-Date) - $idleAt).TotalSeconds
+            if ($versionNow -ne $env:VERSION) { $failures += "the installed app is $versionNow after the update, expected $env:VERSION" }
+            # 6. El instalador vuelve a abrir la app, ya actualizada.
+            $relaunch = & $waitFor $log { $_.event -eq 'start' -and $_.pid -ne $oldPid } 180 $null
+            if ($relaunch) {
+              $upToDate = & $waitFor $log { $_.event -eq 'status' -and $_.pid -eq $relaunch.pid -and $_.state -eq 'up-to-date' } 240 $null
+              Start-Sleep -Seconds 2
+              try { Save-Screen 'update-relaunched' } catch { Write-Host "screenshot: $_" }
+              if ($relaunch.appVersion -ne $env:VERSION) { $failures += "the relaunched app is $($relaunch.appVersion)" }
+              if (-not $upToDate) { $failures += "the relaunched app did not find itself up to date: $(& $events $log | Where-Object { $_.pid -eq $relaunch.pid } | ConvertTo-Json -Compress)" }
+            } elseif (@(& $fromDir).Count) {
+              Write-Host "::warning::The installer relaunched the app without the test environment (no update probe): it was closed."
+            } else { $failures += 'the installer did not relaunch the app' }
+            $all = & $events $log
+            $check = $all | Where-Object { $_.event -eq 'check' -and $_.pid -eq $oldPid } | Select-Object -First 1
+            $downloaded = $all | Where-Object { $_.event -eq 'downloaded' } | Select-Object -First 1
+            "### Update from 0.1.0 to $env:VERSION (#23)`n- feed checked to package ready: $([int](($pending.ms - $check.ms) / 1000)) s, $([math]::Round($downloaded.bytes / 1MB, 1)) MB verified`n- held while the engine was busy ($($hold.reason)) for 20 s, no install`n- engine idle to new version installed: $installedS s; the app stopped its engine for the installer: $($exitLine | ConvertTo-Json -Compress)`n- relaunched: $([bool]$relaunch) $($relaunch.appVersion), then up to date: $([bool]$upToDate)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+          & $fromDir | ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null }
+          taskkill /PID $server.Id /T /F 2>&1 | Out-Null
+          if ($failures) {
+            foreach ($file in $offLog, $log, $exitReport) { if (Test-Path $file) { Write-Host "----- $file"; Get-Content $file -Tail 40 } }
+            throw ($failures -join '; ')
+          }
+          Write-Host "Updated from 0.1.0 to $env:VERSION through the signed feed, at the idle point"
+          exit 0
+
+      # Pruebas unitarias del shell (#21): validaciones de rutas, notificaciones y login en Windows.
+      # #23: con la clave pública del instalador, para que una variable mal pegada falle acá.
+      - name: Shell unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: apps/desktop-tauri/src-tauri
+        env:
+          ORGTREE_TAURI_UPDATER_PUBKEY: ${{ steps.updater.outputs.pubkey }}
+        run: cargo test
+
+      - name: Report sizes
+        if: always()
+        shell: pwsh
+        run: |
+          "### Sizes" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe, src-tauri/target/release/orgtree-tauri.exe -ErrorAction SilentlyContinue |
+            ForEach-Object { "- {0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) } |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: orgtree-tauri-screens
+          path: ${{ runner.temp }}/screens/*.png
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orgtree-tauri-installer
+          path: apps/desktop-tauri/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  # Pre-release de la rama (#18), solo a pedido: el instalador que el job de
+  # Windows acaba de probar. No toca main ni los releases normales.
+  # #23: con la clave del updater (secreto TAURI_SIGNING_PRIVATE_KEY, su
+  # contraseña TAURI_SIGNING_PRIVATE_KEY_PASSWORD si tiene, y la variable
+  # TAURI_UPDATER_PUBKEY), firma el instalador, verifica la firma con la pública
+  # y publica latest.json en la pre-release móvil tauri-preview-latest, de donde
+  # leen las copias instaladas. Sin la clave publica igual, sin feed, y avisa.
+  prerelease:
+    needs: windows
+    if: github.event_name == 'workflow_dispatch' && inputs.prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: apps/desktop-tauri/tools
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: orgtree-tauri-installer
+          path: installer
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: tauri-preview-${{ github.run_number }}
+          FEED_TAG: tauri-preview-latest
+          VERSION: 0.1.${{ github.run_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          set -euo pipefail
+          # Un nombre de asset sin espacios: la URL del feed tiene que ser estable.
+          asset="orgtree-tauri-spike_${VERSION}_x64-setup.exe"
+          found=(installer/*.exe)
+          [ "${#found[@]}" -eq 1 ] || { echo "expected one installer, found: ${found[*]}"; exit 1; }
+          mv "${found[0]}" "installer/$asset"
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG/$asset"
+          feed=""
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && [ -n "$UPDATER_PUBKEY" ]; then
+            # La versión queda dentro de la firma: el feed no puede anunciar otra.
+            npx --yes @tauri-apps/cli@2.12.1 signer sign -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" --app-version "$VERSION" "installer/$asset" > /dev/null
+            python3 apps/desktop-tauri/tools/updater-feed.py make --installer "installer/$asset" --signature "installer/$asset.sig" \
+              --version "$VERSION" --url "$url" --notes "Orgtree Tauri, vista previa ${{ github.run_number }}" --out latest.json
+            # La firma tiene que verificar con la pública que llevan las copias instaladas.
+            python3 apps/desktop-tauri/tools/updater-feed.py verify --feed latest.json --installer "installer/$asset" \
+              --pubkey "$UPDATER_PUBKEY" --expect-version "$VERSION"
+            feed=latest.json
+            updates="Se actualiza sola desde las pre-releases siguientes de la rama (feed firmado \`$FEED_TAG\`): busca en segundo plano y solo instala con el motor y el usuario quietos, sin interrumpir un turno (issue #23)."
+          else
+            echo "::warning::No updater key (secret TAURI_SIGNING_PRIVATE_KEY and variable TAURI_UPDATER_PUBKEY): the pre-release is published without a signed feed and installed copies will not update from it. See docs/spikes/tauri.md (#23)."
+            updates="Esta vista previa no se actualiza sola: se publicó sin el feed firmado del updater."
+          fi
+          cat > notes.md <<'EOF'
+          Vista previa del shell de escritorio de Orgtree sobre **Tauri 2** (rama `spike/tauri`, issue #18). **No es un release oficial de Orgtree**: es una prueba de la migración desde Electron.
+
+          ## Qué incluye
+
+          - La app Tauri con el renderer React de Orgtree sin cambios.
+          - El motor Python de Orgtree con su runtime embebido (Python 3.13 y dependencias) y el mail hub.
+          - PostgreSQL 18 y `pg-custodian`: una raíz nueva arranca directamente sobre PostgreSQL, como el instalador de Electron.
+
+          ## Datos
+
+          La app usa su **propia raíz de datos**, `%LOCALAPPDATA%\com.kushro.orgtree.tauri-spike\data`, que se muestra en la ventana de arranque y en el ícono de la bandeja. Nunca abre ni convierte la de Orgtree instalado (`%APPDATA%\Orgtree v2\data`), y se instala para el usuario actual con su propio identificador, así que no pisa una instalación existente.
+
+          ## Instalación
+
+          Ejecutar el instalador (por usuario, sin permisos de administrador). No arrancarla como administrador: PostgreSQL se niega a correr con esos permisos. Requiere WebView2, que viene con Windows 11.
+          EOF
+          printf '\n## Actualizaciones\n\n%s\n' "$updates" >> notes.md
+          printf '\nVersión %s. Compilado y probado en el CI: %s (commit %s).\n' "$VERSION" "$RUN_URL" "$GITHUB_SHA" >> notes.md
+          assets=("installer/$asset")
+          [ -n "$feed" ] && assets+=("installer/$asset.sig" "$feed")
+          gh release create "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --prerelease --title "Orgtree Tauri, vista previa ${{ github.run_number }}" --notes-file notes.md
+          if [ -n "$feed" ]; then
+            # La pre-release móvil solo lleva el feed; las copias instaladas leen
+            # releases/download/tauri-preview-latest/latest.json, sin token.
+            if ! gh release view "$FEED_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              printf 'Feed del updater del spike de Tauri (#23): `latest.json` apunta a la última pre-release `tauri-preview-N` de la rama `spike/tauri`. No es un release de Orgtree ni tiene instalador.\n' > feed-notes.md
+              gh release create "$FEED_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+                --title "Orgtree Tauri, feed de actualizaciones" --notes-file feed-notes.md
+            fi
+            gh release upload "$FEED_TAG" "$feed" --repo "$GITHUB_REPOSITORY" --clobber
+            echo "Feed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$FEED_TAG/latest.json -> $VERSION"
+          fi
