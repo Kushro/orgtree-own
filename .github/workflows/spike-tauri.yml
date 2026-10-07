@@ -289,11 +289,16 @@ jobs:
 
       # #18: el instalador en una carpeta descartable, arrancado desde ahí con su
       # motor empaquetado (sin ORGTREE_TAURI_PYTHON) sobre una raíz descartable.
+      #
+      # La app instalada corre como un usuario local estándar creado para la prueba,
+      # como la corre una persona. El usuario del runner (runneradmin) es la cuenta
+      # Administrador integrada (RID 500): su SID se abrevia "LA" en SDDL, y la
+      # verificación de ACL de pg-custodian (prototype-guard, acl.rs) compara el SID
+      # completo con ese alias y rechaza sus propias carpetas de secretos
+      # (acl.not_owner_only, run 37574867250). No se cambia el producto: queda
+      # documentado en docs/spikes/tauri.md.
       - name: Install and run the standalone installer (packaged engine on PostgreSQL)
         shell: pwsh
-        env:
-          ORGTREE_TAURI_DATA: ${{ runner.temp }}\orgtree-tauri-installed-data
-          ORGTREE_TAURI_INSTALL_PROBE: ${{ runner.temp }}\orgtree-tauri-install-probe.json
         run: |
           foreach ($name in 'ORGTREE_TAURI_PYTHON', 'ORGTREE_TAURI_ENGINE_DIR', 'ORGTREE_TAURI_UI_DIR', 'ORGTREE_TAURI_PROBE') {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
@@ -302,7 +307,6 @@ jobs:
           function Strip-Long($path) { "$path".Replace('\\?\', '').TrimEnd('\') }
           $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
           $dir = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-installed'
-          $data = $env:ORGTREE_TAURI_DATA
           # NSIS: /D= tiene que ser el último argumento y sin comillas.
           $setup = Start-Process -FilePath $installer.FullName -ArgumentList '/S', "/D=$dir" -PassThru -Wait
           if ($setup.ExitCode -ne 0) { throw "the installer exited with code $($setup.ExitCode)" }
@@ -325,10 +329,33 @@ jobs:
             $bitmap.Save("$env:RUNNER_TEMP\screens\$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
             $graphics.Dispose(); $bitmap.Dispose()
           }
+          # Usuario estándar descartable (sin privilegios de administrador).
+          $user = 'orgtreeci'
+          $password = 'Ot-' + [guid]::NewGuid().ToString('N').Substring(0, 20) + '!9a'
+          net user $user $password /add /y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "could not create the local user $user" }
+          $credential = New-Object System.Management.Automation.PSCredential($user, (ConvertTo-SecureString $password -AsPlainText -Force))
+          $sid = (New-Object System.Security.Principal.NTAccount($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+          # Crear su perfil antes de arrancar la app, para darle su propio entorno.
+          Start-Process cmd.exe -ArgumentList '/c', 'exit' -Credential $credential -LoadUserProfile -Wait -WorkingDirectory $env:SystemRoot
+          $profileDir = (Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid }).LocalPath
+          if (-not $profileDir) { throw "no profile for $user" }
+          Write-Host "Running the installed app as $user ($sid, profile $profileDir)"
+          $work = Join-Path $env:RUNNER_TEMP 'orgtree-tauri-user'
+          New-Item -ItemType Directory -Force $work, (Join-Path $work 'tmp') | Out-Null
+          icacls $work /grant "${user}:(OI)(CI)F" | Out-Null
+          icacls $dir /grant "${user}:(OI)(CI)RX" | Out-Null
+          $data = Join-Path $work 'data'
+          $env:ORGTREE_TAURI_DATA = $data
+          $env:ORGTREE_TAURI_INSTALL_PROBE = Join-Path $work 'install-probe.json'
+          $env:USERPROFILE = $profileDir
+          $env:APPDATA = Join-Path $profileDir 'AppData\Roaming'
+          $env:LOCALAPPDATA = Join-Path $profileDir 'AppData\Local'
+          $env:TEMP = Join-Path $work 'tmp'; $env:TMP = $env:TEMP
           $started = Get-Date
-          $p = Start-Process -FilePath $exe.FullName -PassThru
+          $p = Start-Process -FilePath $exe.FullName -Credential $credential -LoadUserProfile -WorkingDirectory $dir -PassThru
           $splash = $false
-          $deadline = $started.AddSeconds(600)
+          $deadline = $started.AddSeconds(420)
           while (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE) -and (Get-Date) -lt $deadline -and -not $p.HasExited) {
             # La ventana de arranque muestra la raíz de datos mientras PostgreSQL arranca.
             if (-not $splash -and ((Get-Date) - $started).TotalSeconds -ge 4) { try { Save-Screen 'installed-splash' } catch { Write-Host "screenshot: $_" }; $splash = $true }
@@ -338,7 +365,7 @@ jobs:
           Start-Sleep -Seconds 2
           try { Save-Screen 'installed-app' } catch { Write-Host "screenshot: $_" }
           if ($p.HasExited) { $failures += "the installed app exited early with code $($p.ExitCode)" }
-          if (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE)) { $failures += 'the install probe did not report within 600 s' }
+          if (-not (Test-Path $env:ORGTREE_TAURI_INSTALL_PROBE)) { $failures += 'the install probe did not report within 420 s' }
           else {
             $raw = Get-Content $env:ORGTREE_TAURI_INSTALL_PROBE -Raw
             Write-Host "Install probe: $raw"
@@ -396,9 +423,9 @@ jobs:
             $env:ORGTREE_PG_CUSTODIAN = Join-Path $dir 'engine\pg-custodian.exe'
             $env:ORGTREE_P03_PG_BIN = Join-Path $dir 'engine\postgresql\bin'
             $env:ORGTREE_V2_UI_DIR = Join-Path $dir 'ui'
-            $out = Join-Path $env:RUNNER_TEMP 'manual-engine.out'; $err = Join-Path $env:RUNNER_TEMP 'manual-engine.err'
+            $out = Join-Path $work 'manual-engine.out'; $err = Join-Path $work 'manual-engine.err'
             $manual = Start-Process -FilePath (Join-Path $dir 'engine\runtime\python.exe') -ArgumentList (Join-Path $dir 'engine\launch.py') `
-              -WorkingDirectory (Join-Path $dir 'engine') -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+              -WorkingDirectory (Join-Path $dir 'engine') -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow -Credential $credential -LoadUserProfile
             if (-not $manual.WaitForExit(120000)) { taskkill /PID $manual.Id /T /F | Out-Null; Write-Host 'manual engine still running after 120 s' }
             else { Write-Host "manual engine exited with $($manual.ExitCode)" }
             Write-Host '----- manual engine stdout'; Get-Content $out -Tail 60
