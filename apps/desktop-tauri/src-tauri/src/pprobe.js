@@ -173,11 +173,22 @@ window.__pprobe = window.__pprobe || (() => {
     // popout (MovableSurface.borrow), que se cierra con window.close().
     async tempDesk() {
       const r = {};
-      const fit = [...document.querySelectorAll('#root button')].find(b => b.querySelector('[data-testid="FullscreenIcon"]'));
+      // Fuera de la vista de desk: la tarjeta solo tiene menú si no es el desk enfocado.
+      // (Los íconos de MUI no llevan data-testid en producción: se buscan por título.)
+      const fit = document.querySelector('#root button[title="fit the whole org"]');
       r.fit = !!fit;
       if (fit) { fit.click(); await pause(1500) }
-      const card = leaf('worker');
-      if (!card) return { ...r, error: 'sin tarjeta del agente' };
+      let card = await waitFor(() => leaf('worker'), 5000);
+      for (let i = 0; !card && i < 3; i++) {
+        const out = document.querySelector('#root button[title="zoom out"]');
+        if (out) { out.click(); await pause(800) }
+        card = leaf('worker');
+      }
+      if (!card) {
+        r.candidates = [...document.querySelectorAll('#root *')].filter(el => el.children.length < 3 && /worker/.test(el.textContent))
+          .slice(0, 8).map(el => el.tagName + '.' + String(el.className).slice(0, 40) + ':' + el.textContent.trim().slice(0, 30));
+        return { ...r, error: 'sin tarjeta del agente' };
+      }
       const c = card.getBoundingClientRect();
       card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, buttons: 2,
         clientX: c.x + c.width / 2, clientY: c.y + c.height / 2, view: window }));
@@ -213,7 +224,8 @@ window.__pprobe = window.__pprobe || (() => {
     // El modal de Usage, anclado a la ventana: queda encima y en su lugar.
     async modalPin() {
       const r = {};
-      const open = [...document.querySelectorAll('#root button')].find(b => b.querySelector('[data-testid="DataUsageIcon"]'));
+      const open = [...document.querySelectorAll('#root button[title^="usage"]')].find(b => b.offsetParent !== null)
+        || document.querySelector('#root button[title^="usage"]');
       if (!open) return { error: 'sin botón de Usage' };
       open.click();
       const panel = await waitFor(() => document.querySelector('.usage-modal'), 10000);
