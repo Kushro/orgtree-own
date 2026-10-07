@@ -17,6 +17,7 @@ Se reemplazan la capa de escritorio y el renderer React por Dioxus. El motor Pyt
 | 7 | #14 Ventana sin marco, bandeja y notificación | Integración nativa básica |
 | 8 | #24 Instalador autónomo con motor, runtime y PostgreSQL | Instalar y usar sin preparar nada |
 | 9 | #26 Organigrama y operaciones sobre agentes en RSX | Una vista con estado, menú y operaciones reales |
+| 10 | #27 Desk completo en RSX | El desk de #12 en uso real: compositor, contenido y estado del turno |
 
 ## Decisiones de diseño ya tomadas
 
@@ -105,7 +106,7 @@ Lógica de rendimiento que hubo que rediseñar:
 | `nudge` (refrescar `/chat` 200 ms después de un frame durable) | Un frame durable, `turn_done` o una reconexión vuelve a pedir la última página y la fusiona |
 | Seguir el final mientras llega texto | Igual: si se está mirando el final, el texto en vivo lo sigue |
 
-Fuera del recorte: pensamiento (`thinking`), filas de mail y avisos, segmentos, respuestas citadas, adjuntos y el compositor para escribirle al agente.
+Fuera del recorte de #12, y hechos en #27: pensamiento (`thinking`), filas de mail y avisos, segmentos, respuestas citadas, adjuntos y el compositor para escribirle al agente.
 
 **Verificado en WebView2** con la prueba de `ORGTREE_DIOXUS_PROBE` y el motor de fixture (1.200 mensajes, frames en vivo y un mensaje con Markdown y un `<img onerror>` inyectado):
 
@@ -288,7 +289,63 @@ El CI sube las capturas `chart-hire` (el diálogo de contratación), `chart-menu
 
 **Líneas** (sin comentarios ni líneas en blanco): `org.rs` 826 y la parte nueva de `home.rs` (crear y borrar) unas 100. Los archivos TSX equivalentes suman 852: `agentmenu.tsx` 232, `contextmenu.tsx` 338, `agenttray.tsx` 116, `treeinfo.tsx` 72, `orgrows.tsx` 55 y `haltcontrol.tsx` 39. A eso se suman las partes dentro de archivos grandes (la barra de la org en `App.tsx`, `NewOrg`, `ConfirmModal`, el borrador y el arrastre de `OrgCanvas.tsx` y `cards.tsx`), que no se pueden aislar. El TSX hace bastante más: submenús, navegación por teclado, pins y popouts, compactación, cuentas y filtros. El RSX es más largo por línea de marcado (cada atributo en su línea) y no comparte tipos con el motor: los toma del cliente Rust.
 
-El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluido el organigrama de #26), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
+### Desk completo (#27)
+
+`src/desk.rs` lleva el desk de #12 a uso real, siguiendo `canvas/desk.tsx`, `convo.ts`, `events/segments.tsx`, `replypreview.tsx`, `haltcontrol.tsx`, `effort.tsx` y `api.ts`, con las mismas clases y el mismo CSS del renderer.
+
+**Compositor.** Los mismos endpoints y cuerpos que `api.ts`:
+
+| Acción | Endpoint | Como en el renderer |
+|---|---|---|
+| Enviar (Enter; Shift+Enter es un salto de línea) | `POST /nodes/{nid}/message` `{text, client_op}` | La burbuja optimista mientras viaja, el aviso de `flashMode` con su orden (`delivering`, `queued (N ahead)`, `halted — mail stays unread until unhalt`…) y el mail pendiente con ✕ para retirarlo (`DELETE /nodes/{nid}/mail/{mid}`) |
+| STOP | `POST /nodes/{nid}/interrupt` | Solo aparece con una respuesta en curso (`responding`); Enter sigue encolando |
+| Modelo | `POST /ops` `{op:'switch_model', node, tier}` | Un clic dentro del mismo proveedor y fuera de un turno. A mitad de turno queda en cola (`→S` en el header) y pide confirmación; a otro proveedor es una división de linaje y pide confirmación, con los textos de `modals.tsx`. Elegir el modelo actual cancela el cambio en cola |
+| Esfuerzo | `POST /nodes/{nid}/scope` `{effort}` | El botón chico y la pista de cinco puntos en un popover, optimista, con el aviso de `effortChangeToast` |
+
+Un mensaje es mail y nunca interrumpe un turno: el desk no llama a `interrupt` al enviar, y el motor lo deja en el buzón para el próximo límite seguro. El borrador sigue compartido entre ventanas (#13). El renderer ubica el selector de modelo en el panel de ajustes del agente; acá está en el compositor, porque el recorte no tiene ese panel.
+
+**Contenido de la conversación:**
+
+- pensamiento plegado (`thought for 5s ▸`) o sellado, cuando el proveedor no mandó el texto;
+- los segmentos de un mensaje del usuario (`Segment` tipado en el cliente): texto, mail, avisos y contexto de máquina, sin las variantes que el transcript humano oculta (`HUMAN_HIDDEN_VARIANTS`). Una forma desconocida muestra el texto, como `isSegments`;
+- la tarjeta de mail de `MailMessage` para el mail entregado y el pendiente: tipo, remitente, hora, respuesta citada (`ReplyPreview`, con el salto al original si está cargado) y adjuntos;
+- chips de herramientas con el resultado plegado, la salida de comandos y el resumen de una compactación;
+- las horas en la zona local del webview (`fmtFull`), nunca el ISO del motor.
+
+**Archivos: revelar, nunca abrir** (`src/reveal.rs`). Un enlace a un archivo de Windows en el Markdown queda inerte, con la ruta en `data-local-path`, como `winFileHref`. Un clic lo revela con `explorer /select,` si la ruta es absoluta y existe (las validaciones de `desktop:reveal-file`); si no, la ruta se muestra como texto en un aviso. Los adjuntos del mail traen rutas relativas a la carpeta del agente, así que también se muestran como texto. Antes de convertir el Markdown, las barras de esos destinos se normalizan, como `escapeProse`: CommonMark toma `\_` como escape y `D:\a\_temp` llegaría como `D:\a_temp` (lo cubre un test).
+
+**Estado del turno**, con la precedencia de `deriveTurnState` y `TurnStatusBanner`: activo, en cola por el límite de turnos (con el aviso de `TurnSlotQueuedBanner`; el botón de ajustes aparece deshabilitado porque los ajustes de la app están fuera del recorte), compactando, detenido (la insignia de `HaltStatus`, el aviso de `HaltedBanner` y `HaltControl` para detener y reanudar) e inactivo, o el último estado que informó el agente. El desk pide el agente al árbol al abrir y en cada `changed` o `node_event`, sin sondeo.
+
+**Bloqueo del framework y cómo se rodeó.** Dioxus desktop manda el `href` de cualquier `<a>` clicado a `webbrowser::open` (`handleClickNavigate` del intérprete), aunque la página haya llamado a `preventDefault`: solo mira si el VirtualDom lo previno. En el CI, el clic en un enlace a un archivo (`href="#"`) abrió Edge, que tapó la ventana y rompió la prueba de arrastre. Con una ruta relativa podía lanzar un programa, justo lo que la regla de revelar quiere evitar. El desk corta el clic en la captura (`stopPropagation`) antes de que llegue al listener de Dioxus: un archivo local se revela y un enlace externo o relativo se muestra como texto para copiarlo. El CI falla si durante la prueba se abre un navegador.
+
+**Cliente Rust.** Suma `send_message` (`SendMessage`, `SendResult` con el texto de `flashMode`), `save_scope`, `retract_mail`, `OpRequest::switch_model` y los tipos del contenido (`Segment`, `MailRow`, `NoticeRow`, `Attachment`, `PendingSwitch`). `tests/ops.rs` prueba los pedidos contra el servidor falso: ruta, verbo, cuerpo y token.
+
+**Motor de fixture.** Sin tocar `engine/`:
+
+- siembra al final de la conversación un mensaje con mail (respuesta citada y un adjunto), un estado y un aviso, como la proyección que escribe el motor al admitir un turno (`_record_prompt_view`), y una respuesta con pensamiento y enlaces a un archivo que existe, uno que no, una URL y una ruta relativa;
+- el envío pasa por la puerta real (`send_message` y la admisión de halt), pero el cuerpo no arranca un turno: el mail queda aceptado en el buzón, y un agente detenido lo retiene hasta reanudarlo;
+- `POST /api/fixture/turn-state` simula un turno en cola o en curso y avisa por el WebSocket.
+
+**Verificado en WebView2** (run [37593345025](https://github.com/Kushro/orgtree-own/actions/runs/37593345025)):
+
+- el mail de `User` y de `jefe` con la negrita, la respuesta citada, el adjunto, el aviso y el texto del segmento; el pensamiento se despliega;
+- el adjunto (`Not an absolute path: uploads/informe.txt`) y el archivo inexistente (`No such file: C:\orgtree-fixture-no-existe\falta.log`) se muestran como texto; la URL y la ruta relativa también, y no se abre ningún navegador;
+- inactivo, en cola con `the agent concurrency limit (16) is reached…`, activo con STOP (el motor responde que no hay una llamada al proveedor), e inactivo otra vez;
+- enviar a mitad de turno deja el mensaje en el buzón (`queued (1 ahead)`), el turno sigue activo y el compositor se vacía;
+- el cambio a `sonnet` a mitad de turno pide `queue worker's switch to sonnet?`, queda en cola (`→S` y el aviso del motor) y elegir `haiku` lo cancela; a `sol` pide `move worker from Claude to Codex?` con la división de linaje, y cancelar no cambia nada; fuera de un turno, `sonnet` y de vuelta `haiku` son un clic;
+- el esfuerzo pasa de `high` (heredado) a `low` con `applies from its next turn`;
+- detener muestra la insignia, el aviso y Unhalt; un envío queda `halted — mail stays unread until unhalt`; reanudar vuelve a inactivo;
+- revelar `informe.txt` abre el Explorador en `D:\a\_temp\orgtree-dioxus-smoke-fixture-files` (lo confirma `Shell.Application`).
+
+La prueba de scroll de #12 sigue igual y fluida: 1.206 filas (del mensaje 1 al 1200 más el contenido nuevo), 4 páginas anteriores en 859 ms, y en el scroll de punta a punta (42.213 px, 257 cuadros) un promedio de 15,6 ms por cuadro, p95 15,7 ms, máximo 15,8 ms y ninguno sobre 50 ms. Los tests de `src/desk.rs` y `src/reveal.rs` (Markdown y enlaces, revelado, hora local, esfuerzo) corren en el CI.
+
+Capturas por marcador: `desk-content` (mail, aviso, pensamiento y enlaces), `desk-queued` (en cola por el límite), `desk-halted` (detenido, con los envíos pendientes) y `reveal` (el Explorador con la carpeta del archivo).
+
+Fuera del recorte: subir adjuntos desde el compositor, responder citando un mensaje, el aviso pasivo (Alt+N), el historial del compositor, las pestañas de inbox, docket e historial, y la tarjeta de cada variante de evento (`EventCard`): el desk muestra el tipo y el cuerpo.
+
+**Líneas** (sin comentarios, líneas en blanco ni tests): `desk.rs` 1.281 y `reveal.rs` 86, frente a 241 del `desk.rs` de #12. Lo equivalente en TSX suma 4.218: `desk.tsx` 3.003, `convo.ts` 890, `events/segments.tsx` 132, `effort.tsx` 62, `mailpreview.tsx` 61, `haltcontrol.tsx` 39 y `replypreview.tsx` 31, más las partes que no se pueden aislar (el cambio de modelo en `modals.tsx`, `md()` y el revelado en `canvas/shared.ts`, `EventCard`). El TSX sigue haciendo más (ver arriba), y en RSX cada atributo va en su línea.
+
+El workflow `.github/workflows/spike-dioxus.yml` hace lo mismo en `windows-latest` en cada push a `spike/dioxus`: compila el instalador NSIS, corre la prueba en WebView2 con el motor de fixture (incluidos el organigrama de #26 y el desk completo de #27), instala el instalador y prueba la app instalada (#24), informa tamaños en el resumen del run y sube el instalador como artefacto `orgtree-dioxus-installer`.
 
 La app se instala por usuario con su propio identificador (`com.kushro.orgtree.dioxus-spike`), así que no pisa una instalación de Orgtree existente.
 
